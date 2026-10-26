@@ -8,6 +8,8 @@ Read this whole doc before planning; it records every decision made so far, so C
 
 **Status (2026-10-22):** architecture decided. Spike 1's headless model passes its tests. Spike 2's harness is written but has not been run against the real Mermaid crates. No application code exists yet.
 
+**Update (2026-10-26):** Spikes 1 and 2 have been rebuilt and run in this repo, and their results supersede this doc's spike sections. See `spikes/SPIKES.md`. Spike 1: Live Preview is feasible for inline syntax, with IME still to verify (#27). Spike 2: merman without ELK is the provisional renderer.
+
 **Rules for the implementer**
 
 - Items marked **Decided** stay as written unless the user changes them; items marked **Open** need the user's input before work starts.

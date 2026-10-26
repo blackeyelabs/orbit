@@ -13,7 +13,9 @@ copy_workspace() {
   local dest="$1"
   mkdir -p "$dest"
   cp "$root/Cargo.toml" "$root/Cargo.lock" "$dest/"
-  cp -r "$root/crates" "$root/spikes" "$dest/"
+  cp -r "$root/crates" "$dest/"
+  # Spikes without build output (spike2-mermaid's own target/ is large).
+  tar -C "$root" --exclude=target --exclude=output -cf - spikes | tar -C "$dest" -xf -
 }
 
 # Adds gpui-kit as a normal dependency of the given crate in a copy.

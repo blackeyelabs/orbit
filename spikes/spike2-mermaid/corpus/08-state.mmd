@@ -1,0 +1,6 @@
+stateDiagram-v2
+  [*] --> Locked
+  Locked --> Unlocked : passphrase
+  Unlocked --> Locked : lock / idle / suspend
+  Unlocked --> Unlocked : edit
+  Locked --> [*]

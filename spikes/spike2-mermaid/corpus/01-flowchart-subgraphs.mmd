@@ -1,0 +1,10 @@
+flowchart LR
+  subgraph Capture
+    A[Idea] --> B[Write note]
+  end
+  subgraph Connect
+    C[Link notes] --> D{Backlinks?}
+  end
+  B --> C
+  D -- yes --> E[Graph]
+  D -- no --> C

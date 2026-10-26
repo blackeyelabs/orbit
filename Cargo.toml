@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/*", "spikes/spike1-*"]
+# Alpha Mermaid crates stay out of the main lockfile.
+exclude = ["spikes/spike2-mermaid"]
 
 [workspace.package]
 version = "0.1.0"

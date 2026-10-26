@@ -1,0 +1,18 @@
+classDiagram
+  class Vault {
+    +PathBuf root
+    +open(path) Vault
+    +notes() Vec~Note~
+  }
+  class Note {
+    +String title
+    +Vec~Tag~ tags
+    +links() Vec~Link~
+  }
+  class Link {
+    +String target
+    +Option~NoteId~ resolved
+  }
+  Vault "1" *-- "*" Note
+  Note "1" o-- "*" Link
+  ProtectedFolder --|> Folder

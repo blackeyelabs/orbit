@@ -1,0 +1,8 @@
+flowchart TD
+  classDef warn fill:#fde68a,stroke:#b45309,stroke-width:2px
+  classDef done fill:#bbf7d0,stroke:#15803d
+  A[Draft]:::warn --> B[Review]
+  B --> C[Published]:::done
+  B -.-> A
+  linkStyle 2 stroke:#dc2626,stroke-dasharray:4
+  style B fill:#e0e7ff,stroke:#4338ca

@@ -1,0 +1,15 @@
+erDiagram
+  NOTE ||--o{ LINK : contains
+  NOTE }o--o{ TAG : tagged
+  NOTE {
+    string id PK
+    string path
+    string title
+  }
+  LINK {
+    string src FK
+    string target
+  }
+  TAG {
+    string name PK
+  }

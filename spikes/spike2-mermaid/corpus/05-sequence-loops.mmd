@@ -1,0 +1,15 @@
+sequenceDiagram
+  participant U as User
+  participant O as Orbit
+  participant D as Disk
+  U->>O: Edit note
+  loop Every 2s while typing
+    O->>D: Debounced save
+    D-->>O: ok
+  end
+  alt Changed on disk
+    O->>U: Load theirs / Keep mine
+  else No conflict
+    O-->>U: Saved
+  end
+  Note over O,D: Atomic write (temp, fsync, rename)

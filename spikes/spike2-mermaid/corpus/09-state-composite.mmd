@@ -1,0 +1,12 @@
+stateDiagram-v2
+  [*] --> Editing
+  state Editing {
+    [*] --> Clean
+    Clean --> Dirty : type
+    Dirty --> Saving : debounce
+    Saving --> Clean : ok
+    Saving --> Failed : error
+    Failed --> Saving : retry
+  }
+  Editing --> Closed : close tab
+  note right of Editing : Edits stay in memory on failure

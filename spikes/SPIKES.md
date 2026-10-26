@@ -93,3 +93,81 @@ Run `cargo run -p spike1-gpui` on Wayland. The window shows a heading line and t
 - **Route for Phase 2:** keep this model and approach 1's input handler, and prototype rendering through `editor_host` so block widgets (tables, images, code, Mermaid) and per-block heading sizes come from Kit. The Editor decoration/token route is ruled out.
 - **Unchanged:** the MVP ships the Split view (issue #1), whatever this spike found.
 - **Fonts:** Orbit must bundle and name its fonts. The default `.SystemUIFont` on Linux won't switch to bold or italic faces (#8).
+
+## Spike 2: Mermaid renderer bake-off (#4)
+
+**Question:** which pure-Rust Mermaid renderer should Orbit use? Decision rule from the design doc: best score on the diagram types the user actually uses; ties go to the one that outputs SVG. It must handle dark theme and CJK, render large diagrams in reasonable time, and return an error for invalid input rather than panicking.
+
+### What's here
+
+`spikes/spike2-mermaid` is a standalone cargo project, excluded from the workspace so these alpha crates never enter Orbit's `Cargo.lock`. Each renderer sits behind its own feature, and each builds on its own.
+
+```sh
+cd spikes/spike2-mermaid
+cargo run --release --features merman,rusty-mermaid,mmdr   # writes output/
+cargo test                                                 # harness logic, 6 tests
+```
+
+- The harness runs every renderer on every diagram, light and dark, one thread per render. A panic is caught, and a render still running after 20 s is recorded as a timeout and abandoned: its thread keeps running until the process exits, and a stack overflow would still abort the run. It writes `output/out/<renderer>/<diagram>-<theme>.svg`, a resvg PNG of each (how Orbit would draw them), `output/results.csv`, `output/raster-failures.txt` (empty in the final run) and `output/gallery.html`. The gallery shows the PNGs, each linking to its SVG.
+- The corpus is 16 diagrams in `corpus/`. That's the doc's 13 kinds, with flowchart split into subgraphs, styling and shapes, plus a composite state diagram. The kinds are: three flowchart variants (subgraphs, styling, shapes), Unicode/CJK labels, sequence with loop and alt, class, ER, state, composite state, Gantt, mindmap, pie, journey, git graph, one invalid input, and a 120-node flowchart. `corpus/user/` is for the user's own diagrams. **It's empty, so the pick below is provisional.**
+- `results.csv` holds the final run's numbers.
+
+### Real APIs (the design doc's guesses were unverified)
+
+| Crate | Version | Call | Dark theme |
+|---|---|---|---|
+| `merman` | 0.9.2 (alpha) | `Renderer::new().render(RenderRequest::svg(src, OperationControl::new(), SvgRequest::default()))` → `RenderOutput::Svg(Some(out))`, `out.svg()` | Mermaid init directive `%%{init: {"theme": "dark"}}%%` |
+| `rusty-mermaid` | 0.2.0 | `to_svg(src, &Theme::light())` (feature `svg`); also has a native `gpui` module | `Theme::dark()` |
+| `mermaid-rs-renderer` (`mmdr`) | 0.3.1 | library call `render_strict(src, RenderOptions { theme, .. })`; no subprocess needed | `Theme::dark()` |
+
+### Results
+
+Automated (final run, light theme, `results.csv`):
+
+| | merman (no ELK) | rusty-mermaid | mmdr |
+|---|---|---|---|
+| Valid diagrams rendered | 15/15 | 15/15 | 15/15 |
+| **Invalid input** | **error**: "Diagram parse error (flowchart-v2): Unterminated…" | **renders a box labelled "A"** | **error**, but reports line 1, col 1 |
+| Panics / timeouts | 0 | 0 | 0 |
+| 120-node flowchart | 16 ms | 90 ms | 623 ms |
+| Diagram families (claimed) | 35 (`all-diagrams` feature list) | 25 (README) | 23 (crate description) |
+
+Visual score per diagram (0 wrong, 1 flawed, 2 correct), judged from resvg PNGs:
+
+| Diagram | merman | rusty-mermaid | mmdr | Notes |
+|---|---|---|---|---|
+| Flowchart: subgraphs | 2 | 2 | 2 | |
+| Flowchart: styling | 2 | 2 | 2 | All apply `classDef`, `style` and `linkStyle` |
+| Flowchart: shapes | 2 | 2 | 1 | mmdr draws `((circle))` as a double circle and flips the flag |
+| Flowchart: Unicode/CJK | 2 | 2 | 2 | |
+| Flowchart: 120 nodes | 2 | 1 | 2 | rusty is dense, with long crossing edges. merman *with* ELK spread layers very wide |
+| Sequence | 2 | 2 | 1 | mmdr's `alt` frame overruns and overlaps the note |
+| Class | 1 | 1 | 0 | merman: inheritance shows a plain arrowhead, aggregation a filled diamond. rusty: `Vec~T~` generics not converted. mmdr: tiny, scattered, generics not converted |
+| ER | 2 | 2 | 2 | |
+| State | 2 | 2 | 1 | mmdr layout sprawls |
+| State: composite | 2 | 2 | 1 | mmdr's note and labels overlap the frame |
+| Gantt | 2 | 2 | 1 | mmdr's section names collide with task names |
+| Mindmap | 2 | 1 | 2 | rusty prints the root literally as `root((Orbit))` |
+| Pie | 2 | 2 | 2 | |
+| Journey | 2 | 2 | 1 | mmdr drops the satisfaction faces and staggers sections |
+| Git graph | 2 | 1 | 1 | rusty overlaps commit labels. mmdr clips the branch label |
+| **MVP types** (flowchart, sequence, class, ER, state, Gantt, mindmap, pie) | **15/16** | 13/16 | 10/16 | Flowchart counted once (min of variants), state once |
+
+The tie-break (prefer SVG output) decides nothing: all three output SVG.
+
+Dark theme works in all three. merman's dark Gantt has low-contrast labels on some bars.
+
+### Findings that shape the integration
+
+- **merman's labels are HTML by default.** It mirrors mermaid.js's `htmlLabels: true`, so labels are `<foreignObject>` HTML that resvg can't draw (blank boxes). Orbit must always set `htmlLabels: false` (through the init directive). Mindmap and journey still emit HTML labels anyway, as mermaid.js does, so Orbit must also pass merman's SVG through `merman::svg::foreign_object_label_fallback_svg_text`, which adds a `<text>` overlay. With both, every label renders.
+- **License: drop ELK.** merman's default features include an ELK layout engine under **EPL-2.0** (redistribution needs EPL notices). With `default-features = false, features = ["all-diagrams", "complete-svg"]`, ELK is gone from the dependency tree, all diagrams still render, and the layout is as good or better: the 120-node flowchart became readable and the composite-state note stopped truncating. The harness uses this configuration.
+- **Class-diagram markers** (merman): inheritance and aggregation markers look wrong in both configurations. Check whether that's merman or resvg's marker support before Phase 1 relies on class diagrams.
+- **rusty-mermaid's native GPUI canvas** is attractive (crisp vector drawing with no SVG step), but it's disqualified by drawing invalid input instead of erroring, and by the weaker mindmap and git graph results.
+
+### Recommendation (provisional)
+
+**merman 0.9.2 without ELK, rendered to SVG and rasterized with resvg**, pinned exactly. That matches the design doc's lean.
+- It renders all 8 guaranteed MVP types (15/16), is the fastest by far, errors with a clear message on bad input, and has the widest family coverage.
+- Integration requirements for `diagrams`: set `htmlLabels: false`, apply the foreign-object fallback, pin the version (it's an alpha), and render on a background thread as planned.
+- **Runner-up:** mmdr. It's a good fallback behind the same `DiagramRenderer` trait, but it's weaker on class, sequence and Gantt, and about 40× slower on large graphs.
+- **Provisional until** `corpus/user/` holds 20–30 of the user's real diagrams and they're scored the same way.
