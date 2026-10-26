@@ -74,11 +74,11 @@ Run `cargo run -p spike1-gpui` on Wayland. The window shows a heading line and t
 | # | Pass/fail | Notes |
 |---|---|---|
 | 1 | **Pass** (2026-10-26, from screenshots) | Concealment correct: `##`, link and wikilink syntax hidden, alias shown. After naming the font families (GPUI's default `.SystemUIFont` on Linux doesn't switch faces), bold, italic, heading (bold, not larger), code (JetBrains Mono), strikethrough and links all render. Newly typed `**bold text**`, `_this italic_`, `*italic*` and `[google](…)` concealed and styled live. A caret at source 329 (just after a `\n`) is drawn at the start of the next line, which is correct |
-| 2 | | |
+| 2 | **Pass** (2026-10-26, user) | Reveal on caret works: only the touched span's markers appear, and they hide again when the caret leaves |
 | 3 | | |
-| 4 | | |
+| 4 | **Pass** (2026-10-26, user) | Left/Right through `**bold**`: markers appear as the caret touches the span and it steps through them one character at a time |
 | 5 | | |
-| 6 | | |
+| 6 | **Pass** (2026-10-26, user) | Soft wrap: the paragraph wraps at the window width, and Up/Down move between visual lines |
 | 7 | | |
 | 8 | | |
 | 9 | | |
