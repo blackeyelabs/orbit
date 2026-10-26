@@ -133,6 +133,7 @@ fn a_save_that_fails_after_writing_its_temporary_file_cleans_up() {
     let names: Vec<_> = fs::read_dir(dir.path())
         .unwrap()
         .map(|e| e.unwrap().file_name())
+        .filter(|name| name != ".vault")
         .collect();
     assert_eq!(names, ["blocked.md"], "a temporary file was left behind");
     assert!(dir.path().join("blocked.md/inside").is_dir());

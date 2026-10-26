@@ -151,6 +151,8 @@ pub struct NoteEditor {
     /// Shown with a failed save: where Save elsewhere put a copy.
     saved_elsewhere: Option<SharedString>,
     autosave: Option<Task<()>>,
+    /// The scroll restored from the session, until the editor is laid out.
+    restored_scroll: Option<f32>,
     _subscription: Subscription,
 }
 
@@ -191,6 +193,7 @@ impl NoteEditor {
             reload: None,
             saved_elsewhere: None,
             autosave: None,
+            restored_scroll: None,
             _subscription: subscription,
         }
     }
@@ -255,6 +258,26 @@ impl NoteEditor {
             self.mode.label()
         )
         .into()
+    }
+
+    /// How far the source is scrolled, in pixels from the top.
+    pub fn scroll(&self, cx: &App) -> f32 {
+        let source = self.source.read(cx);
+        // Before its first layout (a restored tab never shown), the editor
+        // hasn't taken the scroll it was given yet.
+        match (source.line_height(), self.restored_scroll) {
+            (None, Some(scroll)) => scroll,
+            // Offsets grow negative downwards; `+ 0.` turns -0 into 0.
+            _ => f32::max(0., -f32::from(source.scroll_offset().y)) + 0.,
+        }
+    }
+
+    /// Scrolls the source, from the next layout on.
+    pub fn set_scroll(&mut self, scroll: f32, cx: &mut Context<Self>) {
+        self.restored_scroll = Some(scroll);
+        self.source.update(cx, |source, cx| {
+            source.set_scroll_offset(point(px(0.), px(-scroll)), cx)
+        });
     }
 
     /// Moves keyboard focus to the source pane.

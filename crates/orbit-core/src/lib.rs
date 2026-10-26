@@ -5,22 +5,33 @@
 //! Neither has a GPUI dependency.
 
 mod open_note;
+mod recent;
+mod session;
 mod settings;
 
 use open_note::DiskVersion;
 pub use open_note::{DiskCheck, OpenNote, Trouble};
 
+pub use recent::{RecentVault, RecentVaults};
+pub use session::{Session, SessionTab};
 pub use settings::{Settings, ThemeChoice, default_config_dir};
 
-use std::{io, path::Path};
+use session::SessionFile;
+use std::{
+    io,
+    path::{Path, PathBuf},
+};
 
 pub use orbit_fs::VaultPath;
 pub use orbit_fs::Watch;
-use orbit_fs::{EntryType, PROTECTED_STORAGE_DIR, PlainFs, VaultFs};
+use orbit_fs::{EntryType, ORBIT_DIR, PROTECTED_STORAGE_DIR, PlainFs, VaultFs, VaultLock};
 
 /// Folders that belong to tools, not to the vault's content: Orbit's own
 /// cache, Obsidian's settings, git, and protected-folder storage.
-const TOOL_FOLDERS: &[&str] = &[".vault", ".obsidian", ".git", PROTECTED_STORAGE_DIR];
+const TOOL_FOLDERS: &[&str] = &[ORBIT_DIR, ".obsidian", ".git", PROTECTED_STORAGE_DIR];
+
+/// Session state, in Orbit's folder.
+const SESSION_FILE: &str = "session.json";
 
 /// A backstop against pathological nesting; PlainFs already refuses links
 /// back up the tree.
@@ -67,6 +78,8 @@ pub struct TreeNode {
 pub enum Error {
     /// The vault folder doesn't exist or isn't a folder.
     NotFound,
+    /// The vault is open already, in another window.
+    AlreadyOpen,
     /// The path isn't a note.
     NotANote(VaultPath),
     /// The note isn't UTF-8 text, so editing it could lose bytes.
@@ -94,6 +107,7 @@ impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Error::NotFound => f.write_str("vault folder not found"),
+            Error::AlreadyOpen => f.write_str("the vault is already open in another window"),
             Error::NotANote(p) => write!(f, "not a note: {p}"),
             Error::NotUtf8(p) => write!(f, "{p} isn't UTF-8 text, so Orbit won't open it"),
             Error::AlreadyExists(p) => write!(f, "{p} already exists"),
@@ -110,25 +124,73 @@ impl std::error::Error for Error {}
 
 /// An open vault: a folder of notes.
 pub struct Vault {
+    root: PathBuf,
     name: String,
     fs: Box<dyn VaultFs>,
+    /// `None` where the vault can't be written to, so can't be locked.
+    _lock: Option<VaultLock>,
 }
 
 impl Vault {
-    /// Opens the folder at `root` as a vault.
+    /// Opens the folder at `root` as a vault, holding it until the Vault is
+    /// dropped: opening it again meanwhile, from this process or another,
+    /// is [`Error::AlreadyOpen`]. A vault Orbit can't write to opens without
+    /// that guard.
     pub fn open(root: &Path) -> Result<Vault, Error> {
         let plain = PlainFs::new(root).map_err(|e| match e.kind() {
             io::ErrorKind::NotFound | io::ErrorKind::NotADirectory => Error::NotFound,
             _ => Error::Io(e),
         })?;
-        let name = plain.root().file_name().map_or_else(
-            || plain.root().display().to_string(),
-            |n| n.to_string_lossy().into_owned(),
-        );
+        let lock = match plain.lock() {
+            Ok(lock) => Some(lock),
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Err(Error::AlreadyOpen),
+            Err(_) => None,
+        };
+        let root = plain.root().to_path_buf();
+        let name = folder_name(&root);
         Ok(Vault {
+            root,
             name,
             fs: Box::new(plain),
+            _lock: lock,
         })
+    }
+
+    /// The vault folder's real path.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// What was open when the vault last closed: the tabs of notes that are
+    /// still there. Missing or unreadable session state means none.
+    pub fn session(&self) -> Session {
+        let file: SessionFile = self
+            .fs
+            .read(&session_path())
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default();
+        file.session(|path| self.is_restorable(path) && matches!(self.read_disk(path), Ok(Some(_))))
+    }
+
+    /// Remembers what's open, for [`Self::session`] next time. Only notes
+    /// are kept. Protected notes must never be (they'd leak their names):
+    /// once protected folders mount into the tree, [`Self::is_restorable`]
+    /// has to refuse them.
+    pub fn save_session(&self, session: &Session) -> Result<(), Error> {
+        let file = SessionFile::of(session, |path| self.is_restorable(path));
+        let json = serde_json::to_vec_pretty(&file).map_err(io::Error::other)?;
+        let dir = VaultPath::new(ORBIT_DIR)?;
+        match self.fs.create_dir(&dir) {
+            Err(e) if e.kind() != io::ErrorKind::AlreadyExists => return Err(e.into()),
+            _ => {}
+        }
+        Ok(self.fs.write(&session_path(), &json)?)
+    }
+
+    /// Whether a tab can be part of the session: a note in the vault's content.
+    fn is_restorable(&self, path: &VaultPath) -> bool {
+        check_note(path).is_ok() && !in_tool_folder(path)
     }
 
     /// The vault's display name: its folder's name.
@@ -367,6 +429,18 @@ impl Vault {
 /// what's there: "Save elsewhere" after a save into the vault failed.
 pub fn save_elsewhere(file: &Path, text: &str) -> Result<(), Error> {
     Ok(orbit_fs::write_atomic(file, text.as_bytes())?)
+}
+
+/// A folder's name for display; the whole path if it has none (`/`).
+fn folder_name(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    )
+}
+
+fn session_path() -> VaultPath {
+    VaultPath::new(&format!("{ORBIT_DIR}/{SESSION_FILE}")).expect("a valid vault path")
 }
 
 /// Whether a path is shown as Source mode only: `.txt` notes are plain text.

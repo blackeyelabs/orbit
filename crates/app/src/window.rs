@@ -16,12 +16,13 @@ use gpui_kit::component::tree::{TreeItem, TreeState, tree};
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, TitleBar, WindowExt as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use orbit_core::{EntryKind, TreeNode, Vault, VaultPath, Watch};
+use orbit_core::{EntryKind, Session, SessionTab, TreeNode, Vault, VaultPath, Watch};
 
 use crate::appearance::{self, AppSettings};
 use crate::file_actions::{self, NewNote};
 use crate::note_editor::{NoteEditor, NoteEditorEvent};
 use crate::settings_view::AppearancePane;
+use crate::vaults;
 
 // Canvas sizes at 100% (40, 280, 300 and 28 px), in rems so the
 // Interface size setting scales them with everything else.
@@ -61,6 +62,8 @@ pub struct OrbitWindow {
     error: Option<SharedString>,
     /// Changes by other apps (and Orbit) arrive while this is held.
     _watch: Option<Watch>,
+    /// Tabs are reopening from the session, which isn't saved meanwhile.
+    restoring: bool,
 }
 
 impl OrbitWindow {
@@ -68,12 +71,17 @@ impl OrbitWindow {
         // Match system follows the desktop while Orbit runs.
         cx.observe_window_appearance(window, |_, window, cx| appearance::apply(window, cx))
             .detach();
-        // Closing the window saves every note; if one can't be saved, the
-        // window stays open with the error in the status bar.
+        // Closing the window saves every note and the session; if a note
+        // can't be saved, the window stays open with the error in the status
+        // bar.
         let this = cx.entity().downgrade();
         window.on_window_should_close(cx, move |_, cx| {
-            this.update(cx, |this, cx| this.save_all(cx))
-                .unwrap_or(true)
+            this.update(cx, |this, cx| {
+                let saved = this.save_all(cx);
+                this.save_session(cx);
+                saved
+            })
+            .unwrap_or(true)
         });
         let mut this = OrbitWindow {
             vault,
@@ -85,10 +93,67 @@ impl OrbitWindow {
             right_panel_open: false,
             error: None,
             _watch: None,
+            restoring: false,
         };
         this.refresh_tree(&HashSet::new(), cx);
         this.watch_vault(cx);
+        this.restore_session(window, cx);
         this
+    }
+
+    /// Reopens the tabs open when the vault last closed, scrolled where they
+    /// were, with the same one active.
+    fn restore_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let session = self.vault.session();
+        self.restoring = true;
+        for SessionTab { path, scroll } in &session.tabs {
+            self.open_note(path.clone(), window, cx);
+            if let Some(tab) = self.tab_of(path, cx) {
+                self.tabs[tab]
+                    .editor
+                    .update(cx, |editor, cx| editor.set_scroll(*scroll, cx));
+            }
+        }
+        self.restoring = false;
+        let active = session.active.map(|ix| &session.tabs[ix].path);
+        if let Some(ix) = active.and_then(|path| self.tab_of(path, cx)) {
+            self.show_tab(ix, window, cx);
+        }
+    }
+
+    /// Remembers the open tabs for next time: when they change, so a crash
+    /// loses little, and as the window closes, with where each is scrolled.
+    fn save_session(&self, cx: &App) {
+        if self.restoring {
+            return;
+        }
+        let session = Session {
+            tabs: self
+                .tabs
+                .iter()
+                .map(|tab| {
+                    let editor = tab.editor.read(cx);
+                    SessionTab {
+                        path: editor.path().clone(),
+                        scroll: editor.scroll(cx),
+                    }
+                })
+                .collect(),
+            active: self.active_tab,
+        };
+        if let Err(e) = self.vault.save_session(&session) {
+            eprintln!(
+                "orbit: couldn't save the session of {}: {e}",
+                self.vault.name()
+            );
+        }
+    }
+
+    /// The tab showing the note at `path`.
+    fn tab_of(&self, path: &VaultPath, cx: &App) -> Option<usize> {
+        self.tabs
+            .iter()
+            .position(|t| t.editor.read(cx).path() == path)
     }
 
     /// Follows changes other apps, git or sync make while the vault is open.
@@ -294,11 +359,7 @@ impl OrbitWindow {
 
     /// Opens a note in a tab, or focuses its tab if it's already open.
     fn open_note(&mut self, path: VaultPath, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(ix) = self
-            .tabs
-            .iter()
-            .position(|t| t.editor.read(cx).path() == &path)
-        {
+        if let Some(ix) = self.tab_of(&path, cx) {
             self.active_tab = Some(ix);
         } else {
             match self.vault.open_note(&path) {
@@ -340,6 +401,7 @@ impl OrbitWindow {
         if let Some(tab) = self.tabs.get(ix) {
             self.active_tab = Some(ix);
             NoteEditor::focus(&tab.editor, window, cx);
+            self.save_session(cx);
             cx.notify();
         }
     }
@@ -391,6 +453,7 @@ impl OrbitWindow {
             Some(a) => Some(a.min(self.tabs.len() - 1)),
             None => None,
         };
+        self.save_session(cx);
         cx.notify();
     }
 
@@ -463,6 +526,14 @@ impl OrbitWindow {
                             .text_sm()
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(self.vault.name().to_string()),
+                    )
+                    .child(
+                        Button::new("open-another-vault")
+                            .ghost()
+                            .small()
+                            .icon(IconName::FolderOpen)
+                            .tooltip("Open another vault")
+                            .on_click(|_, _, cx| vaults::show_welcome(cx, |_| {})),
                     )
                     .child(
                         Button::new("new-note")

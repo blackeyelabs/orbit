@@ -1,38 +1,27 @@
 //! Orbit's desktop shell. All vault and settings logic lives in `orbit-core`;
-//! this crate lays out the window, applies the appearance (fonts, Orbit Paper
-//! themes, grain) and forwards clicks to the Vault facade.
+//! this crate lays out the windows, applies the appearance (fonts, Orbit
+//! Paper themes, grain) and forwards clicks to the Vault facade.
 
 mod appearance;
 mod file_actions;
+#[cfg(unix)]
+mod instance;
 mod note_editor;
 mod preview;
 mod settings_view;
+mod vaults;
+mod welcome;
 mod window;
 
-use std::{path::PathBuf, sync::Arc};
-
-use gpui_kit::component::{Root, TitleBar};
-use gpui_kit::*;
-use orbit_core::Vault;
-
-use crate::window::OrbitWindow;
+use std::path::PathBuf;
 
 fn main() {
-    // Phase 0/1 stopgap: the vault comes from the command line until the
-    // Welcome screen (#12) exists.
-    let Some(path) = std::env::args_os().nth(1).map(PathBuf::from) else {
-        eprintln!("usage: orbit <vault folder>");
-        std::process::exit(2);
-    };
-    let vault = match Vault::open(&path) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("orbit: {}: {e}", path.display());
-            std::process::exit(1);
-        }
-    };
-
-    let vault = Arc::new(vault);
+    // `orbit <folder>` opens that vault; plain `orbit` shows the Welcome window.
+    let path = std::env::args_os().nth(1).map(PathBuf::from);
+    #[cfg(unix)]
+    if instance::hand_off(path.as_deref()) {
+        return;
+    }
     gpui_kit::application()
         .with_assets(appearance::OrbitAssets)
         .run(move |cx| {
@@ -40,24 +29,9 @@ fn main() {
             appearance::init(cx);
             note_editor::init(cx);
             file_actions::init(cx);
-            let options = WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
-                    None,
-                    size(px(1280.), px(800.)),
-                    cx,
-                ))),
-                // Client-side decorations so the WM doesn't draw its own title bar on Linux.
-                window_decorations: Some(WindowDecorations::Client),
-                ..TitleBar::window_options()
-            };
-            cx.spawn(async move |cx| {
-                cx.open_window(options, |window, cx| {
-                    appearance::apply(window, cx);
-                    let view = cx.new(|cx| OrbitWindow::new(vault.clone(), window, cx));
-                    cx.new(|cx| Root::new(view, window, cx))
-                })
-                .expect("failed to open window");
-            })
-            .detach();
+            vaults::init(cx);
+            #[cfg(unix)]
+            instance::listen(cx);
+            vaults::open_or_welcome(path, cx);
         });
 }

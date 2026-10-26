@@ -16,6 +16,9 @@ use notify_debouncer_mini::{DebounceEventResult, new_debouncer, notify::Recursiv
 /// (docs/protected-folder-format.md).
 pub const PROTECTED_STORAGE_DIR: &str = ".s";
 
+/// Orbit's own folder at the vault root: session state and the lock.
+pub const ORBIT_DIR: &str = ".vault";
+
 /// How long the vault must be quiet before a batch of changes is reported:
 /// a sync or `git checkout` touching many files arrives as one batch.
 const WATCH_DEBOUNCE: Duration = Duration::from_millis(300);
@@ -25,6 +28,9 @@ pub type ChangeHandler = Box<dyn FnMut(Vec<VaultPath>) + Send>;
 
 /// Watching continues until this is dropped.
 pub struct Watch(#[allow(dead_code)] Box<dyn Send>);
+
+/// The vault is held until this is dropped (or the process ends).
+pub struct VaultLock(#[allow(dead_code)] Box<dyn Send + Sync>);
 
 /// Name prefix of the temporary file an atomic write renames into place.
 /// One left behind by a crash is never listed.
@@ -158,6 +164,9 @@ pub trait VaultFs: Send + Sync {
     /// Reports changes to the vault's files, by any app, until the returned
     /// [`Watch`] is dropped.
     fn watch(&self, on_change: ChangeHandler) -> io::Result<Watch>;
+    /// Holds the vault, so it's open in one window at a time: fails with
+    /// `WouldBlock` while anything else holds it, in this process or another.
+    fn lock(&self) -> io::Result<VaultLock>;
 }
 
 /// A vault folder on the local disk.
@@ -312,6 +321,23 @@ impl VaultFs for PlainFs {
             .watch(&self.root, RecursiveMode::Recursive)
             .map_err(io::Error::other)?;
         Ok(Watch(Box::new(debouncer)))
+    }
+
+    /// An advisory lock on `.vault/lock`, which the system releases if
+    /// Orbit crashes.
+    fn lock(&self) -> io::Result<VaultLock> {
+        let dir = self.root.join(ORBIT_DIR);
+        fs::create_dir_all(&dir)?;
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(dir.join("lock"))?;
+        file.try_lock().map_err(|e| match e {
+            fs::TryLockError::WouldBlock => io::ErrorKind::WouldBlock.into(),
+            fs::TryLockError::Error(e) => e,
+        })?;
+        Ok(VaultLock(Box::new(file)))
     }
 
     /// Through a symlink, the link's target is replaced and the link kept.
