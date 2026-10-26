@@ -19,3 +19,6 @@ orbit-crypto = { path = "crates/orbit-crypto" }
 orbit-fs = { path = "crates/orbit-fs" }
 diagrams = { path = "crates/diagrams" }
 editor = { path = "crates/editor" }
+
+# Test-only.
+tempfile = "3"

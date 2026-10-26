@@ -6,3 +6,6 @@ edition.workspace = true
 [dependencies]
 md-engine.workspace = true
 orbit-fs.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
