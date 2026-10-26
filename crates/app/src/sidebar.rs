@@ -21,13 +21,13 @@ impl Default for Appbar {
             selected_index: 0,
             items: vec![
                 AppBarItem {
-                    title: "Quick Swithcer",
+                    title: "Quick Switcher",
                     description: Some("Open quick switcher"),
                     icon: IconName::Regex,
                 },
                 AppBarItem {
-                    title: "Calender",
-                    description: Some("View calender"),
+                    title: "Calendar",
+                    description: Some("View calendar"),
                     icon: IconName::CalendarDays,
                 },
             ],

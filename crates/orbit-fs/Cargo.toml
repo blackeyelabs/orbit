@@ -1,0 +1,7 @@
+[package]
+name = "orbit-fs"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+orbit-crypto.workspace = true

@@ -1,0 +1,16 @@
+[package]
+name = "app"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "orbit"
+path = "src/main.rs"
+
+[dependencies]
+gpui-kit.workspace = true
+editor.workspace = true
+orbit-core.workspace = true
+orbit-index.workspace = true
+orbit-fs.workspace = true
+diagrams.workspace = true

@@ -1,0 +1,8 @@
+[package]
+name = "editor"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+gpui-kit.workspace = true
+md-engine.workspace = true

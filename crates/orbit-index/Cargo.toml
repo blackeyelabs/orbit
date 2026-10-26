@@ -1,0 +1,7 @@
+[package]
+name = "orbit-index"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+orbit-core.workspace = true

@@ -1,0 +1,8 @@
+[package]
+name = "orbit-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+md-engine.workspace = true
+orbit-fs.workspace = true

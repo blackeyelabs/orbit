@@ -1,10 +1,19 @@
-[package]
-name = "orbit"
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
 
-[workspace]
-resolver = "2"
+[workspace.dependencies]
+# gpui-kit pins its gpui-pre snapshot exactly (=0.3.9 for 0.8.0); upgrade both together.
+gpui-kit = "=0.8.0"
 
-[dependencies]
-gpui-kit = "0.6"
+md-engine = { path = "crates/md-engine" }
+orbit-core = { path = "crates/orbit-core" }
+orbit-index = { path = "crates/orbit-index" }
+orbit-crypto = { path = "crates/orbit-crypto" }
+orbit-fs = { path = "crates/orbit-fs" }
+diagrams = { path = "crates/diagrams" }
+editor = { path = "crates/editor" }

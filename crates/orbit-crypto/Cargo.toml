@@ -1,0 +1,6 @@
+[package]
+name = "orbit-crypto"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
