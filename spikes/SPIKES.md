@@ -42,6 +42,7 @@ Each spike answers one question for the Phase 0 gate (ticket #6). Record results
 - Caret and selection painting, mouse hit-testing, Up/Down and the IME callbacks (`bounds_for_range`, `character_index_for_point`) all map through `to_display`/`to_source`. The source text stays the model, and `text_for_range` and the edit callbacks work on source offsets.
 - Click mapping rule: a display position maps to the start of the next visible source character. Clicking just before a concealed bold word therefore puts the caret *inside* the span, after `**`. To type just outside the opening marker, use the arrow keys (item 7). This is a deliberate model rule. Change it if the checklist shows it feels wrong.
 - IME geometry comes from the last painted frame. Between an edit and the next paint, offsets can run past what was shaped, so positions clamp to the end of the nearest line instead of jumping to the corner. Watch items 8–10 for a candidate window that lags a keystroke behind.
+- Font finding (checklist item 1): with GPUI's default `.SystemUIFont` on Linux, bold and italic weights and styles never take effect, and `"monospace"` doesn't resolve. Orbit must bundle and name its fonts, which Phase 0 already plans: Plus Jakarta Sans and JetBrains Mono, ticket #8.
 - Limit found while building: one shaped line has one font size, so headings render bold rather than larger. Real Live Preview needs per-line layout for heading sizes. That's expected, since the editor is one element per block.
 
 **Approach 2, Kit Editor range decorations or inline tokens (evaluated from gpui-base 0.8.0 source): fails for inline syntax.**
@@ -72,7 +73,7 @@ Run `cargo run -p spike1-gpui` on Wayland. The window shows a heading line and t
 
 | # | Pass/fail | Notes |
 |---|---|---|
-| 1 | | |
+| 1 | Partial (2026-10-26, from screenshot) | Concealment correct: `##`, link and wikilink syntax hidden, alias shown, strikethrough drawn, and a newly typed `[google](…)` concealed live. Bold, italic, heading and code were **not** styled, because GPUI's default `.SystemUIFont` on Linux doesn't switch faces and `monospace` isn't a resolvable family. Fixed by naming the families (Noto Sans, JetBrains Mono). Re-check |
 | 2 | | |
 | 3 | | |
 | 4 | | |

@@ -33,6 +33,11 @@ actions!(
     ]
 );
 
+// Named families: on Linux, GPUI's default `.SystemUIFont` doesn't switch
+// to bold or italic faces, and `monospace` isn't resolved as a family.
+const TEXT_FONT: &str = "Noto Sans";
+const CODE_FONT: &str = "JetBrains Mono";
+
 const SAMPLE: &str = "## Live Preview spike\n\
 Here is **bold**, *italic*, ~~struck~~, `code`, [a link](https://example.com) and \
 [[Wiki target|an alias]]. Keep typing past the end of this line so the paragraph soft-wraps, \
@@ -467,7 +472,7 @@ fn text_runs(conceal: &Layout, marked: Option<Range<usize>>, base: &TextStyle) -
                             color: None,
                         })
                     }
-                    RunStyle::Code => font.family = "monospace".into(),
+                    RunStyle::Code => font.family = CODE_FONT.into(),
                     RunStyle::Link => {
                         color = link;
                         underline = Some(UnderlineStyle {
@@ -705,6 +710,7 @@ impl Render for ConcealInput {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
+            .font_family(TEXT_FONT)
             .text_size(px(20.))
             .line_height(px(30.))
             .child(ConcealElement { input: cx.entity() })
