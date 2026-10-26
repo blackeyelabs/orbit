@@ -4,13 +4,18 @@
 //! `orbit-api`); [`Settings`] holds the app-wide preferences beside it.
 //! Neither has a GPUI dependency.
 
+mod open_note;
 mod settings;
+
+use open_note::DiskVersion;
+pub use open_note::{DiskCheck, OpenNote, Trouble};
 
 pub use settings::{Settings, ThemeChoice, default_config_dir};
 
 use std::{io, path::Path};
 
 pub use orbit_fs::VaultPath;
+pub use orbit_fs::Watch;
 use orbit_fs::{EntryType, PROTECTED_STORAGE_DIR, PlainFs, VaultFs};
 
 /// Folders that belong to tools, not to the vault's content: Orbit's own
@@ -68,6 +73,10 @@ pub enum Error {
     NotUtf8(VaultPath),
     /// Something already has this path.
     AlreadyExists(VaultPath),
+    /// Another app changed the note since Orbit last read or wrote it.
+    ChangedOnDisk(VaultPath),
+    /// Another app deleted the note since Orbit last read or wrote it.
+    DeletedOnDisk(VaultPath),
     /// A folder can't move into itself or a folder inside it.
     IntoItself(VaultPath),
     /// Not usable as a file or folder name.
@@ -88,6 +97,8 @@ impl std::fmt::Display for Error {
             Error::NotANote(p) => write!(f, "not a note: {p}"),
             Error::NotUtf8(p) => write!(f, "{p} isn't UTF-8 text, so Orbit won't open it"),
             Error::AlreadyExists(p) => write!(f, "{p} already exists"),
+            Error::ChangedOnDisk(p) => write!(f, "another app changed {p}"),
+            Error::DeletedOnDisk(p) => write!(f, "another app deleted {p}"),
             Error::IntoItself(p) => write!(f, "{p} can't move into itself"),
             Error::InvalidName(n) => write!(f, "{n:?} can't be used as a name"),
             Error::Io(e) => write!(f, "{e}"),
@@ -138,14 +149,61 @@ impl Vault {
         String::from_utf8(bytes).map_err(|_| Error::NotUtf8(path.clone()))
     }
 
-    /// Replaces a note's text atomically. On failure the old note is intact.
-    /// Tool folders aren't vault content, so nothing is saved into them.
+    /// Opens a note for editing: its text, and an [`OpenNote`] that keeps
+    /// track of other apps changing it.
+    pub fn open_note(&self, path: &VaultPath) -> Result<(OpenNote, String), Error> {
+        check_note(path)?;
+        let bytes = self.fs.read(path)?;
+        let version = DiskVersion::of(&bytes);
+        let text = String::from_utf8(bytes).map_err(|_| Error::NotUtf8(path.clone()))?;
+        Ok((OpenNote::new(path.clone(), version), text))
+    }
+
+    /// A note's bytes, or `None` if nothing is at its path.
+    fn read_disk(&self, path: &VaultPath) -> Result<Option<Vec<u8>>, Error> {
+        match self.fs.read(path) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Reports paths changed by any app (Orbit included), in debounced
+    /// batches, until the returned [`Watch`] is dropped. Tool folders are
+    /// left out. `on_change` runs on a background thread.
+    pub fn watch(
+        &self,
+        mut on_change: impl FnMut(Vec<VaultPath>) + Send + 'static,
+    ) -> Result<Watch, Error> {
+        Ok(self.fs.watch(Box::new(move |paths: Vec<VaultPath>| {
+            let paths: Vec<VaultPath> = paths.into_iter().filter(|p| !in_tool_folder(p)).collect();
+            if !paths.is_empty() {
+                on_change(paths);
+            }
+        }))?)
+    }
+
+    /// Replaces (or creates) a note's text atomically. On failure the old
+    /// note is intact. Tool folders aren't vault content, so nothing is saved
+    /// into them. For an open note, [`OpenNote::save`] also never replaces
+    /// another app's change.
     pub fn save_note(&self, path: &VaultPath, text: &str) -> Result<(), Error> {
+        self.save_note_if(path, text, &mut |_| true).map(|_| ())
+    }
+
+    /// [`Self::save_note`] if `may_replace` accepts what's on disk just
+    /// before the save lands; whether it saved.
+    fn save_note_if(
+        &self,
+        path: &VaultPath,
+        text: &str,
+        may_replace: &mut dyn FnMut(Option<&[u8]>) -> bool,
+    ) -> Result<bool, Error> {
         check_note(path)?;
         if in_tool_folder(path) {
             return Err(Error::NotANote(path.clone()));
         }
-        Ok(self.fs.write(path, text.as_bytes())?)
+        Ok(self.fs.write_if(path, text.as_bytes(), may_replace)?)
     }
 
     /// Creates an empty note named `Untitled.md` (or `Untitled 1.md`, …) in
@@ -303,6 +361,12 @@ impl Vault {
         nodes.sort_by_cached_key(|n| (n.kind != EntryKind::Folder, n.name.to_lowercase()));
         Ok(nodes)
     }
+}
+
+/// Saves a note's text to a file anywhere on disk, atomically, replacing
+/// what's there: "Save elsewhere" after a save into the vault failed.
+pub fn save_elsewhere(file: &Path, text: &str) -> Result<(), Error> {
+    Ok(orbit_fs::write_atomic(file, text.as_bytes())?)
 }
 
 /// Whether a path is shown as Source mode only: `.txt` notes are plain text.

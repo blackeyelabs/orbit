@@ -6,12 +6,25 @@
 use std::{
     fs,
     io::{self, Write as _},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
+    time::Duration,
 };
+
+use notify_debouncer_mini::{DebounceEventResult, new_debouncer, notify::RecursiveMode};
 
 /// Where protected folders keep their encrypted storage, at the vault root
 /// (docs/protected-folder-format.md).
 pub const PROTECTED_STORAGE_DIR: &str = ".s";
+
+/// How long the vault must be quiet before a batch of changes is reported:
+/// a sync or `git checkout` touching many files arrives as one batch.
+const WATCH_DEBOUNCE: Duration = Duration::from_millis(300);
+
+/// Called with the paths that changed in the vault, in batches.
+pub type ChangeHandler = Box<dyn FnMut(Vec<VaultPath>) + Send>;
+
+/// Watching continues until this is dropped.
+pub struct Watch(#[allow(dead_code)] Box<dyn Send>);
 
 /// Name prefix of the temporary file an atomic write renames into place.
 /// One left behind by a crash is never listed.
@@ -121,7 +134,19 @@ pub trait VaultFs: Send + Sync {
     fn read(&self, file: &VaultPath) -> io::Result<Vec<u8>>;
     /// Replaces or creates a file atomically: afterwards it holds either the
     /// old contents or all of the new ones, even after a crash.
-    fn write(&self, file: &VaultPath, contents: &[u8]) -> io::Result<()>;
+    fn write(&self, file: &VaultPath, contents: &[u8]) -> io::Result<()> {
+        self.write_if(file, contents, &mut |_| true).map(|_| ())
+    }
+    /// Like [`Self::write`], but only if `may_replace` accepts what's there
+    /// (`None` when nothing is), checked as late as possible: after the new
+    /// contents are safely on disk, right before they replace the old.
+    /// Returns whether it wrote.
+    fn write_if(
+        &self,
+        file: &VaultPath,
+        contents: &[u8],
+        may_replace: &mut dyn FnMut(Option<&[u8]>) -> bool,
+    ) -> io::Result<bool>;
     /// Creates an empty file; fails if anything already has that path.
     fn create_file(&self, file: &VaultPath) -> io::Result<()>;
     /// Creates a folder inside an existing one.
@@ -130,6 +155,9 @@ pub trait VaultFs: Send + Sync {
     fn rename(&self, from: &VaultPath, to: &VaultPath) -> io::Result<()>;
     /// Moves a file or folder to the system trash.
     fn trash(&self, path: &VaultPath) -> io::Result<()>;
+    /// Reports changes to the vault's files, by any app, until the returned
+    /// [`Watch`] is dropped.
+    fn watch(&self, on_change: ChangeHandler) -> io::Result<Watch>;
 }
 
 /// A vault folder on the local disk.
@@ -257,26 +285,85 @@ impl VaultFs for PlainFs {
         trash::delete(&target).map_err(io::Error::other)
     }
 
-    /// Writes a temporary file beside the target, fsyncs it, renames it over
-    /// the target and fsyncs the folder. Through a symlink, the link's target
-    /// is replaced and the link kept.
-    fn write(&self, file: &VaultPath, contents: &[u8]) -> io::Result<()> {
-        let target = self.resolve_for_write(file)?;
-        let dir = target.parent().unwrap_or(&self.root);
-        let mut temp = tempfile::Builder::new()
-            .prefix(SAVE_TEMP_PREFIX)
-            .tempfile_in(dir)?;
-        temp.write_all(contents)?;
-        // The temporary file is private (0600); keep the note's own mode.
-        if let Ok(meta) = fs::metadata(&target) {
-            temp.as_file().set_permissions(meta.permissions())?;
-        }
-        temp.as_file().sync_all()?;
-        temp.persist(&target).map_err(|e| e.error)?;
-        #[cfg(unix)]
-        fs::File::open(dir)?.sync_all()?;
-        Ok(())
+    /// Debounced and recursive. Orbit's own temporary save files aren't
+    /// reported; paths that aren't valid vault paths are skipped.
+    fn watch(&self, mut on_change: ChangeHandler) -> io::Result<Watch> {
+        let root = self.root.clone();
+        let mut debouncer = new_debouncer(WATCH_DEBOUNCE, move |events: DebounceEventResult| {
+            // Events were lost (a full inotify queue, say): anything may have
+            // changed.
+            let Ok(events) = events else {
+                return on_change(vec![VaultPath::root()]);
+            };
+            let mut paths: Vec<VaultPath> = events
+                .iter()
+                .filter_map(|event| vault_path(&root, &event.path))
+                .filter(|path| !path.name().starts_with(SAVE_TEMP_PREFIX))
+                .collect();
+            paths.sort();
+            paths.dedup();
+            if !paths.is_empty() {
+                on_change(paths);
+            }
+        })
+        .map_err(io::Error::other)?;
+        debouncer
+            .watcher()
+            .watch(&self.root, RecursiveMode::Recursive)
+            .map_err(io::Error::other)?;
+        Ok(Watch(Box::new(debouncer)))
     }
+
+    /// Through a symlink, the link's target is replaced and the link kept.
+    fn write_if(
+        &self,
+        file: &VaultPath,
+        contents: &[u8],
+        may_replace: &mut dyn FnMut(Option<&[u8]>) -> bool,
+    ) -> io::Result<bool> {
+        write_atomic_if(&self.resolve_for_write(file)?, contents, may_replace)
+    }
+}
+
+/// Replaces or creates `target` atomically, anywhere on disk: a temporary
+/// file beside it is written and fsynced, renamed over it, and the folder
+/// fsynced.
+pub fn write_atomic(target: &Path, contents: &[u8]) -> io::Result<()> {
+    write_atomic_if(target, contents, &mut |_| true).map(|_| ())
+}
+
+/// [`write_atomic`], if `may_replace` accepts the current contents just
+/// before the rename. Another app writing in between could still be
+/// replaced; the window is a read and a rename.
+fn write_atomic_if(
+    target: &Path,
+    contents: &[u8],
+    may_replace: &mut dyn FnMut(Option<&[u8]>) -> bool,
+) -> io::Result<bool> {
+    let dir = target
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no folder to write in"))?;
+    let mut temp = tempfile::Builder::new()
+        .prefix(SAVE_TEMP_PREFIX)
+        .tempfile_in(dir)?;
+    temp.write_all(contents)?;
+    // The temporary file is private (0600); keep the existing file's mode.
+    if let Ok(meta) = fs::metadata(target) {
+        temp.as_file().set_permissions(meta.permissions())?;
+    }
+    temp.as_file().sync_all()?;
+    let current = match fs::read(target) {
+        Ok(bytes) => Some(bytes),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e),
+    };
+    if !may_replace(current.as_deref()) {
+        return Ok(false);
+    }
+    temp.persist(target).map_err(|e| e.error)?;
+    #[cfg(unix)]
+    fs::File::open(dir)?.sync_all()?;
+    Ok(true)
 }
 
 /// Renames, failing with `AlreadyExists` rather than replacing `target`. On
@@ -299,4 +386,18 @@ fn rename_no_replace(source: &Path, target: &Path) -> io::Result<()> {
         ));
     }
     fs::rename(source, target)
+}
+
+/// The vault path of a real path under `root`, if it is one.
+fn vault_path(root: &Path, path: &Path) -> Option<VaultPath> {
+    let segments: Option<Vec<&str>> = path
+        .strip_prefix(root)
+        .ok()?
+        .components()
+        .map(|c| match c {
+            Component::Normal(name) => name.to_str(),
+            _ => None,
+        })
+        .collect();
+    VaultPath::new(&segments?.join("/")).ok()
 }

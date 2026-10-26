@@ -6,13 +6,15 @@ use std::{
     time::Duration,
 };
 
-use gpui_kit::base::h_flex;
+use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::ActiveTheme as _;
+use gpui_kit::component::Sizable as _;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Editor, EditorState, InputEvent};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use md_engine::{Format, TextEdit, format_edit, word_count};
-use orbit_core::{Error, Vault, VaultPath, is_plain_text_note};
+use orbit_core::{DiskCheck, OpenNote, Trouble, Vault, VaultPath, is_plain_text_note};
 
 use crate::preview::{PreviewContext, preview};
 
@@ -77,8 +79,11 @@ struct Saves {
     writing: bool,
     /// Another save was asked for while one was writing.
     again: bool,
-    /// The edits are still in memory; the next save retries.
-    failure: Option<SharedString>,
+    /// The watcher reported a change while a write held the note: check
+    /// again once it's done.
+    recheck: bool,
+    /// The note's trouble as of its last save or check, for rendering.
+    trouble: Option<Trouble>,
     /// Shared with writes on background threads, which run one at a time.
     disk: Arc<Mutex<Disk>>,
 }
@@ -86,22 +91,23 @@ struct Saves {
 /// What a write needs to know when its turn comes, rather than when it was
 /// queued: the note may have moved, been deleted, or been saved newer.
 struct Disk {
-    /// `None` once the note is deleted: nothing more is written.
-    path: Option<VaultPath>,
+    /// `None` once Orbit deleted the note: nothing more is written.
+    note: Option<OpenNote>,
     /// The newest revision on disk; an older write is skipped.
     written: u64,
 }
 
 impl Saves {
-    fn new(path: VaultPath) -> Self {
+    fn new(note: OpenNote) -> Self {
         Saves {
             revision: 0,
             saved: 0,
             writing: false,
             again: false,
-            failure: None,
+            recheck: false,
+            trouble: None,
             disk: Arc::new(Mutex::new(Disk {
-                path: Some(path),
+                note: Some(note),
                 written: 0,
             })),
         }
@@ -115,21 +121,20 @@ impl Saves {
         self.revision != self.saved
     }
 
-    /// Records how saving `revision` went. A result older than one already
-    /// recorded changes nothing.
-    fn finished(&mut self, revision: u64, result: Result<(), Error>) {
-        if revision < self.saved {
-            return;
-        }
-        match result {
-            Ok(()) => {
-                self.saved = revision;
-                self.failure = None;
-            }
-            Err(e) => self.failure = Some(e.to_string().into()),
-        }
+    fn is_blocked(&self) -> bool {
+        matches!(
+            self.trouble,
+            Some(Trouble::Changed(_) | Trouble::Deleted | Trouble::Unreadable(_))
+        )
     }
 }
+
+pub enum NoteEditorEvent {
+    /// The user chose to close the note without saving (it was deleted).
+    Close,
+}
+
+impl EventEmitter<NoteEditorEvent> for NoteEditor {}
 
 pub struct NoteEditor {
     vault: Arc<Vault>,
@@ -141,6 +146,10 @@ pub struct NoteEditor {
     text: SharedString,
     words: usize,
     saves: Saves,
+    /// Text from disk for the editor to show, on the next frame.
+    reload: Option<String>,
+    /// Shown with a failed save: where Save elsewhere put a copy.
+    saved_elsewhere: Option<SharedString>,
     autosave: Option<Task<()>>,
     _subscription: Subscription,
 }
@@ -148,11 +157,12 @@ pub struct NoteEditor {
 impl NoteEditor {
     pub fn new(
         vault: Arc<Vault>,
-        path: VaultPath,
+        note: OpenNote,
         text: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let path = note.path().clone();
         let mode = Mode::of(&path);
         let source = cx.new(|cx| {
             EditorState::new(window, cx)
@@ -171,13 +181,15 @@ impl NoteEditor {
         });
         NoteEditor {
             preview: PreviewContext::new(vault.clone(), path.clone()),
-            saves: Saves::new(path.clone()),
+            saves: Saves::new(note),
             vault,
             path,
             mode,
             source,
             words: word_count(&text),
             text: text.into(),
+            reload: None,
+            saved_elsewhere: None,
             autosave: None,
             _subscription: subscription,
         }
@@ -187,21 +199,28 @@ impl NoteEditor {
         &self.path
     }
 
-    /// Follows the note after a rename or move; writes still queued go to
-    /// the new path. A rename can change the extension, and with it the mode.
+    /// Follows the note to a new path: after Orbit renames or moves it, or
+    /// saves a copy. Writes still queued go to the new path. A new extension
+    /// can change the mode.
     pub fn set_path(&mut self, path: VaultPath, cx: &mut Context<Self>) {
-        self.saves.disk().path = Some(path.clone());
+        if let Some(note) = self.saves.disk().note.as_mut() {
+            note.set_path(path.clone());
+        }
+        self.follow_path(path, cx);
+    }
+
+    fn follow_path(&mut self, path: VaultPath, cx: &mut Context<Self>) {
         self.preview = PreviewContext::new(self.vault.clone(), path.clone());
         self.mode = Mode::of(&path);
         self.path = path;
         cx.notify();
     }
 
-    /// After the note is deleted: writes still queued are dropped, so none
-    /// can bring it back.
+    /// After Orbit deletes the note: writes still queued are dropped, so
+    /// none can bring it back.
     pub fn forget_disk(&mut self) {
         self.autosave = None;
-        self.saves.disk().path = None;
+        self.saves.disk().note = None;
     }
 
     pub fn is_dirty(&self) -> bool {
@@ -209,13 +228,15 @@ impl NoteEditor {
     }
 
     pub fn has_failed(&self) -> bool {
-        self.saves.failure.is_some()
+        self.saves.trouble.is_some()
     }
 
-    /// The status bar's left side: Saved, Unsaved, Saving… or the failure.
+    /// The status bar's left side: Saved, Unsaved, Saving… or the trouble.
     pub fn status_text(&self) -> SharedString {
-        match &self.saves.failure {
-            Some(error) => format!("Save failed: {error}").into(),
+        match &self.saves.trouble {
+            Some(Trouble::Changed(_) | Trouble::Unreadable(_)) => "Changed by another app".into(),
+            Some(Trouble::Deleted) => "Deleted by another app".into(),
+            Some(Trouble::SaveFailed(error)) => format!("Save failed: {error}").into(),
             None if self.saves.writing => "Saving…".into(),
             None if self.is_dirty() => "Unsaved".into(),
             None => "Saved".into(),
@@ -253,14 +274,75 @@ impl NoteEditor {
         cx.notify();
     }
 
-    /// Saves in the background, one write at a time.
+    /// The watcher saw the note's path change: the note reloads if it has no
+    /// unsaved edits, and otherwise shows what the user has to decide.
+    /// Orbit's own saves compare equal and change nothing. While a write
+    /// holds the note, the check waits for it rather than the UI.
+    pub fn disk_changed(&mut self, cx: &mut Context<Self>) {
+        let has_edits = self.is_dirty();
+        let checked = match self.saves.disk.try_lock() {
+            Ok(mut guard) => {
+                let disk = &mut *guard;
+                disk.note.as_mut().map(|note| {
+                    let check = note.check_disk(&self.vault, has_edits);
+                    if let DiskCheck::Reload(_) = check {
+                        disk.written = self.saves.revision;
+                    }
+                    (check, note.trouble().cloned())
+                })
+            }
+            Err(_) => {
+                self.saves.recheck = true;
+                return;
+            }
+        };
+        let Some((check, trouble)) = checked else {
+            return;
+        };
+        let was_blocked = self.saves.is_blocked();
+        self.set_trouble(trouble);
+        match check {
+            DiskCheck::Reload(text) => self.show_saved_text(text, cx),
+            // Back to the version Orbit knows: saving resumes.
+            DiskCheck::Unchanged if was_blocked && !self.saves.is_blocked() => self.save(cx),
+            _ => {}
+        }
+        cx.notify();
+    }
+
+    fn set_trouble(&mut self, trouble: Option<Trouble>) {
+        if trouble
+            .as_ref()
+            .is_none_or(|t| !matches!(t, Trouble::SaveFailed(_)))
+        {
+            self.saved_elsewhere = None;
+        }
+        if trouble.is_some() {
+            self.autosave = None;
+        }
+        self.saves.trouble = trouble;
+    }
+
+    /// Shows text that's what's on disk, with nothing unsaved. The editor
+    /// takes it on the next frame, which has the window it needs.
+    fn show_saved_text(&mut self, text: String, cx: &mut Context<Self>) {
+        self.reload = Some(text.clone());
+        self.text = text.into();
+        self.words = word_count(&self.text);
+        self.autosave = None;
+        self.saves.saved = self.saves.revision;
+        cx.notify();
+    }
+
+    /// Saves in the background, one write at a time. Paused while another
+    /// app's change or deletion waits for the user.
     pub fn save(&mut self, cx: &mut Context<Self>) {
         self.autosave = None;
         if self.saves.writing {
             self.saves.again = true;
             return;
         }
-        if !self.is_dirty() && !self.has_failed() {
+        if self.saves.is_blocked() || (!self.is_dirty() && !self.has_failed()) {
             return;
         }
         let write = self.writer(cx);
@@ -268,10 +350,16 @@ impl NoteEditor {
         cx.notify();
         let write = cx.background_spawn(async move { write() });
         cx.spawn(async move |this, cx| {
-            let (revision, result) = write.await;
+            let (revision, saved, trouble) = write.await;
             this.update(cx, |this, cx| {
                 this.saves.writing = false;
-                this.saves.finished(revision, result);
+                if saved {
+                    this.saves.saved = this.saves.saved.max(revision);
+                }
+                this.set_trouble(trouble);
+                if std::mem::take(&mut this.saves.recheck) {
+                    this.disk_changed(cx);
+                }
                 if std::mem::take(&mut this.saves.again) {
                     this.save(cx);
                 }
@@ -286,36 +374,195 @@ impl NoteEditor {
     /// background write first, so the newest text lands last.
     pub fn save_blocking(&mut self, cx: &mut Context<Self>) -> Result<(), SharedString> {
         self.autosave = None;
-        if !self.is_dirty() && !self.has_failed() {
-            return Ok(());
+        if !self.saves.is_blocked() && (self.is_dirty() || self.has_failed()) {
+            let (revision, saved, trouble) = self.writer(cx)();
+            if saved {
+                self.saves.saved = self.saves.saved.max(revision);
+            }
+            self.set_trouble(trouble);
+            cx.notify();
         }
-        let (revision, result) = self.writer(cx)();
-        self.saves.finished(revision, result);
-        cx.notify();
-        match &self.saves.failure {
-            Some(error) => Err(error.clone()),
+        match &self.saves.trouble {
             None => Ok(()),
+            Some(Trouble::SaveFailed(error)) => Err(error.clone().into()),
+            Some(_) => Err("another app changed or deleted it; choose what to keep first".into()),
         }
     }
 
     /// A write of the current text, serialised with every other write of
-    /// this note, returning the revision it saved. When its turn comes, it
-    /// writes to the note's path then, and not at all if a newer revision
-    /// is already on disk or the note was deleted.
-    fn writer(&self, cx: &App) -> impl FnOnce() -> (u64, Result<(), Error>) + Send + 'static {
+    /// this note. When its turn comes it writes to the note's path then, and
+    /// not at all if a newer revision is on disk already or Orbit deleted the
+    /// note. It never replaces another app's change. Returns the revision,
+    /// whether it's on disk, and the note's trouble afterwards.
+    fn writer(&self, cx: &App) -> impl FnOnce() -> (u64, bool, Option<Trouble>) + Send + 'static {
         let (vault, disk) = (self.vault.clone(), self.saves.disk.clone());
         let (text, revision) = (self.source.read(cx).value(), self.saves.revision);
         move || {
             let mut disk = disk.lock().unwrap_or_else(|e| e.into_inner());
-            let Some(path) = disk.path.clone().filter(|_| revision > disk.written) else {
-                return (revision, Ok(()));
+            let written = disk.written;
+            let Some(note) = disk.note.as_mut() else {
+                return (revision, false, None);
             };
-            let result = vault.save_note(&path, &text);
-            if result.is_ok() {
+            if revision <= written {
+                return (revision, true, note.trouble().cloned());
+            }
+            let saved = note.save(&vault, &text).is_ok();
+            let trouble = note.trouble().cloned();
+            if saved {
                 disk.written = revision;
             }
-            (revision, result)
+            (revision, saved, trouble)
         }
+    }
+
+    /// Runs one of the user's choices on the note, with the editor's text,
+    /// and takes the note's trouble from it afterwards. Writing by choice is
+    /// rare enough to do while the UI waits.
+    fn choose(
+        &mut self,
+        cx: &mut Context<Self>,
+        choice: impl FnOnce(&mut OpenNote, &Vault, &str) -> Option<VaultPath>,
+    ) {
+        let text = self.source.read(cx).value();
+        let (moved, trouble) = {
+            let mut disk = self.saves.disk();
+            let Some(note) = disk.note.as_mut() else {
+                return;
+            };
+            let moved = choice(note, &self.vault, &text);
+            let trouble = note.trouble().cloned();
+            if trouble.is_none() {
+                disk.written = self.saves.revision;
+            }
+            (moved, trouble)
+        };
+        if trouble.is_none() {
+            self.saves.saved = self.saves.revision;
+        }
+        self.set_trouble(trouble);
+        if let Some(path) = moved {
+            self.follow_path(path, cx);
+        }
+        cx.notify();
+    }
+
+    /// Load theirs: the other app's text replaces the unsaved edits.
+    fn load_theirs(&mut self, cx: &mut Context<Self>) {
+        let theirs = {
+            let mut disk = self.saves.disk();
+            let theirs = disk.note.as_mut().and_then(OpenNote::load_theirs);
+            if theirs.is_some() {
+                disk.written = self.saves.revision;
+            }
+            theirs
+        };
+        if let Some(text) = theirs {
+            self.set_trouble(None);
+            self.show_saved_text(text, cx);
+        }
+    }
+
+    /// Save elsewhere: asks where, then writes the edits there. The note
+    /// itself stays unsaved until a save into the vault works.
+    fn save_elsewhere(&mut self, cx: &mut Context<Self>) {
+        let directory = std::env::home_dir().unwrap_or_default();
+        let chosen = cx.prompt_for_new_path(&directory, Some(self.path.name()));
+        let text = self.source.read(cx).value();
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(file))) = chosen.await else {
+                return;
+            };
+            let result = orbit_core::save_elsewhere(&file, &text);
+            this.update(cx, |this, cx| {
+                this.saved_elsewhere = Some(match result {
+                    Ok(()) => format!("A copy is saved at {}.", file.display()).into(),
+                    Err(e) => format!("Couldn't save at {} either: {e}", file.display()).into(),
+                });
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn render_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let trouble = self.saves.trouble.as_ref()?;
+        let theme = cx.theme();
+        let keep_mine = || {
+            Button::new("keep-mine")
+                .outline()
+                .label("Keep mine")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.choose(cx, |note, vault, text| {
+                        note.keep_mine(vault, text).ok();
+                        None
+                    })
+                }))
+        };
+        let (colour, message, actions): (Hsla, SharedString, Vec<Button>) = match trouble {
+            Trouble::Changed(_) => (
+                theme.warning,
+                "Another app changed this note.".into(),
+                vec![
+                    Button::new("load-theirs")
+                        .primary()
+                        .label("Load theirs")
+                        .on_click(cx.listener(|this, _, _, cx| this.load_theirs(cx))),
+                    keep_mine(),
+                ],
+            ),
+            Trouble::Unreadable(reason) => (
+                theme.warning,
+                format!("Another app changed this note: {reason}.").into(),
+                vec![keep_mine()],
+            ),
+            Trouble::Deleted => (
+                theme.warning,
+                "This note was deleted by another app.".into(),
+                vec![
+                    Button::new("save-copy")
+                        .primary()
+                        .label("Save a copy")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.choose(cx, |note, vault, text| note.save_copy(vault, text).ok())
+                        })),
+                    Button::new("close-deleted")
+                        .outline()
+                        .label("Close")
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(NoteEditorEvent::Close))),
+                ],
+            ),
+            Trouble::SaveFailed(error) => (
+                theme.danger,
+                match &self.saved_elsewhere {
+                    Some(note) => format!("Couldn't save: {error}. {note}").into(),
+                    None => format!("Couldn't save: {error}").into(),
+                },
+                vec![
+                    Button::new("try-again")
+                        .primary()
+                        .label("Try again")
+                        .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
+                    Button::new("save-elsewhere")
+                        .outline()
+                        .label("Save elsewhere")
+                        .on_click(cx.listener(|this, _, _, cx| this.save_elsewhere(cx))),
+                ],
+            ),
+        };
+        Some(
+            h_flex()
+                .flex_none()
+                .gap_3()
+                .px_4()
+                .py_2()
+                .border_b_1()
+                .border_color(colour)
+                .bg(colour.opacity(0.1))
+                .child(div().flex_1().text_sm().child(message))
+                .children(actions.into_iter().map(|b| b.small()))
+                .into_any_element(),
+        )
     }
 
     fn apply_format(&mut self, kind: Format, window: &mut Window, cx: &mut Context<Self>) {
@@ -335,14 +582,21 @@ impl NoteEditor {
 
 impl Render for NoteEditor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(text) = self.reload.take() {
+            // `set_value` emits no change event, so this isn't an edit.
+            self.source
+                .update(cx, |source, cx| source.set_value(text, window, cx));
+        }
         let border = cx.theme().border;
         let editor = div()
             .flex_1()
             .min_w_0()
             .h_full()
             .child(Editor::new(&self.source).h_full().bordered(false));
-        h_flex()
-            .key_context(KEY_CONTEXT)
+        let banner = self.render_banner(cx);
+        let body = h_flex()
+            .flex_1()
+            .min_h_0()
             .on_action(cx.listener(|this, _: &Save, _, cx| this.save(cx)))
             .on_action(cx.listener(|this, _: &ToggleBold, window, cx| {
                 this.apply_format(Format::Bold, window, cx)
@@ -353,7 +607,6 @@ impl Render for NoteEditor {
             .on_action(cx.listener(|this, _: &InsertLink, window, cx| {
                 this.apply_format(Format::Link, window, cx)
             }))
-            .size_full()
             .child(editor)
             .when(self.mode == Mode::Split, |this| {
                 this.child(
@@ -375,6 +628,11 @@ impl Render for NoteEditor {
                             cx,
                         )),
                 )
-            })
+            });
+        v_flex()
+            .key_context(KEY_CONTEXT)
+            .size_full()
+            .children(banner)
+            .child(body)
     }
 }

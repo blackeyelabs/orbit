@@ -152,3 +152,14 @@ fn a_dangling_symlink_is_not_replaced_by_a_save() {
             .is_symlink()
     );
 }
+
+#[test]
+fn a_note_can_be_saved_elsewhere_when_its_own_folder_fails() {
+    let elsewhere = tempfile::tempdir().unwrap();
+    let file = elsewhere.path().join("rescued.md");
+    orbit_core::save_elsewhere(&file, "edits kept").unwrap();
+    assert_eq!(fs::read_to_string(&file).unwrap(), "edits kept");
+    // It replaces what the user chose to overwrite.
+    orbit_core::save_elsewhere(&file, "newer edits").unwrap();
+    assert_eq!(fs::read_to_string(&file).unwrap(), "newer edits");
+}

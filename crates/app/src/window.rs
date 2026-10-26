@@ -16,11 +16,11 @@ use gpui_kit::component::tree::{TreeItem, TreeState, tree};
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, TitleBar, WindowExt as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use orbit_core::{EntryKind, TreeNode, Vault, VaultPath};
+use orbit_core::{EntryKind, TreeNode, Vault, VaultPath, Watch};
 
 use crate::appearance::{self, AppSettings};
 use crate::file_actions::{self, NewNote};
-use crate::note_editor::NoteEditor;
+use crate::note_editor::{NoteEditor, NoteEditorEvent};
 use crate::settings_view::AppearancePane;
 
 // Canvas sizes at 100% (40, 280, 300 and 28 px), in rems so the
@@ -59,6 +59,8 @@ pub struct OrbitWindow {
     left_panel_open: bool,
     right_panel_open: bool,
     error: Option<SharedString>,
+    /// Changes by other apps (and Orbit) arrive while this is held.
+    _watch: Option<Watch>,
 }
 
 impl OrbitWindow {
@@ -82,9 +84,48 @@ impl OrbitWindow {
             left_panel_open: true,
             right_panel_open: false,
             error: None,
+            _watch: None,
         };
         this.refresh_tree(&HashSet::new(), cx);
+        this.watch_vault(cx);
         this
+    }
+
+    /// Follows changes other apps, git or sync make while the vault is open.
+    fn watch_vault(&mut self, cx: &mut Context<Self>) {
+        let (tx, rx) = async_channel::unbounded();
+        match self.vault.watch(move |paths| {
+            tx.send_blocking(paths).ok();
+        }) {
+            Ok(watch) => self._watch = Some(watch),
+            Err(e) => return self.report("watch the vault for changes", e, cx),
+        }
+        cx.spawn(async move |this, cx| {
+            while let Ok(paths) = rx.recv().await {
+                if this
+                    .update(cx, |this, cx| this.changed_on_disk(&paths, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// A batch of changed paths: the tree reloads, and open notes at or
+    /// inside them check what's on disk now.
+    fn changed_on_disk(&mut self, paths: &[VaultPath], cx: &mut Context<Self>) {
+        let expanded = self.expanded_folders(cx);
+        self.refresh_tree(&expanded, cx);
+        for tab in &self.tabs {
+            let affected = paths
+                .iter()
+                .any(|p| tab.editor.read(cx).path().is_within(p));
+            if affected {
+                tab.editor.update(cx, |editor, cx| editor.disk_changed(cx));
+            }
+        }
     }
 
     /// Reloads the tree from the vault, with the folders in `expanded` open.
@@ -260,10 +301,19 @@ impl OrbitWindow {
         {
             self.active_tab = Some(ix);
         } else {
-            match self.vault.read_note(&path) {
-                Ok(text) => {
+            match self.vault.open_note(&path) {
+                Ok((note, text)) => {
                     let vault = self.vault.clone();
-                    let editor = cx.new(|cx| NoteEditor::new(vault, path, text, window, cx));
+                    let editor = cx.new(|cx| NoteEditor::new(vault, note, text, window, cx));
+                    cx.subscribe(&editor, |this, editor, event, cx| match event {
+                        NoteEditorEvent::Close => {
+                            if let Some(ix) = this.tabs.iter().position(|t| t.editor == editor) {
+                                editor.update(cx, |editor, _| editor.forget_disk());
+                                this.remove_tab(ix, cx);
+                            }
+                        }
+                    })
+                    .detach();
                     // Unsaved markers, the caret and word count live in the
                     // editor. A save that worked clears an old save error.
                     cx.observe(&editor, |this, editor, cx| {

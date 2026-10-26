@@ -28,5 +28,9 @@ tempfile = "3"
 unicode-segmentation = "=1.13.3"
 # Deleting sends plain files to the freedesktop trash.
 trash = "=5.2.6"
+# Hands the watcher's batches from its thread to the UI.
+async-channel = "=2.5.0"
+# Watching the vault for changes made outside Orbit.
+notify-debouncer-mini = { version = "=0.7.0", default-features = false }
 # renameat2(RENAME_NOREPLACE): a rename that can never replace a file.
 rustix = { version = "=1.1.5", features = ["fs"] }

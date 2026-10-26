@@ -16,3 +16,4 @@ orbit-fs.workspace = true
 diagrams.workspace = true
 md-engine.workspace = true
 serde_json.workspace = true
+async-channel.workspace = true

@@ -7,6 +7,7 @@ edition.workspace = true
 orbit-crypto.workspace = true
 tempfile.workspace = true
 trash.workspace = true
+notify-debouncer-mini.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix.workspace = true
