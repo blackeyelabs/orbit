@@ -1,11 +1,13 @@
-//! Orbit's desktop shell. All vault logic lives in `orbit-core`; this crate
-//! only lays out the window and forwards clicks to the Vault facade.
+//! Orbit's desktop shell. All vault and settings logic lives in `orbit-core`;
+//! this crate lays out the window, applies the appearance (fonts, Orbit Paper
+//! themes, grain) and forwards clicks to the Vault facade.
 
+mod appearance;
+mod settings_view;
 mod window;
 
 use std::path::PathBuf;
 
-use gpui_kit::assets::AllAssets;
 use gpui_kit::component::{Root, TitleBar};
 use gpui_kit::*;
 use orbit_core::Vault;
@@ -28,9 +30,10 @@ fn main() {
     };
 
     gpui_kit::application()
-        .with_assets(AllAssets)
+        .with_assets(appearance::OrbitAssets)
         .run(move |cx| {
             gpui_kit::init(cx);
+            appearance::init(cx);
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                     None,
@@ -43,6 +46,7 @@ fn main() {
             };
             cx.spawn(async move |cx| {
                 cx.open_window(options, |window, cx| {
+                    appearance::apply(window, cx);
                     let view = cx.new(|cx| OrbitWindow::new(vault, window, cx));
                     cx.new(|cx| Root::new(view, window, cx))
                 })

@@ -9,15 +9,20 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::list::ListItem;
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::tree::{TreeItem, TreeState, tree};
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, TitleBar};
+use gpui_kit::component::{ActiveTheme as _, Sizable as _, TitleBar, WindowExt as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use orbit_core::{EntryKind, TreeNode, Vault, VaultPath};
 
-const TITLE_BAR_HEIGHT: f32 = 40.;
-const SIDEBAR_WIDTH: f32 = 280.;
-const RIGHT_PANEL_WIDTH: f32 = 300.;
-const STATUS_BAR_HEIGHT: f32 = 28.;
+use crate::appearance::{self, AppSettings};
+use crate::settings_view::AppearancePane;
+
+// Canvas sizes at 100% (40, 280, 300 and 28 px), in rems so the
+// Interface size setting scales them with everything else.
+const TITLE_BAR_HEIGHT: f32 = 2.5;
+const SIDEBAR_WIDTH: f32 = 17.5;
+const RIGHT_PANEL_WIDTH: f32 = 18.75;
+const STATUS_BAR_HEIGHT: f32 = 1.75;
 
 /// What a tree row stands for.
 #[derive(Clone)]
@@ -47,7 +52,10 @@ pub struct OrbitWindow {
 }
 
 impl OrbitWindow {
-    pub fn new(vault: Vault, _window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(vault: Vault, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        // Match system follows the desktop while Orbit runs.
+        cx.observe_window_appearance(window, |_, window, cx| appearance::apply(window, cx))
+            .detach();
         let mut entries = HashMap::new();
         let (items, error) = match vault.tree() {
             Ok(nodes) => (tree_items(&nodes, &mut entries), None),
@@ -90,6 +98,16 @@ impl OrbitWindow {
         cx.notify();
     }
 
+    fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let view = cx.new(|_| AppearancePane);
+        window.open_dialog(cx, move |dialog, window, _| {
+            dialog
+                .title("Appearance")
+                .w(window.rem_size() * 40.)
+                .child(view.clone())
+        });
+    }
+
     fn close_tab(&mut self, ix: usize, cx: &mut Context<Self>) {
         if ix >= self.tabs.len() {
             return;
@@ -110,7 +128,7 @@ impl OrbitWindow {
             None => self.vault.name().to_string(),
         };
         TitleBar::new()
-            .h(px(TITLE_BAR_HEIGHT))
+            .h(rems(TITLE_BAR_HEIGHT))
             .child(panel_toggle(
                 "toggle-left-panel",
                 "Toggle sidebar",
@@ -122,6 +140,13 @@ impl OrbitWindow {
                 }),
             ))
             .child(div().flex_1().text_center().text_sm().child(title))
+            .child(
+                Button::new("open-settings")
+                    .ghost()
+                    .icon(IconName::Settings)
+                    .tooltip("Settings")
+                    .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx))),
+            )
             .child(panel_toggle(
                 "toggle-right-panel",
                 "Toggle right panel",
@@ -138,7 +163,7 @@ impl OrbitWindow {
         let view = cx.entity().downgrade();
         let entries = self.entries.clone();
         v_flex()
-            .w(px(SIDEBAR_WIDTH))
+            .w(rems(SIDEBAR_WIDTH))
             .flex_none()
             .h_full()
             .border_r_1()
@@ -249,7 +274,7 @@ impl OrbitWindow {
             (None, None) => SharedString::from(""),
         };
         h_flex()
-            .h(px(STATUS_BAR_HEIGHT))
+            .h(rems(STATUS_BAR_HEIGHT))
             .flex_none()
             .px_3()
             .justify_between()
@@ -264,8 +289,10 @@ impl OrbitWindow {
 }
 
 impl Render for OrbitWindow {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let grain = AppSettings::get(cx).paper_grain;
         v_flex()
+            .relative()
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
@@ -282,7 +309,7 @@ impl Render for OrbitWindow {
                         // Outline and backlinks arrive in #14.
                         this.child(
                             div()
-                                .w(px(RIGHT_PANEL_WIDTH))
+                                .w(rems(RIGHT_PANEL_WIDTH))
                                 .flex_none()
                                 .h_full()
                                 .border_l_1()
@@ -292,6 +319,7 @@ impl Render for OrbitWindow {
                     }),
             )
             .child(self.render_status_bar(cx))
+            .when(grain, |this| this.child(appearance::grain(window, cx)))
     }
 }
 

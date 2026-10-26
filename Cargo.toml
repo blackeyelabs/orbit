@@ -20,5 +20,8 @@ orbit-fs = { path = "crates/orbit-fs" }
 diagrams = { path = "crates/diagrams" }
 editor = { path = "crates/editor" }
 
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
 # Test-only.
 tempfile = "3"

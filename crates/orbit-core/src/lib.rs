@@ -1,7 +1,12 @@
 //! Vaults, notes, link resolution and front matter.
 //!
 //! [`Vault`] is the headless facade every layer above uses (and, later,
-//! `orbit-api`). It has no GPUI dependency.
+//! `orbit-api`); [`Settings`] holds the app-wide preferences beside it.
+//! Neither has a GPUI dependency.
+
+mod settings;
+
+pub use settings::{Settings, ThemeChoice, default_config_dir};
 
 use std::{io, path::Path};
 
