@@ -3,10 +3,12 @@
 //! themes, grain) and forwards clicks to the Vault facade.
 
 mod appearance;
+mod note_editor;
+mod preview;
 mod settings_view;
 mod window;
 
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
 use gpui_kit::component::{Root, TitleBar};
 use gpui_kit::*;
@@ -29,11 +31,13 @@ fn main() {
         }
     };
 
+    let vault = Arc::new(vault);
     gpui_kit::application()
         .with_assets(appearance::OrbitAssets)
         .run(move |cx| {
             gpui_kit::init(cx);
             appearance::init(cx);
+            note_editor::init(cx);
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                     None,
@@ -47,7 +51,7 @@ fn main() {
             cx.spawn(async move |cx| {
                 cx.open_window(options, |window, cx| {
                     appearance::apply(window, cx);
-                    let view = cx.new(|cx| OrbitWindow::new(vault, window, cx));
+                    let view = cx.new(|cx| OrbitWindow::new(vault.clone(), window, cx));
                     cx.new(|cx| Root::new(view, window, cx))
                 })
                 .expect("failed to open window");

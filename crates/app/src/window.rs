@@ -1,7 +1,11 @@
 //! The main window, laid out as on the design canvas: title bar, file tree,
 //! tab strip with the open note, status bar and (empty) right panel.
 
-use std::{collections::HashMap, rc::Rc};
+use std::{
+    collections::{HashMap, HashSet},
+    rc::Rc,
+    sync::Arc,
+};
 
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{h_flex, v_flex};
@@ -15,6 +19,7 @@ use gpui_kit::*;
 use orbit_core::{EntryKind, TreeNode, Vault, VaultPath};
 
 use crate::appearance::{self, AppSettings};
+use crate::note_editor::NoteEditor;
 use crate::settings_view::AppearancePane;
 
 // Canvas sizes at 100% (40, 280, 300 and 28 px), in rems so the
@@ -31,15 +36,14 @@ struct TreeEntryInfo {
     kind: EntryKind,
 }
 
-/// A note open in a tab, read-only for now (editing arrives in #9).
+/// A note open in a tab.
 struct OpenTab {
-    path: VaultPath,
     title: SharedString,
-    text: SharedString,
+    editor: Entity<NoteEditor>,
 }
 
 pub struct OrbitWindow {
-    vault: Vault,
+    vault: Arc<Vault>,
     tree: Entity<TreeState>,
     /// Tree item id → the entry it stands for. Shared with the tree's row
     /// renderer, which runs every frame.
@@ -52,10 +56,17 @@ pub struct OrbitWindow {
 }
 
 impl OrbitWindow {
-    pub fn new(vault: Vault, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(vault: Arc<Vault>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         // Match system follows the desktop while Orbit runs.
         cx.observe_window_appearance(window, |_, window, cx| appearance::apply(window, cx))
             .detach();
+        // Closing the window saves every note; if one can't be saved, the
+        // window stays open with the error in the status bar.
+        let this = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |_, cx| {
+            this.update(cx, |this, cx| this.save_all(cx))
+                .unwrap_or(true)
+        });
         let mut entries = HashMap::new();
         let (items, error) = match vault.tree() {
             Ok(nodes) => (tree_items(&nodes, &mut entries), None),
@@ -78,24 +89,69 @@ impl OrbitWindow {
     }
 
     /// Opens a note in a tab, or focuses its tab if it's already open.
-    fn open_note(&mut self, path: VaultPath, cx: &mut Context<Self>) {
-        if let Some(ix) = self.tabs.iter().position(|t| t.path == path) {
+    fn open_note(&mut self, path: VaultPath, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(ix) = self
+            .tabs
+            .iter()
+            .position(|t| t.editor.read(cx).path() == &path)
+        {
             self.active_tab = Some(ix);
         } else {
             match self.vault.read_note(&path) {
                 Ok(text) => {
-                    self.tabs.push(OpenTab {
-                        title: path.name().to_string().into(),
-                        text: text.into(),
-                        path,
-                    });
+                    let vault = self.vault.clone();
+                    let title = path.name().to_string().into();
+                    let editor = cx.new(|cx| NoteEditor::new(vault, path, text, window, cx));
+                    // Unsaved markers, the caret and word count live in the
+                    // editor. A save that worked clears an old save error.
+                    cx.observe(&editor, |this, editor, cx| {
+                        if !editor.read(cx).is_dirty() && this.error.is_some() {
+                            this.error = None;
+                        }
+                        cx.notify();
+                    })
+                    .detach();
+                    self.tabs.push(OpenTab { title, editor });
                     self.active_tab = Some(self.tabs.len() - 1);
                     self.error = None;
                 }
                 Err(e) => self.error = Some(format!("Couldn't open {path}: {e}").into()),
             }
         }
+        if let Some(ix) = self.active_tab {
+            self.show_tab(ix, window, cx);
+        }
         cx.notify();
+    }
+
+    fn show_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(tab) = self.tabs.get(ix) {
+            self.active_tab = Some(ix);
+            NoteEditor::focus(&tab.editor, window, cx);
+            cx.notify();
+        }
+    }
+
+    /// Saves a tab's note now; false, with the error shown, if it couldn't.
+    fn save_tab(&mut self, ix: usize, cx: &mut Context<Self>) -> bool {
+        let Some(tab) = self.tabs.get(ix) else {
+            return true;
+        };
+        let result = tab.editor.update(cx, |editor, cx| editor.save_blocking(cx));
+        if let Err(e) = &result {
+            self.error = Some(format!("Couldn't save {}: {e}", tab.title).into());
+            cx.notify();
+        }
+        result.is_ok()
+    }
+
+    /// Saves every unsaved note; false if any couldn't be saved.
+    fn save_all(&mut self, cx: &mut Context<Self>) -> bool {
+        // Every tab is tried, even after one fails.
+        let failures = (0..self.tabs.len())
+            .filter(|&ix| !self.save_tab(ix, cx))
+            .count();
+        failures == 0
     }
 
     fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -109,7 +165,8 @@ impl OrbitWindow {
     }
 
     fn close_tab(&mut self, ix: usize, cx: &mut Context<Self>) {
-        if ix >= self.tabs.len() {
+        // A note that can't be saved stays open, so its edits aren't lost.
+        if ix >= self.tabs.len() || !self.save_tab(ix, cx) {
             return;
         }
         self.tabs.remove(ix);
@@ -162,6 +219,14 @@ impl OrbitWindow {
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let view = cx.entity().downgrade();
         let entries = self.entries.clone();
+        let unsaved: Rc<HashSet<VaultPath>> = Rc::new(
+            self.tabs
+                .iter()
+                .map(|t| t.editor.read(cx))
+                .filter(|e| e.is_dirty())
+                .map(|e| e.path().clone())
+                .collect(),
+        );
         v_flex()
             .w(rems(SIDEBAR_WIDTH))
             .flex_none()
@@ -179,7 +244,7 @@ impl OrbitWindow {
             )
             .child(div().flex_1().min_h_0().child(tree(
                 &self.tree,
-                move |ix, entry, _selected, _, _| {
+                move |ix, entry, _selected, _, cx| {
                     let id = entry.item().id.clone();
                     let entry_info = entries.get(&id);
                     let kind = entry_info.map(|e| e.kind);
@@ -189,13 +254,15 @@ impl OrbitWindow {
                         Some(EntryKind::Note) => IconName::FileText,
                         _ => IconName::File,
                     };
+                    let is_unsaved = entry_info.is_some_and(|e| unsaved.contains(&e.path));
                     let mut item = ListItem::new(ix)
                         .pl(px(12. + 16. * entry.depth() as f32))
                         .child(
                             h_flex()
                                 .gap_2()
                                 .child(icon)
-                                .child(entry.item().label.clone()),
+                                .child(entry.item().label.clone())
+                                .when(is_unsaved, |this| this.child(unsaved_dot(cx))),
                         );
                     if let Some(TreeEntryInfo {
                         path,
@@ -203,9 +270,10 @@ impl OrbitWindow {
                     }) = entry_info.cloned()
                     {
                         let view = view.clone();
-                        item = item.on_click(move |_, _, cx| {
+                        item = item.on_click(move |_, window, cx| {
                             let path = path.clone();
-                            view.update(cx, |this, cx| this.open_note(path, cx)).ok();
+                            view.update(cx, |this, cx| this.open_note(path, window, cx))
+                                .ok();
                         });
                     }
                     item
@@ -216,13 +284,9 @@ impl OrbitWindow {
     fn render_centre(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let body = match self.active_tab.and_then(|ix| self.tabs.get(ix)) {
             Some(tab) => div()
-                .id("note")
                 .flex_1()
                 .min_h_0()
-                .overflow_y_scroll()
-                .px_8()
-                .py_6()
-                .child(div().whitespace_normal().child(tab.text.clone()))
+                .child(tab.editor.clone())
                 .into_any_element(),
             None => div()
                 .flex_1()
@@ -242,22 +306,25 @@ impl OrbitWindow {
                     TabBar::new("tabs")
                         .selected_index(self.active_tab.unwrap_or(0))
                         .children(self.tabs.iter().enumerate().map(|(ix, tab)| {
-                            Tab::new().label(tab.title.clone()).suffix(
-                                Button::new(("close-tab", ix))
-                                    .ghost()
-                                    .xsmall()
-                                    .icon(IconName::Close)
-                                    .tooltip("Close tab")
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        // Don't let the click also select the tab being closed.
-                                        cx.stop_propagation();
-                                        this.close_tab(ix, cx);
-                                    })),
-                            )
+                            let unsaved = tab.editor.read(cx).is_dirty();
+                            Tab::new()
+                                .label(tab.title.clone())
+                                .when(unsaved, |this| this.prefix(unsaved_dot(cx)))
+                                .suffix(
+                                    Button::new(("close-tab", ix))
+                                        .ghost()
+                                        .xsmall()
+                                        .icon(IconName::Close)
+                                        .tooltip("Close tab")
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            // Don't let the click also select the tab being closed.
+                                            cx.stop_propagation();
+                                            this.close_tab(ix, cx);
+                                        })),
+                                )
                         }))
-                        .on_click(cx.listener(|this, ix: &usize, _, cx| {
-                            this.active_tab = Some(*ix);
-                            cx.notify();
+                        .on_click(cx.listener(|this, ix: &usize, window, cx| {
+                            this.show_tab(*ix, window, cx)
                         })),
                 )
             })
@@ -265,14 +332,20 @@ impl OrbitWindow {
     }
 
     fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let left = match (
-            &self.error,
-            self.active_tab.and_then(|ix| self.tabs.get(ix)),
-        ) {
+        let editor = self
+            .active_tab
+            .and_then(|ix| self.tabs.get(ix))
+            .map(|tab| tab.editor.read(cx));
+        let left = match (&self.error, editor) {
             (Some(error), _) => error.clone(),
-            (None, Some(tab)) => format!("{} · read-only", tab.path).into(),
-            (None, None) => SharedString::from(""),
+            (None, Some(editor)) => editor.status_text(),
+            (None, None) => SharedString::default(),
         };
+        let right = match editor {
+            Some(editor) => editor.summary_text(cx),
+            None => self.vault.name().to_string().into(),
+        };
+        let failed = self.error.is_some() || editor.is_some_and(|e| e.has_failed());
         h_flex()
             .h(rems(STATUS_BAR_HEIGHT))
             .flex_none()
@@ -283,8 +356,12 @@ impl OrbitWindow {
             .border_t_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().sidebar)
-            .child(left)
-            .child(self.vault.name().to_string())
+            .child(
+                div()
+                    .when(failed, |this| this.text_color(cx.theme().danger))
+                    .child(left),
+            )
+            .child(right)
     }
 }
 
@@ -362,4 +439,12 @@ fn tree_items(
             }
         })
         .collect()
+}
+
+/// The unsaved-changes marker on tabs and tree rows.
+fn unsaved_dot(cx: &App) -> impl IntoElement {
+    div()
+        .size(rems(0.4))
+        .rounded_full()
+        .bg(cx.theme().muted_foreground)
 }

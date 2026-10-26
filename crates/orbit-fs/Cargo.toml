@@ -5,3 +5,4 @@ edition.workspace = true
 
 [dependencies]
 orbit-crypto.workspace = true
+tempfile.workspace = true

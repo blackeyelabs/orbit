@@ -63,6 +63,8 @@ pub enum Error {
     NotFound,
     /// The path isn't a note.
     NotANote(VaultPath),
+    /// The note isn't UTF-8 text, so editing it could lose bytes.
+    NotUtf8(VaultPath),
     Io(io::Error),
 }
 
@@ -77,6 +79,7 @@ impl std::fmt::Display for Error {
         match self {
             Error::NotFound => f.write_str("vault folder not found"),
             Error::NotANote(p) => write!(f, "not a note: {p}"),
+            Error::NotUtf8(p) => write!(f, "{p} isn't UTF-8 text, so Orbit won't open it"),
             Error::Io(e) => write!(f, "{e}"),
         }
     }
@@ -118,14 +121,51 @@ impl Vault {
         self.children_of(&VaultPath::root(), 0)
     }
 
-    /// A note's text. Invalid UTF-8 is replaced, not refused (read-only for now).
+    /// A note's text, exactly as on disk.
     pub fn read_note(&self, path: &VaultPath) -> Result<String, Error> {
-        if EntryKind::of_file(path.name()) != EntryKind::Note {
+        check_note(path)?;
+        let bytes = self.fs.read(path)?;
+        String::from_utf8(bytes).map_err(|_| Error::NotUtf8(path.clone()))
+    }
+
+    /// Replaces a note's text atomically. On failure the old note is intact.
+    /// Tool folders aren't vault content, so nothing is saved into them.
+    pub fn save_note(&self, path: &VaultPath, text: &str) -> Result<(), Error> {
+        check_note(path)?;
+        if path.as_str().split('/').any(is_tool_folder) {
             return Err(Error::NotANote(path.clone()));
         }
-        let bytes = self.fs.read(path)?;
-        Ok(String::from_utf8(bytes)
-            .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()))
+        Ok(self.fs.write(path, text.as_bytes())?)
+    }
+
+    /// The contents of the Attachment an image link in `note` points to:
+    /// relative to the note's folder, percent-decoded, without any
+    /// `#fragment` or `?query`. Remote, absolute and missing links, and links
+    /// out of the vault, give `None`.
+    pub fn read_linked_attachment(&self, note: &VaultPath, link: &str) -> Option<Vec<u8>> {
+        let link = link.split(['#', '?']).next()?;
+        let scheme = link.split_once(':').is_some_and(|(s, _)| !s.contains('/'));
+        if link.is_empty() || link.starts_with('/') || scheme {
+            return None;
+        }
+        let mut segments: Vec<String> = note
+            .parent()
+            .as_str()
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect();
+        for segment in percent_decode(link)?.split('/') {
+            match segment {
+                "" | "." => {}
+                ".." => {
+                    segments.pop()?;
+                }
+                name => segments.push(name.to_string()),
+            }
+        }
+        let path = VaultPath::new(&segments.join("/")).ok()?;
+        self.fs.read(&path).ok()
     }
 
     fn children_of(&self, dir: &VaultPath, depth: usize) -> Result<Vec<TreeNode>, Error> {
@@ -159,4 +199,40 @@ impl Vault {
         nodes.sort_by_cached_key(|n| (n.kind != EntryKind::Folder, n.name.to_lowercase()));
         Ok(nodes)
     }
+}
+
+/// Whether a path is shown as Source mode only: `.txt` notes are plain text.
+pub fn is_plain_text_note(path: &VaultPath) -> bool {
+    path.name().to_ascii_lowercase().ends_with(".txt")
+}
+
+fn check_note(path: &VaultPath) -> Result<(), Error> {
+    if EntryKind::of_file(path.name()) == EntryKind::Note {
+        Ok(())
+    } else {
+        Err(Error::NotANote(path.clone()))
+    }
+}
+
+/// Decodes `%XX` escapes; `None` if they don't decode to UTF-8.
+fn percent_decode(s: &str) -> Option<String> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = bytes
+            .get(i + 1..i + 3)
+            .and_then(|h| std::str::from_utf8(h).ok());
+        match (bytes[i], hex.and_then(|h| u8::from_str_radix(h, 16).ok())) {
+            (b'%', Some(byte)) => {
+                out.push(byte);
+                i += 3;
+            }
+            (byte, _) => {
+                out.push(byte);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).ok()
 }

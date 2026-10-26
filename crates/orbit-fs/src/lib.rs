@@ -4,13 +4,18 @@
 //! protected folder can later be mounted into the same logical tree.
 
 use std::{
-    fs, io,
+    fs,
+    io::{self, Write as _},
     path::{Path, PathBuf},
 };
 
 /// Where protected folders keep their encrypted storage, at the vault root
 /// (docs/protected-folder-format.md).
 pub const PROTECTED_STORAGE_DIR: &str = ".s";
+
+/// Name prefix of the temporary file an atomic write renames into place.
+/// One left behind by a crash is never listed.
+const SAVE_TEMP_PREFIX: &str = ".orbit-save-";
 
 /// A path inside a vault: `/`-separated, relative to the vault root, never
 /// escaping it. The root itself is the empty path.
@@ -56,6 +61,11 @@ impl VaultPath {
         self.0.rsplit('/').next().unwrap_or("")
     }
 
+    /// The containing folder; the root's parent is the root.
+    pub fn parent(&self) -> Self {
+        VaultPath(self.0.rsplit_once('/').map_or("", |(p, _)| p).to_string())
+    }
+
     pub fn join(&self, name: &str) -> io::Result<Self> {
         if self.is_root() {
             Self::new(name)
@@ -88,6 +98,9 @@ pub trait VaultFs: Send + Sync {
     /// Entries of a directory, in no particular order.
     fn list_dir(&self, dir: &VaultPath) -> io::Result<Vec<DirEntry>>;
     fn read(&self, file: &VaultPath) -> io::Result<Vec<u8>>;
+    /// Replaces or creates a file atomically: afterwards it holds either the
+    /// old contents or all of the new ones, even after a crash.
+    fn write(&self, file: &VaultPath, contents: &[u8]) -> io::Result<()>;
 }
 
 /// A vault folder on the local disk.
@@ -123,6 +136,22 @@ impl PlainFs {
             ))
         }
     }
+
+    /// Like [`Self::resolve`], but a file that doesn't exist yet resolves
+    /// inside its (existing) folder. A dangling symlink is refused rather
+    /// than replaced.
+    fn resolve_for_write(&self, path: &VaultPath) -> io::Result<PathBuf> {
+        match self.resolve(path) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound && !path.is_root() => {
+                let target = self.resolve(&path.parent())?.join(path.name());
+                if target.symlink_metadata().is_ok() {
+                    return Err(e);
+                }
+                Ok(target)
+            }
+            resolved => resolved,
+        }
+    }
 }
 
 impl VaultFs for PlainFs {
@@ -137,6 +166,9 @@ impl VaultFs for PlainFs {
             let Ok(name) = entry.file_name().into_string() else {
                 continue;
             };
+            if name.starts_with(SAVE_TEMP_PREFIX) {
+                continue;
+            }
             let Ok(path) = dir.join(&name) else { continue };
             let Ok(real) = self.resolve(&path) else {
                 continue;
@@ -157,5 +189,26 @@ impl VaultFs for PlainFs {
 
     fn read(&self, file: &VaultPath) -> io::Result<Vec<u8>> {
         fs::read(self.resolve(file)?)
+    }
+
+    /// Writes a temporary file beside the target, fsyncs it, renames it over
+    /// the target and fsyncs the folder. Through a symlink, the link's target
+    /// is replaced and the link kept.
+    fn write(&self, file: &VaultPath, contents: &[u8]) -> io::Result<()> {
+        let target = self.resolve_for_write(file)?;
+        let dir = target.parent().unwrap_or(&self.root);
+        let mut temp = tempfile::Builder::new()
+            .prefix(SAVE_TEMP_PREFIX)
+            .tempfile_in(dir)?;
+        temp.write_all(contents)?;
+        // The temporary file is private (0600); keep the note's own mode.
+        if let Ok(meta) = fs::metadata(&target) {
+            temp.as_file().set_permissions(meta.permissions())?;
+        }
+        temp.as_file().sync_all()?;
+        temp.persist(&target).map_err(|e| e.error)?;
+        #[cfg(unix)]
+        fs::File::open(dir)?.sync_all()?;
+        Ok(())
     }
 }

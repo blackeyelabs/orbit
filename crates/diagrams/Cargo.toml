@@ -4,3 +4,9 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+# Math (LaTeX) typesetting: a pure-Rust KaTeX port, with KaTeX's fonts
+# embedded so glyphs come out as SVG paths.
+ratex-layout = "=0.1.14"
+ratex-parser = "=0.1.14"
+ratex-svg = { version = "=0.1.14", features = ["embed-fonts"] }
+ratex-types = "=0.1.14"
