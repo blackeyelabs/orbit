@@ -5,7 +5,6 @@ use gpui_kit::*;
 #[derive(Debug)]
 pub struct AppBarItem<'a> {
     title: &'a str,
-    description: Option<&'a str>,
     icon: IconName,
 }
 
@@ -22,12 +21,10 @@ impl Default for Appbar {
             items: vec![
                 AppBarItem {
                     title: "Quick Switcher",
-                    description: Some("Open quick switcher"),
                     icon: IconName::Regex,
                 },
                 AppBarItem {
                     title: "Calendar",
-                    description: Some("View calendar"),
                     icon: IconName::CalendarDays,
                 },
             ],

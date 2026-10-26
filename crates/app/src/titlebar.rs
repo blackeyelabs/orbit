@@ -1,20 +1,17 @@
 use gpui_kit::assets::IconName;
 use gpui_kit::component::TitleBar;
-use gpui_kit::component::badge::Badge;
 use gpui_kit::component::button::Button;
 use gpui_kit::*;
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 enum PanelState {
+    #[default]
     Folder,
+    // Not selectable until the panels are wired up (#7).
+    #[expect(dead_code)]
     Search,
+    #[expect(dead_code)]
     Bookmark,
-}
-
-impl Default for PanelState {
-    fn default() -> Self {
-        Self::Folder
-    }
 }
 
 #[derive(Debug, Default)]

@@ -1,0 +1,5 @@
+# Pinned so a new stable release (and its new clippy lints) can't turn CI
+# red without a code change. Bump deliberately.
+[toolchain]
+channel = "1.99.1"
+components = ["rustfmt", "clippy"]
