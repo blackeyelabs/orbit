@@ -109,7 +109,7 @@ cargo test                                                 # harness logic, 6 te
 ```
 
 - The harness runs every renderer on every diagram, light and dark, one thread per render. A panic is caught, and a render still running after 20 s is recorded as a timeout and abandoned: its thread keeps running until the process exits, and a stack overflow would still abort the run. It writes `output/out/<renderer>/<diagram>-<theme>.svg`, a resvg PNG of each (how Orbit would draw them), `output/results.csv`, `output/raster-failures.txt` (empty in the final run) and `output/gallery.html`. The gallery shows the PNGs, each linking to its SVG.
-- The corpus is 16 diagrams in `corpus/`. That's the doc's 13 kinds, with flowchart split into subgraphs, styling and shapes, plus a composite state diagram. The kinds are: three flowchart variants (subgraphs, styling, shapes), Unicode/CJK labels, sequence with loop and alt, class, ER, state, composite state, Gantt, mindmap, pie, journey, git graph, one invalid input, and a 120-node flowchart. `corpus/user/` is for the user's own diagrams. **It's empty, so the pick below is provisional.**
+- The corpus is 16 diagrams in `corpus/`. That's the doc's 13 kinds, with flowchart split into subgraphs, styling and shapes, plus a composite state diagram. The kinds are: three flowchart variants (subgraphs, styling, shapes), Unicode/CJK labels, sequence with loop and alt, class, ER, state, composite state, Gantt, mindmap, pie, journey, git graph, one invalid input, and a 120-node flowchart. `corpus/user/` holds the user's own 20 diagrams (added 2026-10-26), scored separately below.
 - `results.csv` holds the final run's numbers.
 
 ### Real APIs (the design doc's guesses were unverified)
@@ -122,7 +122,7 @@ cargo test                                                 # harness logic, 6 te
 
 ### Results
 
-Automated (final run, light theme, `results.csv`):
+Automated (built-in corpus, light theme, `results.csv`):
 
 | | merman (no ELK) | rusty-mermaid | mmdr |
 |---|---|---|---|
@@ -164,10 +164,53 @@ Dark theme works in all three. merman's dark Gantt has low-contrast labels on so
 - **Class-diagram markers** (merman): inheritance and aggregation markers look wrong in both configurations. Check whether that's merman or resvg's marker support before Phase 1 relies on class diagrams.
 - **rusty-mermaid's native GPUI canvas** is attractive (crisp vector drawing with no SVG step), but it's disqualified by drawing invalid input instead of erroring, and by the weaker mindmap and git graph results.
 
-### Recommendation (provisional)
+### The user's corpus (20 diagrams, 2026-10-26)
 
-**merman 0.9.2 without ELK, rendered to SVG and rasterized with resvg**, pinned exactly. That matches the design doc's lean.
-- It renders all 8 guaranteed MVP types (15/16), is the fastest by far, errors with a clear message on bad input, and has the widest family coverage.
-- Integration requirements for `diagrams`: set `htmlLabels: false`, apply the foreign-object fallback, pin the version (it's an alpha), and render on a background thread as planned.
-- **Runner-up:** mmdr. It's a good fallback behind the same `DiagramRenderer` trait, but it's weaker on class, sequence and Gantt, and about 40× slower on large graphs.
-- **Provisional until** `corpus/user/` holds 20–30 of the user's real diagrams and they're scored the same way.
+The user's diagrams go well beyond the 8 guaranteed MVP types. They add timeline, quadrant chart, swimlane, requirement, XY chart and block diagrams, so the renderer has to cover those too.
+
+| Diagram | merman | rusty-mermaid | mmdr | Notes |
+|---|---|---|---|---|
+| 01 pie | 2 | 2 | 1 | mmdr clips the title, and the legend overlaps the labels |
+| 02 sequence | 2 | 2 | 2 | |
+| 03 flowchart | 2 | 2 | 1 | mmdr: double circle |
+| 04 flowchart, styled | 2 | 0 | 1 | rusty: parse error on `;`. mmdr turns part of an edge label into a node |
+| 05 sequence loop/alt/opt | 2 | 2 | 2 | |
+| 06 sequence, activations + `par` | 2 | 2 | 0 | mmdr: parse error on `->>+` |
+| 07 git graph (`gitGraph:`) | 2 | 1 | 1 | rusty drops commit ids. mmdr clips the branch label |
+| 08 mindmap, 4 levels | 2* | 1 | 1 | *after the stroke-width clamp below. rusty prints `root((mindmap))`. mmdr renders `::icon(...)` as a node |
+| 09 timeline | 2 | 1 | 0 | rusty gives "Google" its own column. **mmdr drops "Google"** |
+| 10 quadrant chart | 2 | 1 | 2 | rusty: points collide with quadrant labels |
+| 11 Gantt | 2 | 2 | 0 | **mmdr misreads `:24d`, and the axis runs to 2058** |
+| 12 journey | 2 | 2 | 1 | mmdr drops the faces |
+| 13 ER | 2 | 2 | 1 | mmdr's cardinality markers are wrong |
+| 14 state | 2 | 2 | 2 | |
+| 15 class with `<<interface>>` | 2 | 2 | 0 | mmdr: parse error |
+| 16 swimlane | 2 | 0 | 0 | rusty: unknown type. **mmdr silently draws "swimlane" and "beta" as nodes** |
+| 17 requirement | 2 | 1 | 1 | rusty: label overlaps the arrow. mmdr: text overflows the boxes |
+| 18 git graph, commit types | 2 | 1 | 1 | as 07 |
+| 19 XY chart | 2 | 2 | 2 | |
+| 20 block | 2 | 0 | 0 | only merman lays out the columns. The others are silently wrong |
+| **Total** | **40/40** | 28/40 | 19/40 | |
+
+Refused outright: merman 0, rusty-mermaid 2, mmdr 2. Silently wrong (scored 0 with no error, the worst case for a notes app): merman 0, rusty-mermaid 1, mmdr 4.
+
+**One more integration finding.** merman's mindmap CSS, copied from mermaid.js, sets edge `stroke-width: 17 - 3 * (depth + 1)`, which is negative from depth 5. Browsers ignore the invalid value and draw a 1px line, but resvg draws nothing, so deep branches float with no connecting lines. The adapter clamps negative stroke widths to 1, and with that the user's 4-level mindmap renders fully.
+
+### Recommendation
+
+**merman 0.9.2 without ELK, rendered to SVG and rasterized with resvg, pinned exactly.** The pick is no longer provisional: it scored 40/40 on the user's own diagrams, against 28 and 19, and is the only renderer that handled every diagram type they use.
+
+Integration requirements for the `diagrams` crate, all exercised in this harness's merman adapter:
+1. `default-features = false, features = ["all-diagrams", "complete-svg"]`. No ELK, so no EPL-2.0 code.
+2. Prepend an init directive with `"htmlLabels": false` and the theme (`default` or `dark`).
+3. Pass the SVG through `merman::svg::foreign_object_label_fallback_svg_text`, so mindmap and journey labels render.
+4. Clamp negative `stroke-width` values to 1, so deep mindmap edges render.
+5. Render on a background thread with a time limit, and show the source plus merman's diagnostic on error.
+
+Watch items:
+- merman is an alpha; pin it and upgrade deliberately.
+- Class-diagram inheritance and aggregation markers looked wrong on the built-in corpus but fine in the user's class diagram. Recheck when class diagrams land.
+- Mindmap `::icon(...)` isn't rendered, because that needs an icon font.
+- The guaranteed set (#1) can widen to everything merman draws, since the user already relies on timeline, quadrant, swimlane, requirement, XY and block diagrams.
+
+**Fallback:** mmdr, behind the same `DiagramRenderer` trait, only if merman stalls. It's much weaker on the user's diagrams.

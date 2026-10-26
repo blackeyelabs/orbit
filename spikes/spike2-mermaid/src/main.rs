@@ -41,15 +41,35 @@ impl DiagramRenderer for Merman {
             // Mindmap and journey labels are HTML <foreignObject> even with
             // htmlLabels=false (as in mermaid.js); merman's own fallback adds
             // a <text> overlay so rasterizers like resvg can draw them.
-            RenderOutput::Svg(Some(svg)) => {
-                Ok(merman::svg::foreign_object_label_fallback_svg_text(
+            RenderOutput::Svg(Some(svg)) => Ok(clamp_negative_stroke_widths(
+                &merman::svg::foreign_object_label_fallback_svg_text(
                     svg.svg(),
                     &merman::svg::DeterministicTextMeasurer::default(),
-                ))
-            }
+                ),
+            )),
             _ => Err("no Mermaid diagram found".into()),
         }
     }
+}
+
+/// Mindmap CSS (as in mermaid.js) sets `stroke-width: 17 - 3 * (depth + 1)`,
+/// negative from depth 5. Browsers ignore the invalid value and draw 1px;
+/// resvg draws nothing, so deep branches lose their edges. Clamp to 1.
+#[cfg(feature = "merman")]
+fn clamp_negative_stroke_widths(svg: &str) -> String {
+    let mut out = String::with_capacity(svg.len());
+    let mut rest = svg;
+    while let Some(at) = rest.find("stroke-width:-") {
+        out.push_str(&rest[..at]);
+        out.push_str("stroke-width:1");
+        let tail = &rest[at + "stroke-width:-".len()..];
+        let number_len = tail
+            .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+            .unwrap_or(tail.len());
+        rest = &tail[number_len..];
+    }
+    out.push_str(rest);
+    out
 }
 
 #[cfg(feature = "rusty-mermaid")]
