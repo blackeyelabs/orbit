@@ -129,7 +129,7 @@ Automated (built-in corpus, light theme, `results.csv`):
 | Valid diagrams rendered | 15/15 | 15/15 | 15/15 |
 | **Invalid input** | **error**: "Diagram parse error (flowchart-v2): Unterminated…" | **renders a box labelled "A"** | **error**, but reports line 1, col 1 |
 | Panics / timeouts | 0 | 0 | 0 |
-| 120-node flowchart | 16 ms | 90 ms | 623 ms |
+| 120-node flowchart (final run, light) | 9 ms | 87 ms | 609 ms |
 | Diagram families (claimed) | 35 (`all-diagrams` feature list) | 25 (README) | 23 (crate description) |
 
 Visual score per diagram (0 wrong, 1 flawed, 2 correct), judged from resvg PNGs:

@@ -8,7 +8,7 @@ Read this whole doc before planning; it records every decision made so far, so C
 
 **Status (2026-10-22):** architecture decided. Spike 1's headless model passes its tests. Spike 2's harness is written but has not been run against the real Mermaid crates. No application code exists yet.
 
-**Update (2026-10-26):** Spikes 1 and 2 have been rebuilt and run in this repo, and their results supersede this doc's spike sections. See `spikes/SPIKES.md`. Spike 1: Live Preview is feasible for inline syntax, with IME still to verify (#27). Spike 2: merman without ELK is the provisional renderer.
+**Update (2026-10-26):** Spikes 1 and 2 have been rebuilt and run in this repo, and their results supersede this doc's spike sections. See `spikes/SPIKES.md`. Spike 1: Live Preview is feasible for inline syntax, with IME still to verify (#27). Spike 2: merman without ELK is the renderer, final after scoring the user's own diagrams. Spike 3: protected-folder format v1 is frozen (`docs/protected-folder-format.md`). **The Phase 0 gate is passed: see `docs/phase0-gate.md`.**
 
 **Rules for the implementer**
 
@@ -147,7 +147,7 @@ Three layers with one-way dependencies: the UI calls the headless core, and the 
 vault/
   Notes/...md                # plain notes
   .vault/                    # our config and cache (unprotected content only)
-  .s/<random128>/            # one sealed area per protected folder
+  .s/<random128>/            # one directory per protected folder
       header                 # KDF parameters and wrapped master key
       blobs/<random128>      # one encrypted blob per note or attachment
 ```
@@ -227,21 +227,21 @@ Estimates assume part-time solo work while learning Rust and GPUI, so treat them
 
 **Phase 0: Foundation (2 to 3 weeks)**
 
-- [ ] Cargo workspace with the crates listed in the architecture section, CI, and a pinned `gpui-kit` Hello World on Linux
-- [ ] File tree, tabs and theming shell
-- [ ] Spike 1 (GPUI half): conceal ranges with correct caret, click, selection and IME (one-week time-box)
-- [ ] Spike 2: run the Mermaid harness on the real crates plus the user's own diagrams, and score them
-- [ ] Spike 3: prototype the sealed blob format with test vectors
-- [ ] **Gate:** editor approach chosen (Live Preview or split fallback), Mermaid renderer chosen, blob format specified
+- [x] Cargo workspace with the crates listed in the architecture section, CI, and a pinned `gpui-kit` Hello World on Linux
+- [ ] File tree, tabs and theming shell (moved into Phase 1 as MVP tickets #7 and #8)
+- [x] Spike 1 (GPUI half): conceal ranges with correct caret, click, selection and IME (one-week time-box). IME still to verify in #27
+- [x] Spike 2: run the Mermaid harness on the real crates plus the user's own diagrams, and score them
+- [x] Spike 3: prototype the protected-folder blob format with test vectors
+- [x] **Gate:** editor approach chosen (Live Preview or split fallback), Mermaid renderer chosen, blob format specified. See `docs/phase0-gate.md`
 
 **Phase 1: MVP (8 to 10 weeks)**
 
 - [ ] Split source and preview using Kit's `Editor` and `TextView`
 - [ ] Vault open, file watcher, quick switcher, command palette
 - [ ] Full-text search, tags, wikilinks, backlinks panel
-- [ ] Sealed folders: create, unlock, lock, edit, auto-lock
+- [ ] Protected folders: create, unlock, lock, edit, auto-lock
 - [ ] Mermaid blocks in the preview
-- [ ] **Gate:** daily-usable notes app; sealed folders pass the leak checklist
+- [ ] **Gate:** daily-usable notes app; protected folders pass the leak checklist
 
 **Phase 2: Core features (10 to 14 weeks)**
 
