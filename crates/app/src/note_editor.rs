@@ -53,6 +53,14 @@ enum Mode {
 }
 
 impl Mode {
+    fn of(path: &VaultPath) -> Self {
+        if is_plain_text_note(path) {
+            Mode::Source
+        } else {
+            Mode::Split
+        }
+    }
+
     fn label(self) -> &'static str {
         match self {
             Mode::Split => "Split view",
@@ -62,7 +70,6 @@ impl Mode {
 }
 
 /// Where the note's edits stand against the disk.
-#[derive(Default)]
 struct Saves {
     /// Bumped on every edit; the note is saved when `saved` equals it.
     revision: u64,
@@ -72,11 +79,38 @@ struct Saves {
     again: bool,
     /// The edits are still in memory; the next save retries.
     failure: Option<SharedString>,
-    /// Held while writing, so writes land in the order they started.
-    lock: Arc<Mutex<()>>,
+    /// Shared with writes on background threads, which run one at a time.
+    disk: Arc<Mutex<Disk>>,
+}
+
+/// What a write needs to know when its turn comes, rather than when it was
+/// queued: the note may have moved, been deleted, or been saved newer.
+struct Disk {
+    /// `None` once the note is deleted: nothing more is written.
+    path: Option<VaultPath>,
+    /// The newest revision on disk; an older write is skipped.
+    written: u64,
 }
 
 impl Saves {
+    fn new(path: VaultPath) -> Self {
+        Saves {
+            revision: 0,
+            saved: 0,
+            writing: false,
+            again: false,
+            failure: None,
+            disk: Arc::new(Mutex::new(Disk {
+                path: Some(path),
+                written: 0,
+            })),
+        }
+    }
+
+    fn disk(&self) -> std::sync::MutexGuard<'_, Disk> {
+        self.disk.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn is_dirty(&self) -> bool {
         self.revision != self.saved
     }
@@ -119,11 +153,7 @@ impl NoteEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let mode = if is_plain_text_note(&path) {
-            Mode::Source
-        } else {
-            Mode::Split
-        };
+        let mode = Mode::of(&path);
         let source = cx.new(|cx| {
             EditorState::new(window, cx)
                 .language(match mode {
@@ -141,13 +171,13 @@ impl NoteEditor {
         });
         NoteEditor {
             preview: PreviewContext::new(vault.clone(), path.clone()),
+            saves: Saves::new(path.clone()),
             vault,
             path,
             mode,
             source,
             words: word_count(&text),
             text: text.into(),
-            saves: Saves::default(),
             autosave: None,
             _subscription: subscription,
         }
@@ -155,6 +185,23 @@ impl NoteEditor {
 
     pub fn path(&self) -> &VaultPath {
         &self.path
+    }
+
+    /// Follows the note after a rename or move; writes still queued go to
+    /// the new path. A rename can change the extension, and with it the mode.
+    pub fn set_path(&mut self, path: VaultPath, cx: &mut Context<Self>) {
+        self.saves.disk().path = Some(path.clone());
+        self.preview = PreviewContext::new(self.vault.clone(), path.clone());
+        self.mode = Mode::of(&path);
+        self.path = path;
+        cx.notify();
+    }
+
+    /// After the note is deleted: writes still queued are dropped, so none
+    /// can bring it back.
+    pub fn forget_disk(&mut self) {
+        self.autosave = None;
+        self.saves.disk().path = None;
     }
 
     pub fn is_dirty(&self) -> bool {
@@ -252,17 +299,22 @@ impl NoteEditor {
     }
 
     /// A write of the current text, serialised with every other write of
-    /// this note, returning the revision it saved.
+    /// this note, returning the revision it saved. When its turn comes, it
+    /// writes to the note's path then, and not at all if a newer revision
+    /// is already on disk or the note was deleted.
     fn writer(&self, cx: &App) -> impl FnOnce() -> (u64, Result<(), Error>) + Send + 'static {
-        let (vault, path, lock) = (
-            self.vault.clone(),
-            self.path.clone(),
-            self.saves.lock.clone(),
-        );
+        let (vault, disk) = (self.vault.clone(), self.saves.disk.clone());
         let (text, revision) = (self.source.read(cx).value(), self.saves.revision);
         move || {
-            let _turn = lock.lock().unwrap_or_else(|e| e.into_inner());
-            (revision, vault.save_note(&path, &text))
+            let mut disk = disk.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(path) = disk.path.clone().filter(|_| revision > disk.written) else {
+                return (revision, Ok(()));
+            };
+            let result = vault.save_note(&path, &text);
+            if result.is_ok() {
+                disk.written = revision;
+            }
+            (revision, result)
         }
     }
 

@@ -19,6 +19,7 @@ use gpui_kit::*;
 use orbit_core::{EntryKind, TreeNode, Vault, VaultPath};
 
 use crate::appearance::{self, AppSettings};
+use crate::file_actions::{self, NewNote};
 use crate::note_editor::NoteEditor;
 use crate::settings_view::AppearancePane;
 
@@ -38,8 +39,13 @@ struct TreeEntryInfo {
 
 /// A note open in a tab.
 struct OpenTab {
-    title: SharedString,
     editor: Entity<NoteEditor>,
+}
+
+impl OpenTab {
+    fn title(&self, cx: &App) -> SharedString {
+        self.editor.read(cx).path().name().to_string().into()
+    }
 }
 
 pub struct OrbitWindow {
@@ -67,25 +73,182 @@ impl OrbitWindow {
             this.update(cx, |this, cx| this.save_all(cx))
                 .unwrap_or(true)
         });
-        let mut entries = HashMap::new();
-        let (items, error) = match vault.tree() {
-            Ok(nodes) => (tree_items(&nodes, &mut entries), None),
-            Err(e) => (
-                Vec::new(),
-                Some(format!("Couldn't read the vault: {e}").into()),
-            ),
-        };
-        let tree = cx.new(|cx| TreeState::new(cx).items(items));
-        OrbitWindow {
+        let mut this = OrbitWindow {
             vault,
-            tree,
-            entries: Rc::new(entries),
+            tree: cx.new(|cx| TreeState::new(cx)),
+            entries: Rc::default(),
             tabs: Vec::new(),
             active_tab: None,
             left_panel_open: true,
             right_panel_open: false,
-            error,
+            error: None,
+        };
+        this.refresh_tree(&HashSet::new(), cx);
+        this
+    }
+
+    /// Reloads the tree from the vault, with the folders in `expanded` open.
+    fn refresh_tree(&mut self, expanded: &HashSet<VaultPath>, cx: &mut Context<Self>) {
+        let mut entries = HashMap::new();
+        let items = match self.vault.tree() {
+            Ok(nodes) => tree_items(&nodes, expanded, &mut entries),
+            Err(e) => {
+                self.error = Some(format!("Couldn't read the vault: {e}").into());
+                Vec::new()
+            }
+        };
+        self.entries = Rc::new(entries);
+        self.tree.update(cx, |tree, cx| tree.set_items(items, cx));
+        cx.notify();
+    }
+
+    /// The folders open in the tree now.
+    fn expanded_folders(&self, cx: &App) -> HashSet<VaultPath> {
+        let tree = self.tree.read(cx);
+        (0..)
+            .map_while(|ix| tree.entry(ix))
+            .filter(|entry| entry.is_expanded())
+            .filter_map(|entry| self.entries.get(&entry.item().id))
+            .map(|info| info.path.clone())
+            .collect()
+    }
+
+    /// Every folder in the vault, in tree order.
+    fn folders(&self) -> Vec<VaultPath> {
+        let mut folders: Vec<VaultPath> = self
+            .entries
+            .values()
+            .filter(|e| e.kind == EntryKind::Folder)
+            .map(|e| e.path.clone())
+            .collect();
+        folders.sort_by_key(|f| f.as_str().to_lowercase());
+        folders
+    }
+
+    /// Shows a failed file operation in the status bar.
+    fn report(&mut self, what: &str, error: impl std::fmt::Display, cx: &mut Context<Self>) {
+        self.error = Some(format!("Couldn't {what}: {error}").into());
+        cx.notify();
+    }
+
+    /// A new empty note in `folder`, opened in a tab and ready for typing.
+    pub fn new_note(&mut self, folder: VaultPath, window: &mut Window, cx: &mut Context<Self>) {
+        match self.vault.create_note(&folder) {
+            Ok(path) => {
+                let mut expanded = self.expanded_folders(cx);
+                expanded.insert(folder);
+                self.refresh_tree(&expanded, cx);
+                self.open_note(path, window, cx);
+            }
+            Err(e) => self.report("create a note", e, cx),
         }
+    }
+
+    /// A new folder in `parent`, then asks for its name.
+    pub fn new_folder(&mut self, parent: VaultPath, window: &mut Window, cx: &mut Context<Self>) {
+        match self.vault.create_folder(&parent) {
+            Ok(path) => {
+                let mut expanded = self.expanded_folders(cx);
+                expanded.insert(parent);
+                self.refresh_tree(&expanded, cx);
+                file_actions::ask_rename(self, path, EntryKind::Folder, window, cx);
+            }
+            Err(e) => self.report("create a folder", e, cx),
+        }
+    }
+
+    pub fn rename_entry(
+        &mut self,
+        path: VaultPath,
+        new_name: &str,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let vault = self.vault.clone();
+        self.relocate(&path, "rename", || vault.rename(&path, new_name), cx);
+    }
+
+    pub fn move_entry(
+        &mut self,
+        path: VaultPath,
+        folder: &VaultPath,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let vault = self.vault.clone();
+        self.relocate(&path, "move", || vault.move_to(&path, folder), cx);
+    }
+
+    /// Renames or moves `path` with `relocate`, its open notes saved first.
+    /// Afterwards open tabs follow their notes, and the tree keeps its open
+    /// folders, under their new paths too.
+    fn relocate(
+        &mut self,
+        path: &VaultPath,
+        verb: &str,
+        relocate: impl FnOnce() -> Result<VaultPath, orbit_core::Error>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.save_tabs_within(path, cx) {
+            return;
+        }
+        let to = match relocate() {
+            Ok(to) => to,
+            Err(e) => return self.report(&format!("{verb} {}", path.name()), e, cx),
+        };
+        let expanded = self
+            .expanded_folders(cx)
+            .into_iter()
+            .map(|folder| folder.rebase(path, &to))
+            .chain(std::iter::once(to.parent()))
+            .collect();
+        for tab in &self.tabs {
+            tab.editor.update(cx, |editor, cx| {
+                if editor.path().is_within(path) {
+                    let moved = editor.path().rebase(path, &to);
+                    editor.set_path(moved, cx);
+                }
+            });
+        }
+        self.error = None;
+        self.refresh_tree(&expanded, cx);
+    }
+
+    /// Sends an entry to the trash and closes the tabs of notes inside it.
+    /// Their notes are saved first, so the trash holds the latest text; if
+    /// one can't be, nothing is deleted.
+    pub fn delete_entry(&mut self, path: VaultPath, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.save_tabs_within(&path, cx) {
+            return;
+        }
+        if let Err(e) = self.vault.delete(&path) {
+            return self.report(&format!("delete {}", path.name()), e, cx);
+        }
+        while let Some(ix) = self
+            .tabs
+            .iter()
+            .position(|t| t.editor.read(cx).path().is_within(&path))
+        {
+            self.tabs[ix]
+                .editor
+                .update(cx, |editor, _| editor.forget_disk());
+            self.remove_tab(ix, cx);
+        }
+        self.error = None;
+        let expanded = self.expanded_folders(cx);
+        self.refresh_tree(&expanded, cx);
+    }
+
+    /// Saves the open notes at or inside `path`; false if any couldn't be.
+    fn save_tabs_within(&mut self, path: &VaultPath, cx: &mut Context<Self>) -> bool {
+        let affected: Vec<usize> = (0..self.tabs.len())
+            .filter(|&ix| self.tabs[ix].editor.read(cx).path().is_within(path))
+            .collect();
+        affected
+            .into_iter()
+            .filter(|&ix| !self.save_tab(ix, cx))
+            .count()
+            == 0
     }
 
     /// Opens a note in a tab, or focuses its tab if it's already open.
@@ -100,7 +263,6 @@ impl OrbitWindow {
             match self.vault.read_note(&path) {
                 Ok(text) => {
                     let vault = self.vault.clone();
-                    let title = path.name().to_string().into();
                     let editor = cx.new(|cx| NoteEditor::new(vault, path, text, window, cx));
                     // Unsaved markers, the caret and word count live in the
                     // editor. A save that worked clears an old save error.
@@ -111,7 +273,7 @@ impl OrbitWindow {
                         cx.notify();
                     })
                     .detach();
-                    self.tabs.push(OpenTab { title, editor });
+                    self.tabs.push(OpenTab { editor });
                     self.active_tab = Some(self.tabs.len() - 1);
                     self.error = None;
                 }
@@ -139,8 +301,8 @@ impl OrbitWindow {
         };
         let result = tab.editor.update(cx, |editor, cx| editor.save_blocking(cx));
         if let Err(e) = &result {
-            self.error = Some(format!("Couldn't save {}: {e}", tab.title).into());
-            cx.notify();
+            let what = format!("save {}", tab.title(cx));
+            self.report(&what, e, cx);
         }
         result.is_ok()
     }
@@ -166,9 +328,12 @@ impl OrbitWindow {
 
     fn close_tab(&mut self, ix: usize, cx: &mut Context<Self>) {
         // A note that can't be saved stays open, so its edits aren't lost.
-        if ix >= self.tabs.len() || !self.save_tab(ix, cx) {
-            return;
+        if ix < self.tabs.len() && self.save_tab(ix, cx) {
+            self.remove_tab(ix, cx);
         }
+    }
+
+    fn remove_tab(&mut self, ix: usize, cx: &mut Context<Self>) {
         self.tabs.remove(ix);
         self.active_tab = match self.active_tab {
             _ if self.tabs.is_empty() => None,
@@ -181,7 +346,7 @@ impl OrbitWindow {
 
     fn render_title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let title = match self.active_tab.and_then(|ix| self.tabs.get(ix)) {
-            Some(tab) => format!("{} · {}", tab.title, self.vault.name()),
+            Some(tab) => format!("{} · {}", tab.title(cx), self.vault.name()),
             None => self.vault.name().to_string(),
         };
         TitleBar::new()
@@ -219,6 +384,8 @@ impl OrbitWindow {
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let view = cx.entity().downgrade();
         let entries = self.entries.clone();
+        let (menu_view, menu_entries, folders) =
+            (view.clone(), self.entries.clone(), self.folders());
         let unsaved: Rc<HashSet<VaultPath>> = Rc::new(
             self.tabs
                 .iter()
@@ -235,50 +402,89 @@ impl OrbitWindow {
             .border_color(cx.theme().border)
             .bg(cx.theme().sidebar)
             .child(
-                div()
-                    .px_3()
-                    .py_2()
-                    .text_sm()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(self.vault.name().to_string()),
+                h_flex()
+                    .pl_3()
+                    .pr_1()
+                    .py_1()
+                    .gap_1()
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(self.vault.name().to_string()),
+                    )
+                    .child(
+                        Button::new("new-note")
+                            .ghost()
+                            .small()
+                            .icon(IconName::FilePlus)
+                            .tooltip("New note (Ctrl+N)")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.new_note(VaultPath::root(), window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("new-folder")
+                            .ghost()
+                            .small()
+                            .icon(IconName::FolderPlus)
+                            .tooltip("New folder")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.new_folder(VaultPath::root(), window, cx)
+                            })),
+                    ),
             )
-            .child(div().flex_1().min_h_0().child(tree(
-                &self.tree,
-                move |ix, entry, _selected, _, cx| {
-                    let id = entry.item().id.clone();
-                    let entry_info = entries.get(&id);
-                    let kind = entry_info.map(|e| e.kind);
-                    let icon = match kind {
-                        Some(EntryKind::Folder) if entry.is_expanded() => IconName::FolderOpen,
-                        Some(EntryKind::Folder) => IconName::FolderClosed,
-                        Some(EntryKind::Note) => IconName::FileText,
-                        _ => IconName::File,
-                    };
-                    let is_unsaved = entry_info.is_some_and(|e| unsaved.contains(&e.path));
-                    let mut item = ListItem::new(ix)
-                        .pl(px(12. + 16. * entry.depth() as f32))
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .child(icon)
-                                .child(entry.item().label.clone())
-                                .when(is_unsaved, |this| this.child(unsaved_dot(cx))),
-                        );
-                    if let Some(TreeEntryInfo {
-                        path,
-                        kind: EntryKind::Note,
-                    }) = entry_info.cloned()
-                    {
-                        let view = view.clone();
-                        item = item.on_click(move |_, window, cx| {
-                            let path = path.clone();
-                            view.update(cx, |this, cx| this.open_note(path, window, cx))
-                                .ok();
-                        });
-                    }
-                    item
-                },
-            )))
+            .child(
+                div().flex_1().min_h_0().child(
+                    tree(&self.tree, move |ix, entry, _selected, _, cx| {
+                        let id = entry.item().id.clone();
+                        let entry_info = entries.get(&id);
+                        let kind = entry_info.map(|e| e.kind);
+                        let icon = match kind {
+                            Some(EntryKind::Folder) if entry.is_expanded() => IconName::FolderOpen,
+                            Some(EntryKind::Folder) => IconName::FolderClosed,
+                            Some(EntryKind::Note) => IconName::FileText,
+                            _ => IconName::File,
+                        };
+                        let is_unsaved = entry_info.is_some_and(|e| unsaved.contains(&e.path));
+                        let mut item = ListItem::new(ix)
+                            .pl(px(12. + 16. * entry.depth() as f32))
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .child(icon)
+                                    .child(entry.item().label.clone())
+                                    .when(is_unsaved, |this| this.child(unsaved_dot(cx))),
+                            );
+                        if let Some(TreeEntryInfo {
+                            path,
+                            kind: EntryKind::Note,
+                        }) = entry_info.cloned()
+                        {
+                            let view = view.clone();
+                            item = item.on_click(move |_, window, cx| {
+                                let path = path.clone();
+                                view.update(cx, |this, cx| this.open_note(path, window, cx))
+                                    .ok();
+                            });
+                        }
+                        item
+                    })
+                    .context_menu(move |_, entry, menu, _, _| {
+                        match menu_entries.get(&entry.item().id) {
+                            Some(info) => file_actions::tree_menu(
+                                menu,
+                                menu_view.clone(),
+                                info.path.clone(),
+                                info.kind,
+                                folders.clone(),
+                            ),
+                            None => menu,
+                        }
+                    }),
+                ),
+            )
     }
 
     fn render_centre(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -308,7 +514,7 @@ impl OrbitWindow {
                         .children(self.tabs.iter().enumerate().map(|(ix, tab)| {
                             let unsaved = tab.editor.read(cx).is_dirty();
                             Tab::new()
-                                .label(tab.title.clone())
+                                .label(tab.title(cx))
                                 .when(unsaved, |this| this.prefix(unsaved_dot(cx)))
                                 .suffix(
                                     Button::new(("close-tab", ix))
@@ -369,6 +575,10 @@ impl Render for OrbitWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let grain = AppSettings::get(cx).paper_grain;
         v_flex()
+            .key_context(file_actions::KEY_CONTEXT)
+            .on_action(cx.listener(|this, _: &NewNote, window, cx| {
+                this.new_note(VaultPath::root(), window, cx)
+            }))
             .relative()
             .size_full()
             .bg(cx.theme().background)
@@ -418,6 +628,7 @@ fn panel_toggle(
 /// Builds tree items (id = vault path) and records what each one is.
 fn tree_items(
     nodes: &[TreeNode],
+    expanded: &HashSet<VaultPath>,
     entries: &mut HashMap<SharedString, TreeEntryInfo>,
 ) -> Vec<TreeItem> {
     nodes
@@ -433,7 +644,8 @@ fn tree_items(
             );
             let item = TreeItem::new(id, node.name.clone());
             if node.kind == EntryKind::Folder {
-                item.children(tree_items(&node.children, entries))
+                item.expanded(expanded.contains(&node.path))
+                    .children(tree_items(&node.children, expanded, entries))
             } else {
                 item
             }

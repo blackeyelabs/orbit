@@ -66,6 +66,27 @@ impl VaultPath {
         VaultPath(self.0.rsplit_once('/').map_or("", |(p, _)| p).to_string())
     }
 
+    /// Whether this is `folder` or something inside it, segment by segment.
+    pub fn is_within(&self, folder: &VaultPath) -> bool {
+        folder.is_root()
+            || self == folder
+            || self
+                .0
+                .strip_prefix(&folder.0)
+                .is_some_and(|rest| rest.starts_with('/'))
+    }
+
+    /// Where this path is after `from` moved to `to`: itself unless it's
+    /// `from` or inside it.
+    pub fn rebase(&self, from: &VaultPath, to: &VaultPath) -> VaultPath {
+        match self.0.strip_prefix(&from.0) {
+            Some(rest) if self.is_within(from) && !from.is_root() => {
+                VaultPath(format!("{}{rest}", to.0))
+            }
+            _ => self.clone(),
+        }
+    }
+
     pub fn join(&self, name: &str) -> io::Result<Self> {
         if self.is_root() {
             Self::new(name)
@@ -101,6 +122,14 @@ pub trait VaultFs: Send + Sync {
     /// Replaces or creates a file atomically: afterwards it holds either the
     /// old contents or all of the new ones, even after a crash.
     fn write(&self, file: &VaultPath, contents: &[u8]) -> io::Result<()>;
+    /// Creates an empty file; fails if anything already has that path.
+    fn create_file(&self, file: &VaultPath) -> io::Result<()>;
+    /// Creates a folder inside an existing one.
+    fn create_dir(&self, dir: &VaultPath) -> io::Result<()>;
+    /// Renames or moves a file or folder; fails if `to` already exists.
+    fn rename(&self, from: &VaultPath, to: &VaultPath) -> io::Result<()>;
+    /// Moves a file or folder to the system trash.
+    fn trash(&self, path: &VaultPath) -> io::Result<()>;
 }
 
 /// A vault folder on the local disk.
@@ -135,6 +164,18 @@ impl PlainFs {
                 "path leaves the vault",
             ))
         }
+    }
+
+    /// The real path of the entry itself, not following a symlink at the end
+    /// of `path`. The vault root isn't an entry.
+    fn entry_path(&self, path: &VaultPath) -> io::Result<PathBuf> {
+        if path.is_root() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the vault root can't be moved or deleted",
+            ));
+        }
+        Ok(self.resolve(&path.parent())?.join(path.name()))
     }
 
     /// Like [`Self::resolve`], but a file that doesn't exist yet resolves
@@ -191,6 +232,31 @@ impl VaultFs for PlainFs {
         fs::read(self.resolve(file)?)
     }
 
+    fn create_file(&self, file: &VaultPath) -> io::Result<()> {
+        let target = self.resolve_for_write(file)?;
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(target)?;
+        Ok(())
+    }
+
+    fn create_dir(&self, dir: &VaultPath) -> io::Result<()> {
+        fs::create_dir(self.resolve_for_write(dir)?)
+    }
+
+    fn rename(&self, from: &VaultPath, to: &VaultPath) -> io::Result<()> {
+        // Not `resolve`: a symlink is moved itself, not its target.
+        let source = self.entry_path(from)?;
+        let target = self.resolve_for_write(to)?;
+        rename_no_replace(&source, &target)
+    }
+
+    fn trash(&self, path: &VaultPath) -> io::Result<()> {
+        let target = self.entry_path(path)?;
+        trash::delete(&target).map_err(io::Error::other)
+    }
+
     /// Writes a temporary file beside the target, fsyncs it, renames it over
     /// the target and fsyncs the folder. Through a symlink, the link's target
     /// is replaced and the link kept.
@@ -211,4 +277,26 @@ impl VaultFs for PlainFs {
         fs::File::open(dir)?.sync_all()?;
         Ok(())
     }
+}
+
+/// Renames, failing with `AlreadyExists` rather than replacing `target`. On
+/// Linux the kernel checks and renames in one step; where the filesystem
+/// can't, and elsewhere, another app creating `target` between the check and
+/// the rename could still be replaced.
+fn rename_no_replace(source: &Path, target: &Path) -> io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        use rustix::fs::{CWD, RenameFlags, renameat_with};
+        match renameat_with(CWD, source, CWD, target, RenameFlags::NOREPLACE) {
+            Err(rustix::io::Errno::INVAL | rustix::io::Errno::NOSYS) => {}
+            result => return result.map_err(io::Error::from),
+        }
+    }
+    if target.symlink_metadata().is_ok() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("{} already exists", target.display()),
+        ));
+    }
+    fs::rename(source, target)
 }

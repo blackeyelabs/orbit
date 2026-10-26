@@ -26,3 +26,7 @@ serde_json = "1"
 # Atomic saves in orbit-fs; temporary folders in tests.
 tempfile = "3"
 unicode-segmentation = "=1.13.3"
+# Deleting sends plain files to the freedesktop trash.
+trash = "=5.2.6"
+# renameat2(RENAME_NOREPLACE): a rename that can never replace a file.
+rustix = { version = "=1.1.5", features = ["fs"] }

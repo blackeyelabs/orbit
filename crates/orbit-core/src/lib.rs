@@ -38,7 +38,8 @@ pub enum EntryKind {
 }
 
 impl EntryKind {
-    fn of_file(name: &str) -> Self {
+    /// The kind of a file, from its name's extension.
+    pub fn of_file(name: &str) -> Self {
         let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
         match ext.as_deref() {
             Some("md" | "txt") => EntryKind::Note,
@@ -65,6 +66,12 @@ pub enum Error {
     NotANote(VaultPath),
     /// The note isn't UTF-8 text, so editing it could lose bytes.
     NotUtf8(VaultPath),
+    /// Something already has this path.
+    AlreadyExists(VaultPath),
+    /// A folder can't move into itself or a folder inside it.
+    IntoItself(VaultPath),
+    /// Not usable as a file or folder name.
+    InvalidName(String),
     Io(io::Error),
 }
 
@@ -80,6 +87,9 @@ impl std::fmt::Display for Error {
             Error::NotFound => f.write_str("vault folder not found"),
             Error::NotANote(p) => write!(f, "not a note: {p}"),
             Error::NotUtf8(p) => write!(f, "{p} isn't UTF-8 text, so Orbit won't open it"),
+            Error::AlreadyExists(p) => write!(f, "{p} already exists"),
+            Error::IntoItself(p) => write!(f, "{p} can't move into itself"),
+            Error::InvalidName(n) => write!(f, "{n:?} can't be used as a name"),
             Error::Io(e) => write!(f, "{e}"),
         }
     }
@@ -132,10 +142,104 @@ impl Vault {
     /// Tool folders aren't vault content, so nothing is saved into them.
     pub fn save_note(&self, path: &VaultPath, text: &str) -> Result<(), Error> {
         check_note(path)?;
-        if path.as_str().split('/').any(is_tool_folder) {
+        if in_tool_folder(path) {
             return Err(Error::NotANote(path.clone()));
         }
         Ok(self.fs.write(path, text.as_bytes())?)
+    }
+
+    /// Creates an empty note named `Untitled.md` (or `Untitled 1.md`, …) in
+    /// `folder`.
+    pub fn create_note(&self, folder: &VaultPath) -> Result<VaultPath, Error> {
+        let path = self.untitled(folder, ".md")?;
+        self.fs.create_file(&path)?;
+        Ok(path)
+    }
+
+    /// Creates a folder named `Untitled` (or `Untitled 1`, …) in `parent`.
+    pub fn create_folder(&self, parent: &VaultPath) -> Result<VaultPath, Error> {
+        let path = self.untitled(parent, "")?;
+        self.fs.create_dir(&path)?;
+        Ok(path)
+    }
+
+    /// Renames a note or folder within its folder. A note or canvas keeps
+    /// its extension unless the new name has a recognised one (`.md` to
+    /// `.txt`, say). Links to it aren't rewritten yet.
+    pub fn rename(&self, path: &VaultPath, new_name: &str) -> Result<VaultPath, Error> {
+        if path.is_root() || in_tool_folder(path) {
+            return Err(Error::InvalidName(path.to_string()));
+        }
+        check_name(new_name)?;
+        let is_folder = self
+            .fs
+            .list_dir(&path.parent())?
+            .iter()
+            .any(|e| e.name == path.name() && e.entry_type == EntryType::Dir);
+        let old_kind = EntryKind::of_file(path.name());
+        let new_name = match path.name().rsplit_once('.') {
+            Some((_, ext))
+                if !is_folder
+                    && old_kind != EntryKind::Attachment
+                    && EntryKind::of_file(new_name) == EntryKind::Attachment =>
+            {
+                format!("{new_name}.{ext}")
+            }
+            _ => new_name.to_string(),
+        };
+        check_name(&new_name)?;
+        let to = path.parent().join(&new_name)?;
+        if &to == path {
+            return Ok(to);
+        }
+        self.move_entry(path, to)
+    }
+
+    /// Moves a note or folder into `folder`, keeping its name. Links to it
+    /// aren't rewritten yet.
+    pub fn move_to(&self, path: &VaultPath, folder: &VaultPath) -> Result<VaultPath, Error> {
+        if folder.is_within(path) {
+            return Err(Error::IntoItself(path.clone()));
+        }
+        if in_tool_folder(folder) || in_tool_folder(path) {
+            return Err(Error::InvalidName(folder.to_string()));
+        }
+        self.move_entry(path, folder.join(path.name())?)
+    }
+
+    /// Sends a note or folder to the system trash, where it can be restored.
+    /// Orbit keeps no trash folder of its own.
+    pub fn delete(&self, path: &VaultPath) -> Result<(), Error> {
+        if path.is_root() || in_tool_folder(path) {
+            return Err(Error::InvalidName(path.to_string()));
+        }
+        Ok(self.fs.trash(path)?)
+    }
+
+    fn move_entry(&self, from: &VaultPath, to: VaultPath) -> Result<VaultPath, Error> {
+        match self.fs.rename(from, &to) {
+            Ok(()) => Ok(to),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Err(Error::AlreadyExists(to)),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// The first `Untitled{n}{extension}` nothing in `folder` is named.
+    fn untitled(&self, folder: &VaultPath, extension: &str) -> Result<VaultPath, Error> {
+        let taken: Vec<String> = self
+            .fs
+            .list_dir(folder)?
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        let name = (0..)
+            .map(|n| match n {
+                0 => format!("Untitled{extension}"),
+                n => format!("Untitled {n}{extension}"),
+            })
+            .find(|name| !taken.contains(name))
+            .expect("some Untitled name is free");
+        Ok(folder.join(&name)?)
     }
 
     /// The contents of the Attachment an image link in `note` points to:
@@ -204,6 +308,22 @@ impl Vault {
 /// Whether a path is shown as Source mode only: `.txt` notes are plain text.
 pub fn is_plain_text_note(path: &VaultPath) -> bool {
     path.name().to_ascii_lowercase().ends_with(".txt")
+}
+
+/// Whether a path is a tool folder or inside one.
+fn in_tool_folder(path: &VaultPath) -> bool {
+    path.as_str().split('/').any(is_tool_folder)
+}
+
+/// A name for a note or folder: one non-blank path segment that isn't a
+/// tool folder.
+fn check_name(name: &str) -> Result<(), Error> {
+    let single_segment = VaultPath::new(name).is_ok_and(|p| !p.is_root() && p.name() == name);
+    if single_segment && !name.trim().is_empty() && !is_tool_folder(name) {
+        Ok(())
+    } else {
+        Err(Error::InvalidName(name.to_string()))
+    }
 }
 
 fn check_note(path: &VaultPath) -> Result<(), Error> {

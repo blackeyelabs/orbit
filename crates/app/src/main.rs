@@ -3,6 +3,7 @@
 //! themes, grain) and forwards clicks to the Vault facade.
 
 mod appearance;
+mod file_actions;
 mod note_editor;
 mod preview;
 mod settings_view;
@@ -38,6 +39,7 @@ fn main() {
             gpui_kit::init(cx);
             appearance::init(cx);
             note_editor::init(cx);
+            file_actions::init(cx);
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                     None,
