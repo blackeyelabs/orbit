@@ -1,10 +1,10 @@
-# Vault: implementation plan for Claude Code
+# Orbit: implementation plan for Claude Code
 
 Oct 22, 2026 · @Ravi Bharti
 
 ## How to use this doc
 
-Read this whole doc before planning; it records every decision made so far, so Claude Code can plan Phase 0 without re-asking. Vault is a local-first, Obsidian-like markdown workspace written in Rust on GPUI Kit, Linux first.
+Read this whole doc before planning; it records every decision made so far, so Claude Code can plan Phase 0 without re-asking. Orbit is a local-first, Obsidian-like markdown workspace written in Rust on GPUI Kit, Linux first.
 
 **Status (2026-10-22):** architecture decided. Spike 1's headless model passes its tests. Spike 2's harness is written but has not been run against the real Mermaid crates. No application code exists yet.
 
@@ -17,11 +17,20 @@ Read this whole doc before planning; it records every decision made so far, so C
 - Compile every API call before trusting it: several crate APIs below come from documentation only and are marked unverified.
 - Work in small, testable steps; each roadmap task should end with passing tests or a runnable demo.
 
+**Vocabulary and decisions (2026-10-26):** `CONTEXT.md` at the repo root is the glossary. Use its terms in code, UI and docs; it replaces "sealed folder/area" with **protected folder**. Architectural decisions are recorded in `docs/adr/`. A grilling session against the design canvas settled these conflicts between this doc and the design:
+
+- Crates are named `orbit-*` instead of `vault-*`. A vault is the folder of notes; Orbit is the app.
+- Mermaid's MVP guarantee is flowchart, sequence, class, ER, state, Gantt, mindmap and pie. The design's "unsupported type" copy is generated from the renderer's real list.
+- The design adds features this roadmap lacked. MVP: outline, backlinks and tags panels, search filters, wikilink autocomplete, welcome screen, disk-conflict states, narrow layout, clipboard warning, Settings › Appearance and Security. Phase 2: slash menu, table handles, link popover, Copy SVG, properties, unlinked mentions. Phase 3: spell check, rebindable shortcuts.
+- `.txt` files are notes (always shown as Source mode). `.canvas` files are deferred (ADR 0005).
+- No OS-keyring quick unlock for now. Test targets: Wayland on Hyprland and KDE Plasma, with an X11 smoke test.
+- The `vault-spikes` folder was not available, so the spikes are rebuilt from this doc.
+
 **Existing artifacts:** a `vault-spikes` folder holds `spike1-conceal` (std-only, 10 passing tests), `spike2-mermaid` (runner and 15-diagram corpus), and `SPIKES.md` (run instructions). Copy it into the repo before starting.
 
 ## Goals and confirmed requirements
 
-Vault is an Obsidian-like local knowledge workspace: markdown files in a folder, edited in a WYSIWYG editor, with protected folders, Mermaid diagrams, and fast search. Every row below was confirmed by the user.
+Orbit is an Obsidian-like local knowledge workspace: markdown files in a folder, edited in a WYSIWYG editor, with protected folders, Mermaid diagrams, and fast search. Every row below was confirmed by the user.
 
 | Area | Decision |
 | --- | --- |
