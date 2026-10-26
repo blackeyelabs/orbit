@@ -73,7 +73,7 @@ Run `cargo run -p spike1-gpui` on Wayland. The window shows a heading line and t
 
 | # | Pass/fail | Notes |
 |---|---|---|
-| 1 | Partial (2026-10-26, from screenshot) | Concealment correct: `##`, link and wikilink syntax hidden, alias shown, strikethrough drawn, and a newly typed `[google](…)` concealed live. Bold, italic, heading and code were **not** styled, because GPUI's default `.SystemUIFont` on Linux doesn't switch faces and `monospace` isn't a resolvable family. Fixed by naming the families (Noto Sans, JetBrains Mono). Re-check |
+| 1 | **Pass** (2026-10-26, from screenshots) | Concealment correct: `##`, link and wikilink syntax hidden, alias shown. After naming the font families (GPUI's default `.SystemUIFont` on Linux doesn't switch faces), bold, italic, heading (bold, not larger), code (JetBrains Mono), strikethrough and links all render. Newly typed `**bold text**`, `_this italic_`, `*italic*` and `[google](…)` concealed and styled live. A caret at source 329 (just after a `\n`) is drawn at the start of the next line, which is correct |
 | 2 | | |
 | 3 | | |
 | 4 | | |
