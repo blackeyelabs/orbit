@@ -3,4 +3,23 @@ name = "orbit-crypto"
 version.workspace = true
 edition.workspace = true
 
+[features]
+# Allows KdfParams::INSECURE_TEST (8 KiB Argon2) so tests run fast. Only this
+# crate's own tests enable it, through the self dev-dependency below.
+insecure-test-kdf = []
+
 [dependencies]
+aead-stream = { version = "=0.6.0", features = ["alloc"] }
+argon2 = { version = "=0.6.0", features = ["zeroize"] }
+chacha20poly1305 = { version = "=0.11.0", features = ["zeroize"] }
+hkdf = "=0.13.0"
+hmac = { version = "=0.13.0", features = ["zeroize"] }
+rand_core = "=0.10.1"
+secrecy = "=0.10.3"
+sha2 = { version = "=0.11.1", features = ["zeroize"] }
+unicode-normalization = "=0.1.26"
+zeroize = { version = "=1.9.0", features = ["derive"] }
+
+[dev-dependencies]
+orbit-crypto = { path = ".", features = ["insecure-test-kdf"] }
+rand_chacha = "0.10"
