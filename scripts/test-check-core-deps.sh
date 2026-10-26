@@ -13,7 +13,7 @@ copy_workspace() {
   local dest="$1"
   mkdir -p "$dest"
   cp "$root/Cargo.toml" "$root/Cargo.lock" "$dest/"
-  cp -r "$root/crates" "$dest/"
+  cp -r "$root/crates" "$root/spikes" "$dest/"
 }
 
 # Adds gpui-kit as a normal dependency of the given crate in a copy.

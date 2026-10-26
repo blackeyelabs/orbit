@@ -1,0 +1,10 @@
+[package]
+name = "spike1-gpui"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+gpui-kit.workspace = true
+spike1-conceal = { path = "../spike1-conceal" }
+unicode-segmentation = "1.12"

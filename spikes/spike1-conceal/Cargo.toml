@@ -1,0 +1,7 @@
+[package]
+name = "spike1-conceal"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]

@@ -5958,6 +5958,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "spike1-conceal"
+version = "0.1.0"
+
+[[package]]
+name = "spike1-gpui"
+version = "0.1.0"
+dependencies = [
+ "gpui-kit",
+ "spike1-conceal",
+ "unicode-segmentation",
+]
+
+[[package]]
 name = "spin"
 version = "0.9.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
