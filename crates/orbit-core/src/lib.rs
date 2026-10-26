@@ -4,6 +4,7 @@
 //! `orbit-api`); [`Settings`] holds the app-wide preferences beside it.
 //! Neither has a GPUI dependency.
 
+mod links;
 mod open_note;
 mod recent;
 mod session;
@@ -16,13 +17,25 @@ pub use recent::{RecentVault, RecentVaults};
 pub use session::{Session, SessionTab};
 pub use settings::{Settings, ThemeChoice, default_config_dir};
 
+use links::{Found, LinkIndex};
 use session::SessionFile;
 use std::{
     io,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
 };
 
 pub use orbit_fs::VaultPath;
+
+/// Where following a link leads.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Followed {
+    pub path: VaultPath,
+    /// The heading (or `^block`) the link names, to show.
+    pub heading: Option<String>,
+    /// The link was unresolved, and its note was just created.
+    pub created: bool,
+}
 pub use orbit_fs::Watch;
 use orbit_fs::{EntryType, ORBIT_DIR, PROTECTED_STORAGE_DIR, PlainFs, VaultFs, VaultLock};
 
@@ -129,6 +142,8 @@ pub struct Vault {
     fs: Box<dyn VaultFs>,
     /// `None` where the vault can't be written to, so can't be locked.
     _lock: Option<VaultLock>,
+    /// Shared with the watcher, which reports what changes.
+    links: Arc<Mutex<LinkIndex>>,
 }
 
 impl Vault {
@@ -153,6 +168,7 @@ impl Vault {
             name,
             fs: Box::new(plain),
             _lock: lock,
+            links: Arc::default(),
         })
     }
 
@@ -233,16 +249,149 @@ impl Vault {
     /// Reports paths changed by any app (Orbit included), in debounced
     /// batches, until the returned [`Watch`] is dropped. Tool folders are
     /// left out. `on_change` runs on a background thread.
+    /// Links resolve with these changes before `on_change` hears of them.
     pub fn watch(
         &self,
         mut on_change: impl FnMut(Vec<VaultPath>) + Send + 'static,
     ) -> Result<Watch, Error> {
+        let links = self.links.clone();
         Ok(self.fs.watch(Box::new(move |paths: Vec<VaultPath>| {
             let paths: Vec<VaultPath> = paths.into_iter().filter(|p| !in_tool_folder(p)).collect();
             if !paths.is_empty() {
+                link_index(&links).changed(paths.iter().cloned());
                 on_change(paths);
             }
         }))?)
+    }
+
+    /// The note or file a link points at from the note `from`, as Obsidian
+    /// resolves it: `link` is its path or name without `#heading`. A name
+    /// no file has resolves to a note with that front matter alias. `None`
+    /// is an unresolved link.
+    pub fn resolve(&self, from: &VaultPath, link: &str) -> Option<VaultPath> {
+        let mut index = link_index(&self.links);
+        let files = index.current(
+            |folder| self.children_of(folder, 0).unwrap_or_default(),
+            |path| self.find(path),
+        );
+        files.resolve(from, link)
+    }
+
+    /// Builds the index links resolve with, which reads every markdown
+    /// note's front matter; otherwise the first link resolved builds it.
+    pub fn index_links(&self) {
+        self.resolve(&VaultPath::root(), "");
+    }
+
+    /// What's at `path` now, for the link index.
+    fn find(&self, path: &VaultPath) -> Found {
+        let is_folder = |path: &VaultPath| {
+            self.fs.list_dir(&path.parent()).is_ok_and(|entries| {
+                entries
+                    .iter()
+                    .any(|e| e.name == path.name() && e.entry_type == EntryType::Dir)
+            })
+        };
+        if in_tool_folder(path) {
+            return Found::Nothing;
+        }
+        match self.read_disk(path) {
+            Ok(Some(bytes)) if links::is_markdown(path) => {
+                Found::File(md_engine::aliases(&String::from_utf8_lossy(&bytes)))
+            }
+            Ok(Some(_)) => Found::File(Vec::new()),
+            Ok(None) => Found::Nothing,
+            Err(_) if is_folder(path) => Found::Folder,
+            Err(_) => Found::Unreadable,
+        }
+    }
+
+    /// Follows a link clicked in the note `from` (`Note#Heading`): to the
+    /// note or file it resolves to, or, unresolved, to the note
+    /// [`Self::create_linked_note`] makes for it.
+    pub fn follow_link(&self, from: &VaultPath, target: &str) -> Result<Followed, Error> {
+        let (link, heading) = md_engine::split_target(target);
+        let heading = heading.map(str::to_string);
+        if let Some(path) = self.resolve(from, link) {
+            return Ok(Followed {
+                path,
+                heading,
+                created: false,
+            });
+        }
+        let path = self.create_linked_note(from, link)?;
+        Ok(Followed {
+            path,
+            heading,
+            created: true,
+        })
+    }
+
+    /// Where a vault file is on the local disk, for opening it in its app.
+    pub fn file_on_disk(&self, path: &VaultPath) -> PathBuf {
+        self.root.join(path.as_str())
+    }
+
+    /// Following an unresolved link: creates its (empty) note. A name goes
+    /// at the vault root, a path where it says, with any folders it needs,
+    /// and `./` or `../` from `from`'s folder. Without a note's extension,
+    /// `.md` is added, but a missing image or other Attachment isn't made a
+    /// note. Nothing that exists is replaced.
+    pub fn create_linked_note(&self, from: &VaultPath, link: &str) -> Result<VaultPath, Error> {
+        let invalid = || Error::InvalidName(link.to_string());
+        let from_folder = from.parent();
+        let mut segments: Vec<&str> = Vec::new();
+        let relative = link.starts_with("./") || link.starts_with("../");
+        if relative {
+            segments.extend(from_folder.as_str().split('/').filter(|s| !s.is_empty()));
+        }
+        for segment in link.trim_start_matches('/').split('/') {
+            match segment {
+                "." if relative => {}
+                ".." if relative => {
+                    segments.pop().ok_or_else(invalid)?;
+                }
+                name => {
+                    check_name(name)?;
+                    segments.push(name);
+                }
+            }
+        }
+        let mut path = VaultPath::new(&segments.join("/")).map_err(|_| invalid())?;
+        if path.is_root() {
+            return Err(invalid());
+        }
+        if is_attachment_name(path.name()) {
+            return Err(Error::NotANote(path));
+        }
+        if EntryKind::of_file(path.name()) != EntryKind::Note {
+            path = path.parent().join(&format!("{}.md", path.name()))?;
+        }
+        if self.read_disk(&path)?.is_some() {
+            return Err(Error::AlreadyExists(path));
+        }
+        let mut folder = VaultPath::root();
+        for name in segments.iter().take(segments.len() - 1) {
+            folder = folder.join(name)?;
+            match self.fs.create_dir(&folder) {
+                Err(e) if e.kind() != io::ErrorKind::AlreadyExists => return Err(e.into()),
+                _ => {}
+            }
+        }
+        match self.fs.create_file(&path) {
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                return Err(Error::AlreadyExists(path));
+            }
+            result => result?,
+        }
+        self.touched([path.clone()]);
+        Ok(path)
+    }
+
+    /// Orbit changed these paths: links see it now, not when the watcher
+    /// reports it.
+    fn touched(&self, paths: impl IntoIterator<Item = VaultPath>) {
+        link_index(&self.links).changed(paths);
     }
 
     /// Replaces (or creates) a note's text atomically. On failure the old
@@ -265,7 +414,10 @@ impl Vault {
         if in_tool_folder(path) {
             return Err(Error::NotANote(path.clone()));
         }
-        Ok(self.fs.write_if(path, text.as_bytes(), may_replace)?)
+        let written = self.fs.write_if(path, text.as_bytes(), may_replace)?;
+        // Its aliases may have changed.
+        self.touched([path.clone()]);
+        Ok(written)
     }
 
     /// Creates an empty note named `Untitled.md` (or `Untitled 1.md`, …) in
@@ -273,6 +425,7 @@ impl Vault {
     pub fn create_note(&self, folder: &VaultPath) -> Result<VaultPath, Error> {
         let path = self.untitled(folder, ".md")?;
         self.fs.create_file(&path)?;
+        self.touched([path.clone()]);
         Ok(path)
     }
 
@@ -333,12 +486,17 @@ impl Vault {
         if path.is_root() || in_tool_folder(path) {
             return Err(Error::InvalidName(path.to_string()));
         }
-        Ok(self.fs.trash(path)?)
+        self.fs.trash(path)?;
+        self.touched([path.clone()]);
+        Ok(())
     }
 
     fn move_entry(&self, from: &VaultPath, to: VaultPath) -> Result<VaultPath, Error> {
         match self.fs.rename(from, &to) {
-            Ok(()) => Ok(to),
+            Ok(()) => {
+                self.touched([from.clone(), to.clone()]);
+                Ok(to)
+            }
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Err(Error::AlreadyExists(to)),
             Err(e) => Err(e.into()),
         }
@@ -362,34 +520,17 @@ impl Vault {
         Ok(folder.join(&name)?)
     }
 
-    /// The contents of the Attachment an image link in `note` points to:
-    /// relative to the note's folder, percent-decoded, without any
-    /// `#fragment` or `?query`. Remote, absolute and missing links, and links
-    /// out of the vault, give `None`.
+    /// The contents of the Attachment an image link or embed in `note`
+    /// points to, resolved as any link is (percent-decoded, without any
+    /// `#fragment` or `?query`). Remote, missing and unresolved links give
+    /// `None`; nothing outside the vault is ever read.
     pub fn read_linked_attachment(&self, note: &VaultPath, link: &str) -> Option<Vec<u8>> {
-        let link = link.split(['#', '?']).next()?;
-        let scheme = link.split_once(':').is_some_and(|(s, _)| !s.contains('/'));
-        if link.is_empty() || link.starts_with('/') || scheme {
+        let path = link.split(['#', '?']).next()?;
+        if path.is_empty() || md_engine::has_scheme(path) {
             return None;
         }
-        let mut segments: Vec<String> = note
-            .parent()
-            .as_str()
-            .split('/')
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .collect();
-        for segment in percent_decode(link)?.split('/') {
-            match segment {
-                "" | "." => {}
-                ".." => {
-                    segments.pop()?;
-                }
-                name => segments.push(name.to_string()),
-            }
-        }
-        let path = VaultPath::new(&segments.join("/")).ok()?;
-        self.fs.read(&path).ok()
+        let target = self.resolve(note, &md_engine::percent_decode(path)?)?;
+        self.fs.read(&target).ok()
     }
 
     fn children_of(&self, dir: &VaultPath, depth: usize) -> Result<Vec<TreeNode>, Error> {
@@ -439,6 +580,44 @@ fn folder_name(path: &Path) -> String {
     )
 }
 
+/// The link index, locked. One whose holder panicked mid-update is
+/// started afresh, to be rebuilt.
+fn link_index(links: &Mutex<LinkIndex>) -> std::sync::MutexGuard<'_, LinkIndex> {
+    links.lock().unwrap_or_else(|poisoned| {
+        let mut index = poisoned.into_inner();
+        *index = LinkIndex::default();
+        index
+    })
+}
+
+/// A file name that's plainly an Attachment's: an image, audio, video or PDF.
+fn is_attachment_name(name: &str) -> bool {
+    let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
+    matches!(
+        ext.as_deref(),
+        Some(
+            "png"
+                | "jpg"
+                | "jpeg"
+                | "gif"
+                | "webp"
+                | "svg"
+                | "bmp"
+                | "avif"
+                | "pdf"
+                | "mp3"
+                | "wav"
+                | "ogg"
+                | "m4a"
+                | "flac"
+                | "mp4"
+                | "webm"
+                | "mov"
+                | "mkv"
+        )
+    )
+}
+
 fn session_path() -> VaultPath {
     VaultPath::new(&format!("{ORBIT_DIR}/{SESSION_FILE}")).expect("a valid vault path")
 }
@@ -470,27 +649,4 @@ fn check_note(path: &VaultPath) -> Result<(), Error> {
     } else {
         Err(Error::NotANote(path.clone()))
     }
-}
-
-/// Decodes `%XX` escapes; `None` if they don't decode to UTF-8.
-fn percent_decode(s: &str) -> Option<String> {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        let hex = bytes
-            .get(i + 1..i + 3)
-            .and_then(|h| std::str::from_utf8(h).ok());
-        match (bytes[i], hex.and_then(|h| u8::from_str_radix(h, 16).ok())) {
-            (b'%', Some(byte)) => {
-                out.push(byte);
-                i += 3;
-            }
-            (byte, _) => {
-                out.push(byte);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8(out).ok()
 }

@@ -2,9 +2,13 @@
 
 mod callout;
 mod formatting;
+mod links;
 
 pub use callout::{Callout, CalloutKind, callout};
 pub use formatting::{Format, TextEdit, format_edit};
+pub use links::{
+    Link, LinkStyle, aliases, has_scheme, heading_offset, links, percent_decode, split_target,
+};
 
 use unicode_segmentation::UnicodeSegmentation as _;
 

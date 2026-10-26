@@ -1,0 +1,1252 @@
+{
+ "about": "What Obsidian 1.14.4 answers for the fixture vault in links/: getFirstLinkpathDest(link, from) for each pair, and the links and embeds its metadata cache parses from each markdown note (offsets are UTF-16 indices; the fixtures are ASCII). Regenerate with scripts/obsidian-links.mjs.",
+ "obsidian": "1.14.4",
+ "resolution": [
+  {
+   "from": "Home.md",
+   "link": "Ideas",
+   "to": "Ideas.md"
+  },
+  {
+   "from": "Home.md",
+   "link": "ideas",
+   "to": "Ideas.md"
+  },
+  {
+   "from": "Home.md",
+   "link": "IDEAS.md",
+   "to": "Ideas.md"
+  },
+  {
+   "from": "Home.md",
+   "link": "Plan",
+   "to": "Archive/Plan.md"
+  },
+  {
+   "from": "Home.md",
+   "link": "Same",
+   "to": "Other/Same.md"
+  },
+  {
+   "from": "Home.md",
+   "link": "Projects/Plan",
+   "to": "Projects/Plan.md"
+  },
+  {
+   "from": "Home.md",
+   "link": "Plan.md",
+   "to": "Archive/Plan.md"
+  },
+  {
+   "from": "Home.md",
+   "link": "Deep/Ideas",
+   "to": "Projects/Deep/Ideas.md"
+  },
+  {
+   "from": "Home.md",
+   "link": "deep/ideas",
+   "to": "Projects/Deep/Ideas.md"
+  },
+  {
+   "from": "Home.md",
+   "link": "../Home",
+   "to": "Home.md"
+  },
+  {
+   "from": "Home.md",
+   "link": "./Ideas",
+   "to": "Ideas.md"
+  },
+  {
+   "from": "Home.md",
+   "link": "../Ideas",
+   "to": "Ideas.md"
+  },
+  {
+   "from": "Home.md",
+   "link": "diagram.png",
+   "to": "assets/diagram.png"
+  },
+  {
+   "from": "Home.md",
+   "link": "assets/diagram.png",
+   "to": "assets/diagram.png"
+  },
+  {
+   "from": "Home.md",
+   "link": "Roadmap",
+   "to": null
+  },
+  {
+   "from": "Home.md",
+   "link": "The Plan",
+   "to": null
+  },
+  {
+   "from": "Home.md",
+   "link": "Old plan",
+   "to": null
+  },
+  {
+   "from": "Home.md",
+   "link": "Missing note",
+   "to": null
+  },
+  {
+   "from": "Home.md",
+   "link": "My.Dotted.Name",
+   "to": "My.Dotted.Name.md"
+  },
+  {
+   "from": "Home.md",
+   "link": "notes.txt",
+   "to": "notes.txt"
+  },
+  {
+   "from": "Home.md",
+   "link": "notes",
+   "to": "Projects/Deep/Notes.md"
+  },
+  {
+   "from": "Home.md",
+   "link": "/Ideas",
+   "to": "Ideas.md"
+  },
+  {
+   "from": "Home.md",
+   "link": "Inbox/Ideas",
+   "to": "Inbox/Ideas.md"
+  },
+  {
+   "from": "Home.md",
+   "link": "Way/Down/Same",
+   "to": "Long/Way/Down/Same.md"
+  },
+  {
+   "from": "Home.md",
+   "link": "Down/Same",
+   "to": "Long/Way/Down/Same.md"
+  },
+  {
+   "from": "Home.md",
+   "link": "",
+   "to": "Home.md"
+  },
+  {
+   "from": "Home.md",
+   "link": "Folder/Same.md",
+   "to": "Folder/Same.md"
+  },
+  {
+   "from": "Home.md",
+   "link": "x/Ideas",
+   "to": "Inbox/Ideas.md"
+  },
+  {
+   "from": "Home.md",
+   "link": "nbox/Ideas",
+   "to": "Inbox/Ideas.md"
+  },
+  {
+   "from": "Home.md",
+   "link": "Home.md.md",
+   "to": null
+  },
+  {
+   "from": "Inbox/Capture.md",
+   "link": "Ideas",
+   "to": "Ideas.md"
+  },
+  {
+   "from": "Inbox/Capture.md",
+   "link": "ideas",
+   "to": "Ideas.md"
+  },
+  {
+   "from": "Inbox/Capture.md",
+   "link": "IDEAS.md",
+   "to": "Ideas.md"
+  },
+  {
+   "from": "Inbox/Capture.md",
+   "link": "Plan",
+   "to": "Archive/Plan.md"
+  },
+  {
+   "from": "Inbox/Capture.md",
+   "link": "Same",
+   "to": "Other/Same.md"
+  },
+  {
+   "from": "Inbox/Capture.md",
+   "link": "Projects/Plan",
+   "to": "Projects/Plan.md"
+  },
+  {
+   "from": "Inbox/Capture.md",
+   "link": "Plan.md",
+   "to": "Archive/Plan.md"
+  },
+  {
+   "from": "Inbox/Capture.md",
+   "link": "Deep/Ideas",
+   "to": "Projects/Deep/Ideas.md"
+  },
+  {
+   "from": "Inbox/Capture.md",
+   "link": "deep/ideas",
+   "to": "Projects/Deep/Ideas.md"
+  },
+  {
+   "from": "Inbox/Capture.md",
+   "link": "../Home",
+   "to": "Home.md"
+  },
+  {
+   "from": "Inbox/Capture.md",
+   "link": "./Ideas",
+   "to": "Inbox/Ideas.md"
+  },
+  {
+   "from": "Inbox/Capture.md",
+   "link": "../Ideas",
+   "to": "Ideas.md"
+  },
+  {
+   "from": "Inbox/Capture.md",
+   "link": "diagram.png",
+   "to": "assets/diagram.png"
+  },
+  {
+   "from": "Inbox/Capture.md",
+   "link": "assets/diagram.png",
+   "to": "assets/diagram.png"
+  },
+  {
+   "from": "Inbox/Capture.md",
+   "link": "Roadmap",
+   "to": null
+  },
+  {
+   "from": "Inbox/Capture.md",
+   "link": "The Plan",
+   "to": null
+  },
+  {
+   "from": "Inbox/Capture.md",
+   "link": "Old plan",
+   "to": null
+  },
+  {
+   "from": "Inbox/Capture.md",
+   "link": "Missing note",
+   "to": null
+  },
+  {
+   "from": "Inbox/Capture.md",
+   "link": "My.Dotted.Name",
+   "to": "My.Dotted.Name.md"
+  },
+  {
+   "from": "Inbox/Capture.md",
+   "link": "notes.txt",
+   "to": "notes.txt"
+  },
+  {
+   "from": "Inbox/Capture.md",
+   "link": "notes",
+   "to": "Projects/Deep/Notes.md"
+  },
+  {
+   "from": "Inbox/Capture.md",
+   "link": "/Ideas",
+   "to": "Ideas.md"
+  },
+  {
+   "from": "Inbox/Capture.md",
+   "link": "Inbox/Ideas",
+   "to": "Inbox/Ideas.md"
+  },
+  {
+   "from": "Inbox/Capture.md",
+   "link": "Way/Down/Same",
+   "to": "Long/Way/Down/Same.md"
+  },
+  {
+   "from": "Inbox/Capture.md",
+   "link": "Down/Same",
+   "to": "Long/Way/Down/Same.md"
+  },
+  {
+   "from": "Inbox/Capture.md",
+   "link": "",
+   "to": "Inbox/Capture.md"
+  },
+  {
+   "from": "Inbox/Capture.md",
+   "link": "Folder/Same.md",
+   "to": "Folder/Same.md"
+  },
+  {
+   "from": "Inbox/Capture.md",
+   "link": "x/Ideas",
+   "to": "Inbox/Ideas.md"
+  },
+  {
+   "from": "Inbox/Capture.md",
+   "link": "nbox/Ideas",
+   "to": "Inbox/Ideas.md"
+  },
+  {
+   "from": "Inbox/Capture.md",
+   "link": "Home.md.md",
+   "to": null
+  },
+  {
+   "from": "Projects/Deep/Notes.md",
+   "link": "Ideas",
+   "to": "Ideas.md"
+  },
+  {
+   "from": "Projects/Deep/Notes.md",
+   "link": "ideas",
+   "to": "Ideas.md"
+  },
+  {
+   "from": "Projects/Deep/Notes.md",
+   "link": "IDEAS.md",
+   "to": "Ideas.md"
+  },
+  {
+   "from": "Projects/Deep/Notes.md",
+   "link": "Plan",
+   "to": "Archive/Plan.md"
+  },
+  {
+   "from": "Projects/Deep/Notes.md",
+   "link": "Same",
+   "to": "Other/Same.md"
+  },
+  {
+   "from": "Projects/Deep/Notes.md",
+   "link": "Projects/Plan",
+   "to": "Projects/Plan.md"
+  },
+  {
+   "from": "Projects/Deep/Notes.md",
+   "link": "Plan.md",
+   "to": "Archive/Plan.md"
+  },
+  {
+   "from": "Projects/Deep/Notes.md",
+   "link": "Deep/Ideas",
+   "to": "Projects/Deep/Ideas.md"
+  },
+  {
+   "from": "Projects/Deep/Notes.md",
+   "link": "deep/ideas",
+   "to": "Projects/Deep/Ideas.md"
+  },
+  {
+   "from": "Projects/Deep/Notes.md",
+   "link": "../Home",
+   "to": null
+  },
+  {
+   "from": "Projects/Deep/Notes.md",
+   "link": "./Ideas",
+   "to": "Projects/Deep/Ideas.md"
+  },
+  {
+   "from": "Projects/Deep/Notes.md",
+   "link": "../Ideas",
+   "to": null
+  },
+  {
+   "from": "Projects/Deep/Notes.md",
+   "link": "diagram.png",
+   "to": "assets/diagram.png"
+  },
+  {
+   "from": "Projects/Deep/Notes.md",
+   "link": "assets/diagram.png",
+   "to": "assets/diagram.png"
+  },
+  {
+   "from": "Projects/Deep/Notes.md",
+   "link": "Roadmap",
+   "to": null
+  },
+  {
+   "from": "Projects/Deep/Notes.md",
+   "link": "The Plan",
+   "to": null
+  },
+  {
+   "from": "Projects/Deep/Notes.md",
+   "link": "Old plan",
+   "to": null
+  },
+  {
+   "from": "Projects/Deep/Notes.md",
+   "link": "Missing note",
+   "to": null
+  },
+  {
+   "from": "Projects/Deep/Notes.md",
+   "link": "My.Dotted.Name",
+   "to": "My.Dotted.Name.md"
+  },
+  {
+   "from": "Projects/Deep/Notes.md",
+   "link": "notes.txt",
+   "to": "notes.txt"
+  },
+  {
+   "from": "Projects/Deep/Notes.md",
+   "link": "notes",
+   "to": "Projects/Deep/Notes.md"
+  },
+  {
+   "from": "Projects/Deep/Notes.md",
+   "link": "/Ideas",
+   "to": "Ideas.md"
+  },
+  {
+   "from": "Projects/Deep/Notes.md",
+   "link": "Inbox/Ideas",
+   "to": "Inbox/Ideas.md"
+  },
+  {
+   "from": "Projects/Deep/Notes.md",
+   "link": "Way/Down/Same",
+   "to": "Long/Way/Down/Same.md"
+  },
+  {
+   "from": "Projects/Deep/Notes.md",
+   "link": "Down/Same",
+   "to": "Long/Way/Down/Same.md"
+  },
+  {
+   "from": "Projects/Deep/Notes.md",
+   "link": "",
+   "to": "Projects/Deep/Notes.md"
+  },
+  {
+   "from": "Projects/Deep/Notes.md",
+   "link": "Folder/Same.md",
+   "to": "Folder/Same.md"
+  },
+  {
+   "from": "Projects/Deep/Notes.md",
+   "link": "x/Ideas",
+   "to": "Inbox/Ideas.md"
+  },
+  {
+   "from": "Projects/Deep/Notes.md",
+   "link": "nbox/Ideas",
+   "to": "Inbox/Ideas.md"
+  },
+  {
+   "from": "Projects/Deep/Notes.md",
+   "link": "Home.md.md",
+   "to": null
+  },
+  {
+   "from": "Daily/2024-01-01.md",
+   "link": "Ideas",
+   "to": "Ideas.md"
+  },
+  {
+   "from": "Daily/2024-01-01.md",
+   "link": "ideas",
+   "to": "Ideas.md"
+  },
+  {
+   "from": "Daily/2024-01-01.md",
+   "link": "IDEAS.md",
+   "to": "Ideas.md"
+  },
+  {
+   "from": "Daily/2024-01-01.md",
+   "link": "Plan",
+   "to": "Archive/Plan.md"
+  },
+  {
+   "from": "Daily/2024-01-01.md",
+   "link": "Same",
+   "to": "Other/Same.md"
+  },
+  {
+   "from": "Daily/2024-01-01.md",
+   "link": "Projects/Plan",
+   "to": "Projects/Plan.md"
+  },
+  {
+   "from": "Daily/2024-01-01.md",
+   "link": "Plan.md",
+   "to": "Archive/Plan.md"
+  },
+  {
+   "from": "Daily/2024-01-01.md",
+   "link": "Deep/Ideas",
+   "to": "Projects/Deep/Ideas.md"
+  },
+  {
+   "from": "Daily/2024-01-01.md",
+   "link": "deep/ideas",
+   "to": "Projects/Deep/Ideas.md"
+  },
+  {
+   "from": "Daily/2024-01-01.md",
+   "link": "../Home",
+   "to": "Home.md"
+  },
+  {
+   "from": "Daily/2024-01-01.md",
+   "link": "./Ideas",
+   "to": null
+  },
+  {
+   "from": "Daily/2024-01-01.md",
+   "link": "../Ideas",
+   "to": "Ideas.md"
+  },
+  {
+   "from": "Daily/2024-01-01.md",
+   "link": "diagram.png",
+   "to": "assets/diagram.png"
+  },
+  {
+   "from": "Daily/2024-01-01.md",
+   "link": "assets/diagram.png",
+   "to": "assets/diagram.png"
+  },
+  {
+   "from": "Daily/2024-01-01.md",
+   "link": "Roadmap",
+   "to": null
+  },
+  {
+   "from": "Daily/2024-01-01.md",
+   "link": "The Plan",
+   "to": null
+  },
+  {
+   "from": "Daily/2024-01-01.md",
+   "link": "Old plan",
+   "to": null
+  },
+  {
+   "from": "Daily/2024-01-01.md",
+   "link": "Missing note",
+   "to": null
+  },
+  {
+   "from": "Daily/2024-01-01.md",
+   "link": "My.Dotted.Name",
+   "to": "My.Dotted.Name.md"
+  },
+  {
+   "from": "Daily/2024-01-01.md",
+   "link": "notes.txt",
+   "to": "notes.txt"
+  },
+  {
+   "from": "Daily/2024-01-01.md",
+   "link": "notes",
+   "to": "Projects/Deep/Notes.md"
+  },
+  {
+   "from": "Daily/2024-01-01.md",
+   "link": "/Ideas",
+   "to": "Ideas.md"
+  },
+  {
+   "from": "Daily/2024-01-01.md",
+   "link": "Inbox/Ideas",
+   "to": "Inbox/Ideas.md"
+  },
+  {
+   "from": "Daily/2024-01-01.md",
+   "link": "Way/Down/Same",
+   "to": "Long/Way/Down/Same.md"
+  },
+  {
+   "from": "Daily/2024-01-01.md",
+   "link": "Down/Same",
+   "to": "Long/Way/Down/Same.md"
+  },
+  {
+   "from": "Daily/2024-01-01.md",
+   "link": "",
+   "to": "Daily/2024-01-01.md"
+  },
+  {
+   "from": "Daily/2024-01-01.md",
+   "link": "Folder/Same.md",
+   "to": "Folder/Same.md"
+  },
+  {
+   "from": "Daily/2024-01-01.md",
+   "link": "x/Ideas",
+   "to": "Inbox/Ideas.md"
+  },
+  {
+   "from": "Daily/2024-01-01.md",
+   "link": "nbox/Ideas",
+   "to": "Inbox/Ideas.md"
+  },
+  {
+   "from": "Daily/2024-01-01.md",
+   "link": "Home.md.md",
+   "to": null
+  },
+  {
+   "from": "Inboxes/Ideas.md",
+   "link": "Ideas",
+   "to": "Ideas.md"
+  },
+  {
+   "from": "Inboxes/Ideas.md",
+   "link": "ideas",
+   "to": "Ideas.md"
+  },
+  {
+   "from": "Inboxes/Ideas.md",
+   "link": "IDEAS.md",
+   "to": "Ideas.md"
+  },
+  {
+   "from": "Inboxes/Ideas.md",
+   "link": "Plan",
+   "to": "Archive/Plan.md"
+  },
+  {
+   "from": "Inboxes/Ideas.md",
+   "link": "Same",
+   "to": "Other/Same.md"
+  },
+  {
+   "from": "Inboxes/Ideas.md",
+   "link": "Projects/Plan",
+   "to": "Projects/Plan.md"
+  },
+  {
+   "from": "Inboxes/Ideas.md",
+   "link": "Plan.md",
+   "to": "Archive/Plan.md"
+  },
+  {
+   "from": "Inboxes/Ideas.md",
+   "link": "Deep/Ideas",
+   "to": "Projects/Deep/Ideas.md"
+  },
+  {
+   "from": "Inboxes/Ideas.md",
+   "link": "deep/ideas",
+   "to": "Projects/Deep/Ideas.md"
+  },
+  {
+   "from": "Inboxes/Ideas.md",
+   "link": "../Home",
+   "to": "Home.md"
+  },
+  {
+   "from": "Inboxes/Ideas.md",
+   "link": "./Ideas",
+   "to": "Inboxes/Ideas.md"
+  },
+  {
+   "from": "Inboxes/Ideas.md",
+   "link": "../Ideas",
+   "to": "Ideas.md"
+  },
+  {
+   "from": "Inboxes/Ideas.md",
+   "link": "diagram.png",
+   "to": "assets/diagram.png"
+  },
+  {
+   "from": "Inboxes/Ideas.md",
+   "link": "assets/diagram.png",
+   "to": "assets/diagram.png"
+  },
+  {
+   "from": "Inboxes/Ideas.md",
+   "link": "Roadmap",
+   "to": null
+  },
+  {
+   "from": "Inboxes/Ideas.md",
+   "link": "The Plan",
+   "to": null
+  },
+  {
+   "from": "Inboxes/Ideas.md",
+   "link": "Old plan",
+   "to": null
+  },
+  {
+   "from": "Inboxes/Ideas.md",
+   "link": "Missing note",
+   "to": null
+  },
+  {
+   "from": "Inboxes/Ideas.md",
+   "link": "My.Dotted.Name",
+   "to": "My.Dotted.Name.md"
+  },
+  {
+   "from": "Inboxes/Ideas.md",
+   "link": "notes.txt",
+   "to": "notes.txt"
+  },
+  {
+   "from": "Inboxes/Ideas.md",
+   "link": "notes",
+   "to": "Projects/Deep/Notes.md"
+  },
+  {
+   "from": "Inboxes/Ideas.md",
+   "link": "/Ideas",
+   "to": "Ideas.md"
+  },
+  {
+   "from": "Inboxes/Ideas.md",
+   "link": "Inbox/Ideas",
+   "to": "Inbox/Ideas.md"
+  },
+  {
+   "from": "Inboxes/Ideas.md",
+   "link": "Way/Down/Same",
+   "to": "Long/Way/Down/Same.md"
+  },
+  {
+   "from": "Inboxes/Ideas.md",
+   "link": "Down/Same",
+   "to": "Long/Way/Down/Same.md"
+  },
+  {
+   "from": "Inboxes/Ideas.md",
+   "link": "",
+   "to": "Inboxes/Ideas.md"
+  },
+  {
+   "from": "Inboxes/Ideas.md",
+   "link": "Folder/Same.md",
+   "to": "Folder/Same.md"
+  },
+  {
+   "from": "Inboxes/Ideas.md",
+   "link": "x/Ideas",
+   "to": "Inbox/Ideas.md"
+  },
+  {
+   "from": "Inboxes/Ideas.md",
+   "link": "nbox/Ideas",
+   "to": "Inbox/Ideas.md"
+  },
+  {
+   "from": "Inboxes/Ideas.md",
+   "link": "Home.md.md",
+   "to": null
+  },
+  {
+   "from": "Long/Way/Down/Same.md",
+   "link": "Ideas",
+   "to": "Ideas.md"
+  },
+  {
+   "from": "Long/Way/Down/Same.md",
+   "link": "ideas",
+   "to": "Ideas.md"
+  },
+  {
+   "from": "Long/Way/Down/Same.md",
+   "link": "IDEAS.md",
+   "to": "Ideas.md"
+  },
+  {
+   "from": "Long/Way/Down/Same.md",
+   "link": "Plan",
+   "to": "Archive/Plan.md"
+  },
+  {
+   "from": "Long/Way/Down/Same.md",
+   "link": "Same",
+   "to": "Long/Way/Down/Same.md"
+  },
+  {
+   "from": "Long/Way/Down/Same.md",
+   "link": "Projects/Plan",
+   "to": "Projects/Plan.md"
+  },
+  {
+   "from": "Long/Way/Down/Same.md",
+   "link": "Plan.md",
+   "to": "Archive/Plan.md"
+  },
+  {
+   "from": "Long/Way/Down/Same.md",
+   "link": "Deep/Ideas",
+   "to": "Projects/Deep/Ideas.md"
+  },
+  {
+   "from": "Long/Way/Down/Same.md",
+   "link": "deep/ideas",
+   "to": "Projects/Deep/Ideas.md"
+  },
+  {
+   "from": "Long/Way/Down/Same.md",
+   "link": "../Home",
+   "to": null
+  },
+  {
+   "from": "Long/Way/Down/Same.md",
+   "link": "./Ideas",
+   "to": null
+  },
+  {
+   "from": "Long/Way/Down/Same.md",
+   "link": "../Ideas",
+   "to": null
+  },
+  {
+   "from": "Long/Way/Down/Same.md",
+   "link": "diagram.png",
+   "to": "assets/diagram.png"
+  },
+  {
+   "from": "Long/Way/Down/Same.md",
+   "link": "assets/diagram.png",
+   "to": "assets/diagram.png"
+  },
+  {
+   "from": "Long/Way/Down/Same.md",
+   "link": "Roadmap",
+   "to": null
+  },
+  {
+   "from": "Long/Way/Down/Same.md",
+   "link": "The Plan",
+   "to": null
+  },
+  {
+   "from": "Long/Way/Down/Same.md",
+   "link": "Old plan",
+   "to": null
+  },
+  {
+   "from": "Long/Way/Down/Same.md",
+   "link": "Missing note",
+   "to": null
+  },
+  {
+   "from": "Long/Way/Down/Same.md",
+   "link": "My.Dotted.Name",
+   "to": "My.Dotted.Name.md"
+  },
+  {
+   "from": "Long/Way/Down/Same.md",
+   "link": "notes.txt",
+   "to": "notes.txt"
+  },
+  {
+   "from": "Long/Way/Down/Same.md",
+   "link": "notes",
+   "to": "Projects/Deep/Notes.md"
+  },
+  {
+   "from": "Long/Way/Down/Same.md",
+   "link": "/Ideas",
+   "to": "Ideas.md"
+  },
+  {
+   "from": "Long/Way/Down/Same.md",
+   "link": "Inbox/Ideas",
+   "to": "Inbox/Ideas.md"
+  },
+  {
+   "from": "Long/Way/Down/Same.md",
+   "link": "Way/Down/Same",
+   "to": "Long/Way/Down/Same.md"
+  },
+  {
+   "from": "Long/Way/Down/Same.md",
+   "link": "Down/Same",
+   "to": "Long/Way/Down/Same.md"
+  },
+  {
+   "from": "Long/Way/Down/Same.md",
+   "link": "",
+   "to": "Long/Way/Down/Same.md"
+  },
+  {
+   "from": "Long/Way/Down/Same.md",
+   "link": "Folder/Same.md",
+   "to": "Folder/Same.md"
+  },
+  {
+   "from": "Long/Way/Down/Same.md",
+   "link": "x/Ideas",
+   "to": "Inbox/Ideas.md"
+  },
+  {
+   "from": "Long/Way/Down/Same.md",
+   "link": "nbox/Ideas",
+   "to": "Inbox/Ideas.md"
+  },
+  {
+   "from": "Long/Way/Down/Same.md",
+   "link": "Home.md.md",
+   "to": null
+  },
+  {
+   "from": "notes.txt",
+   "link": "Ideas",
+   "to": "Ideas.md"
+  },
+  {
+   "from": "notes.txt",
+   "link": "ideas",
+   "to": "Ideas.md"
+  },
+  {
+   "from": "notes.txt",
+   "link": "IDEAS.md",
+   "to": "Ideas.md"
+  },
+  {
+   "from": "notes.txt",
+   "link": "Plan",
+   "to": "Archive/Plan.md"
+  },
+  {
+   "from": "notes.txt",
+   "link": "Same",
+   "to": "Other/Same.md"
+  },
+  {
+   "from": "notes.txt",
+   "link": "Projects/Plan",
+   "to": "Projects/Plan.md"
+  },
+  {
+   "from": "notes.txt",
+   "link": "Plan.md",
+   "to": "Archive/Plan.md"
+  },
+  {
+   "from": "notes.txt",
+   "link": "Deep/Ideas",
+   "to": "Projects/Deep/Ideas.md"
+  },
+  {
+   "from": "notes.txt",
+   "link": "deep/ideas",
+   "to": "Projects/Deep/Ideas.md"
+  },
+  {
+   "from": "notes.txt",
+   "link": "../Home",
+   "to": "Home.md"
+  },
+  {
+   "from": "notes.txt",
+   "link": "./Ideas",
+   "to": "Ideas.md"
+  },
+  {
+   "from": "notes.txt",
+   "link": "../Ideas",
+   "to": "Ideas.md"
+  },
+  {
+   "from": "notes.txt",
+   "link": "diagram.png",
+   "to": "assets/diagram.png"
+  },
+  {
+   "from": "notes.txt",
+   "link": "assets/diagram.png",
+   "to": "assets/diagram.png"
+  },
+  {
+   "from": "notes.txt",
+   "link": "Roadmap",
+   "to": null
+  },
+  {
+   "from": "notes.txt",
+   "link": "The Plan",
+   "to": null
+  },
+  {
+   "from": "notes.txt",
+   "link": "Old plan",
+   "to": null
+  },
+  {
+   "from": "notes.txt",
+   "link": "Missing note",
+   "to": null
+  },
+  {
+   "from": "notes.txt",
+   "link": "My.Dotted.Name",
+   "to": "My.Dotted.Name.md"
+  },
+  {
+   "from": "notes.txt",
+   "link": "notes.txt",
+   "to": "notes.txt"
+  },
+  {
+   "from": "notes.txt",
+   "link": "notes",
+   "to": "Projects/Deep/Notes.md"
+  },
+  {
+   "from": "notes.txt",
+   "link": "/Ideas",
+   "to": "Ideas.md"
+  },
+  {
+   "from": "notes.txt",
+   "link": "Inbox/Ideas",
+   "to": "Inbox/Ideas.md"
+  },
+  {
+   "from": "notes.txt",
+   "link": "Way/Down/Same",
+   "to": "Long/Way/Down/Same.md"
+  },
+  {
+   "from": "notes.txt",
+   "link": "Down/Same",
+   "to": "Long/Way/Down/Same.md"
+  },
+  {
+   "from": "notes.txt",
+   "link": "",
+   "to": "notes.txt"
+  },
+  {
+   "from": "notes.txt",
+   "link": "Folder/Same.md",
+   "to": "Folder/Same.md"
+  },
+  {
+   "from": "notes.txt",
+   "link": "x/Ideas",
+   "to": "Inbox/Ideas.md"
+  },
+  {
+   "from": "notes.txt",
+   "link": "nbox/Ideas",
+   "to": "Inbox/Ideas.md"
+  },
+  {
+   "from": "notes.txt",
+   "link": "Home.md.md",
+   "to": null
+  }
+ ],
+ "parsed": {
+  "Archive/Plan.md": [],
+  "Daily/2024-01-01.md": [
+   {
+    "link": "Ideas",
+    "original": "[[Ideas]]",
+    "displayText": "Ideas",
+    "start": 12,
+    "end": 21,
+    "embed": false
+   },
+   {
+    "link": "Plan",
+    "original": "[[Plan]]",
+    "displayText": "Plan",
+    "start": 22,
+    "end": 30,
+    "embed": false
+   }
+  ],
+  "Folder/Same.md": [],
+  "Home.md": [
+   {
+    "link": "Ideas",
+    "original": "[[Ideas]]",
+    "displayText": "Ideas",
+    "start": 17,
+    "end": 26,
+    "embed": false
+   },
+   {
+    "link": "Plan#Goals",
+    "original": "[[Plan#Goals|plan goals]]",
+    "displayText": "plan goals",
+    "start": 35,
+    "end": 60,
+    "embed": false
+   },
+   {
+    "link": "Roadmap",
+    "original": "[[Roadmap]]",
+    "displayText": "Roadmap",
+    "start": 71,
+    "end": 82,
+    "embed": false
+   },
+   {
+    "link": "Same",
+    "original": "[[Same]]",
+    "displayText": "Same",
+    "start": 84,
+    "end": 92,
+    "embed": false
+   },
+   {
+    "link": "Missing note",
+    "original": "[[Missing note]]",
+    "displayText": "Missing note",
+    "start": 94,
+    "end": 110,
+    "embed": false
+   },
+   {
+    "link": "Projects/Plan",
+    "original": "[[Projects/Plan]]",
+    "displayText": "Projects/Plan",
+    "start": 115,
+    "end": 132,
+    "embed": false
+   },
+   {
+    "link": "diagram.png",
+    "original": "![[diagram.png]]",
+    "displayText": "diagram.png",
+    "start": 135,
+    "end": 151,
+    "embed": true
+   },
+   {
+    "link": "Plan",
+    "original": "![[Plan]]",
+    "displayText": "Plan",
+    "start": 152,
+    "end": 161,
+    "embed": true
+   },
+   {
+    "link": "Projects/Plan.md",
+    "original": "[markdown link](Projects/Plan.md)",
+    "displayText": "markdown link",
+    "start": 165,
+    "end": 198,
+    "embed": false
+   },
+   {
+    "link": "Inbox/Capture.md",
+    "original": "[one with spaces](<Inbox/Capture.md>)",
+    "displayText": "one with spaces",
+    "start": 203,
+    "end": 240,
+    "embed": false
+   }
+  ],
+  "Ideas.md": [],
+  "Inbox/Capture.md": [
+   {
+    "link": "Ideas",
+    "original": "[[Ideas]]",
+    "displayText": "Ideas",
+    "start": 11,
+    "end": 20,
+    "embed": false
+   },
+   {
+    "link": "Plan",
+    "original": "[[Plan]]",
+    "displayText": "Plan",
+    "start": 21,
+    "end": 29,
+    "embed": false
+   },
+   {
+    "link": "Same",
+    "original": "[[Same]]",
+    "displayText": "Same",
+    "start": 30,
+    "end": 38,
+    "embed": false
+   },
+   {
+    "link": "../Home",
+    "original": "[[../Home]]",
+    "displayText": "../Home",
+    "start": 39,
+    "end": 50,
+    "embed": false
+   },
+   {
+    "link": "./Ideas",
+    "original": "[[./Ideas]]",
+    "displayText": "./Ideas",
+    "start": 51,
+    "end": 62,
+    "embed": false
+   },
+   {
+    "link": "Deep/Ideas",
+    "original": "[[Deep/Ideas]]",
+    "displayText": "Deep/Ideas",
+    "start": 63,
+    "end": 77,
+    "embed": false
+   },
+   {
+    "link": "diagram.png",
+    "original": "[[diagram.png]]",
+    "displayText": "diagram.png",
+    "start": 78,
+    "end": 93,
+    "embed": false
+   }
+  ],
+  "Inbox/Ideas.md": [],
+  "Inboxes/Ideas.md": [],
+  "Long/Way/Down/Same.md": [],
+  "My.Dotted.Name.md": [],
+  "Other/Same.md": [],
+  "Projects/Deep/Ideas.md": [],
+  "Projects/Deep/Notes.md": [
+   {
+    "link": "Ideas",
+    "original": "[[Ideas]]",
+    "displayText": "Ideas",
+    "start": 14,
+    "end": 23,
+    "embed": false
+   },
+   {
+    "link": "Plan",
+    "original": "[[Plan]]",
+    "displayText": "Plan",
+    "start": 24,
+    "end": 32,
+    "embed": false
+   },
+   {
+    "link": "Same",
+    "original": "[[Same]]",
+    "displayText": "Same",
+    "start": 33,
+    "end": 41,
+    "embed": false
+   }
+  ],
+  "Projects/Plan.md": []
+ }
+}

@@ -10,13 +10,13 @@ use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::Sizable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::{Editor, EditorState, InputEvent};
+use gpui_kit::component::input::{Editor, EditorState, InputEvent, Position};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use md_engine::{Format, TextEdit, format_edit, word_count};
 use orbit_core::{DiskCheck, OpenNote, Trouble, Vault, VaultPath, is_plain_text_note};
 
-use crate::preview::{PreviewContext, preview};
+use crate::preview::{FollowLink, PreviewContext, preview};
 
 actions!(
     note_editor,
@@ -132,6 +132,8 @@ impl Saves {
 pub enum NoteEditorEvent {
     /// The user chose to close the note without saving (it was deleted).
     Close,
+    /// A link was clicked in the preview: its target, `Note#Heading`.
+    FollowLink(String),
 }
 
 impl EventEmitter<NoteEditorEvent> for NoteEditor {}
@@ -142,8 +144,12 @@ pub struct NoteEditor {
     mode: Mode,
     source: Entity<EditorState>,
     preview: PreviewContext,
-    /// The source as of the last edit, for the preview.
+    /// Tells the window a link was clicked; kept for a new path's preview.
+    follow: FollowLink,
+    /// The source as of the last edit.
     text: SharedString,
+    /// What the preview renders: the source with its links rewritten.
+    shown: SharedString,
     words: usize,
     saves: Saves,
     /// Text from disk for the editor to show, on the next frame.
@@ -181,8 +187,19 @@ impl NoteEditor {
                 this.edited(cx);
             }
         });
+        let this = cx.entity().downgrade();
+        let follow: FollowLink = Arc::new(move |target, _, cx| {
+            this.update(cx, |_, cx| {
+                cx.emit(NoteEditorEvent::FollowLink(target.to_string()))
+            })
+            .ok();
+        });
+        let preview = PreviewContext::new(vault.clone(), path.clone(), follow.clone());
+        let shown = preview.rewrite_links(&text).into();
         NoteEditor {
-            preview: PreviewContext::new(vault.clone(), path.clone()),
+            preview,
+            follow,
+            shown,
             saves: Saves::new(note),
             vault,
             path,
@@ -213,10 +230,29 @@ impl NoteEditor {
     }
 
     fn follow_path(&mut self, path: VaultPath, cx: &mut Context<Self>) {
-        self.preview = PreviewContext::new(self.vault.clone(), path.clone());
+        self.preview = PreviewContext::new(self.vault.clone(), path.clone(), self.follow.clone());
         self.mode = Mode::of(&path);
         self.path = path;
+        self.links_changed(cx);
+    }
+
+    /// Notes were added, removed or renamed: links may resolve differently.
+    pub fn links_changed(&mut self, cx: &mut Context<Self>) {
+        if self.mode == Mode::Split {
+            self.shown = self.preview.rewrite_links(&self.text).into();
+        }
         cx.notify();
+    }
+
+    /// Puts the caret on the heading a link named, if the note has it.
+    pub fn go_to_heading(&mut self, subpath: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(offset) = md_engine::heading_offset(&self.text, subpath) else {
+            return;
+        };
+        let line = self.text[..offset].matches('\n').count() as u32;
+        self.source.update(cx, |source, cx| {
+            source.set_cursor_position(Position { line, character: 0 }, window, cx)
+        });
     }
 
     /// After Orbit deletes the note: writes still queued are dropped, so
@@ -289,6 +325,7 @@ impl NoteEditor {
     fn edited(&mut self, cx: &mut Context<Self>) {
         self.text = self.source.read(cx).value();
         self.words = word_count(&self.text);
+        self.links_changed(cx);
         self.saves.revision += 1;
         self.autosave = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(AUTOSAVE_DELAY).await;
@@ -352,6 +389,7 @@ impl NoteEditor {
         self.reload = Some(text.clone());
         self.text = text.into();
         self.words = word_count(&self.text);
+        self.links_changed(cx);
         self.autosave = None;
         self.saves.saved = self.saves.revision;
         cx.notify();
@@ -645,7 +683,7 @@ impl Render for NoteEditor {
                         .py_4()
                         .child(preview(
                             SharedString::from(format!("preview-{}", self.path)),
-                            self.text.clone(),
+                            self.shown.clone(),
                             &self.preview,
                             window,
                             cx,

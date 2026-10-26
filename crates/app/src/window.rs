@@ -96,6 +96,10 @@ impl OrbitWindow {
             restoring: false,
         };
         this.refresh_tree(&HashSet::new(), cx);
+        // Off the UI thread, so the first preview doesn't wait for it.
+        let vault = this.vault.clone();
+        cx.background_spawn(async move { vault.index_links() })
+            .detach();
         this.watch_vault(cx);
         this.restore_session(window, cx);
         this
@@ -187,9 +191,46 @@ impl OrbitWindow {
             let affected = paths
                 .iter()
                 .any(|p| tab.editor.read(cx).path().is_within(p));
-            if affected {
-                tab.editor.update(cx, |editor, cx| editor.disk_changed(cx));
+            tab.editor.update(cx, |editor, cx| {
+                if affected {
+                    editor.disk_changed(cx);
+                }
+                editor.links_changed(cx);
+            });
+        }
+    }
+
+    /// Follows a link clicked in `from`'s preview: a note opens in a tab, at
+    /// the heading the link names; an Attachment opens in its app; and an
+    /// unresolved link creates its note first.
+    fn follow_link(
+        &mut self,
+        from: &VaultPath,
+        target: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let followed = match self.vault.follow_link(from, target) {
+            Ok(followed) => followed,
+            Err(e) => return self.report(&format!("follow {target}"), e, cx),
+        };
+        if followed.created {
+            let mut expanded = self.expanded_folders(cx);
+            expanded.insert(followed.path.parent());
+            self.refresh_tree(&expanded, cx);
+        }
+        match EntryKind::of_file(followed.path.name()) {
+            EntryKind::Note => {
+                self.open_note(followed.path.clone(), window, cx);
+                if let (Some(heading), Some(ix)) =
+                    (&followed.heading, self.tab_of(&followed.path, cx))
+                {
+                    self.tabs[ix]
+                        .editor
+                        .update(cx, |editor, cx| editor.go_to_heading(heading, window, cx));
+                }
             }
+            _ => cx.open_with_system(&self.vault.file_on_disk(&followed.path)),
         }
     }
 
@@ -366,14 +407,23 @@ impl OrbitWindow {
                 Ok((note, text)) => {
                     let vault = self.vault.clone();
                     let editor = cx.new(|cx| NoteEditor::new(vault, note, text, window, cx));
-                    cx.subscribe(&editor, |this, editor, event, cx| match event {
-                        NoteEditorEvent::Close => {
-                            if let Some(ix) = this.tabs.iter().position(|t| t.editor == editor) {
-                                editor.update(cx, |editor, _| editor.forget_disk());
-                                this.remove_tab(ix, cx);
+                    cx.subscribe_in(
+                        &editor,
+                        window,
+                        |this, editor, event, window, cx| match event {
+                            NoteEditorEvent::Close => {
+                                if let Some(ix) = this.tabs.iter().position(|t| &t.editor == editor)
+                                {
+                                    editor.update(cx, |editor, _| editor.forget_disk());
+                                    this.remove_tab(ix, cx);
+                                }
                             }
-                        }
-                    })
+                            NoteEditorEvent::FollowLink(target) => {
+                                let from = editor.read(cx).path().clone();
+                                this.follow_link(&from, target, window, cx);
+                            }
+                        },
+                    )
                     .detach();
                     // Unsaved markers, the caret and word count live in the
                     // editor. A save that worked clears an old save error.
