@@ -1,5 +1,5 @@
 //! The rendered half of the Split view: Kit's markdown view plus Orbit's
-//! plugins for front matter, callouts and math, with links and images
+//! plugins for front matter, callouts, math and diagrams, with links and images
 //! resolved inside the vault.
 //!
 //! Kit's markdown knows nothing of wikilinks, so before rendering every
@@ -26,6 +26,8 @@ use gpui_kit::*;
 use md_engine::{CalloutKind, LinkStyle, callout};
 use orbit_core::{Vault, VaultPath};
 
+use crate::diagram_block::{self, DiagramPlugin, LastDrawn};
+
 /// Rewritten resolved and unresolved links point at these.
 const LINK_SCHEME: &str = "orbit-link:";
 const NEW_SCHEME: &str = "orbit-new:";
@@ -43,6 +45,8 @@ pub struct PreviewContext {
     /// per image. Only found images are kept: a missing one is looked for
     /// again, in case it's added later.
     images: Arc<Mutex<HashMap<SharedString, Arc<Image>>>>,
+    /// The note's diagrams as last drawn.
+    diagrams: LastDrawn,
 }
 
 impl PreviewContext {
@@ -52,6 +56,7 @@ impl PreviewContext {
             note,
             follow,
             images: Arc::default(),
+            diagrams: LastDrawn::default(),
         }
     }
 
@@ -154,14 +159,16 @@ pub fn preview(
     let (images, links) = (context.clone(), context.clone());
     let math = MathOptions::new(window, cx);
     TextView::markdown(id, text)
-        // Changing the theme or scale must retypeset math, which is parsed
-        // once per text; everything else renders without reparsing.
+        // Changing the theme or scale must retypeset math, and a diagram
+        // drawn must be shown, but they're parsed once per text; everything
+        // else renders without reparsing.
         .markdown_extensions(
             MarkdownExtensions::default()
                 .frontmatter()
-                .parser_revision(math.revision()),
+                .parser_revision(parser_revision(&math, cx)),
         )
         .plugin(FrontmatterPlugin::new())
+        .plugin(DiagramPlugin::new(context.diagrams.clone(), cx))
         .plugin(CalloutPlugin(context.clone()))
         .plugin(InlineMathPlugin(math.clone()))
         .plugin(BlockMathPlugin(math))
@@ -169,6 +176,14 @@ pub fn preview(
         .image_source(move |uri| images.image_source(uri))
         .on_link_click(move |url, _, window, cx| links.click(url, window, cx))
         .selectable(true)
+}
+
+/// Changes whenever the parsed preview would: math settings, or a diagram
+/// drawn.
+fn parser_revision(math: &MathOptions, cx: &App) -> u64 {
+    let mut hasher = std::hash::DefaultHasher::new();
+    (math.revision(), diagram_block::revision(cx)).hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Markdown punctuation in link text, escaped so it shows as written.

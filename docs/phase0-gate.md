@@ -42,6 +42,11 @@ The design doc requires three decisions before Phase 1 starts: the editor approa
 4. Clamp negative stroke widths.
 5. Render on a background thread with a time limit.
 
+**Done in #20 (2026-10-27).**
+- **Integration:** Kit's `TextView` hosts the renderer as a `MarkdownPlugin` on fenced code with the `mermaid` language, the same hook as block math. The plugin only asks a `DiagramCache`, which draws on its own thread, and a drawing that lands makes the preview parse again.
+- **Cache key:** source and theme, not scale. The cache keeps SVG, and GPUI rasterizes it at each display's scale itself.
+- **Class markers:** merman's aggregation and inheritance markers came out *filled* under resvg. resvg drops a whole CSS rule over its attribute selectors (`[id$="-extensionStart"]`), and those rules carried the `fill: transparent` for `.aggregation` and `.extension`. Orbit now removes just those selectors, and a raster test (`crates/diagrams/tests/drawn.rs`) checks that the markers are hollow.
+
 **Change to issue #1.** The guaranteed Mermaid set should widen from the 8 MVP types to at least the 14 families the user's diagrams use, which adds timeline, quadrant chart, swimlane, requirement, XY chart and block. merman rendered all 14 correctly. Before relying on class diagrams, re-check merman's inheritance and aggregation markers.
 
 ## 3. Protected-folder format: v1 frozen

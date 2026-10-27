@@ -10,3 +10,10 @@ ratex-layout = "=0.1.14"
 ratex-parser = "=0.1.14"
 ratex-svg = { version = "=0.1.14", features = ["embed-fonts"] }
 ratex-types = "=0.1.14"
+# Mermaid, chosen in Phase 0 (docs/phase0-gate.md): no ELK (EPL-2.0), and
+# the complete SVG output Orbit rasterizes.
+merman = { version = "=0.9.2", default-features = false, features = ["all-diagrams", "complete-svg"] }
+
+[dev-dependencies]
+# What GPUI draws SVG with, so tests see diagrams as Orbit shows them.
+resvg = "=0.46.0"

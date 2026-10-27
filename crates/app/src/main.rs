@@ -4,6 +4,7 @@
 
 mod appearance;
 mod commands;
+mod diagram_block;
 mod file_actions;
 #[cfg(unix)]
 mod instance;
@@ -33,6 +34,7 @@ fn main() {
             gpui_kit::init(cx);
             appearance::init(cx);
             note_editor::init(cx);
+            diagram_block::init(cx);
             file_actions::init(cx);
             commands::init(cx);
             switcher::init(cx);
