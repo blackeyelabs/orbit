@@ -4,21 +4,23 @@
 //! `orbit-api`); [`Settings`] holds the app-wide preferences beside it.
 //! Neither has a GPUI dependency.
 
-mod links;
+mod index;
 mod open_note;
 mod recent;
 mod session;
 mod settings;
+mod tags;
 
 use open_note::DiskVersion;
 pub use open_note::{DiskCheck, OpenNote, Trouble};
 
-pub use links::{Backlink, Mention};
+pub use index::{Backlink, Mention};
 pub use recent::{RecentVault, RecentVaults};
 pub use session::{Session, SessionTab};
 pub use settings::{Settings, ThemeChoice, default_config_dir};
+pub use tags::{TagCount, same_tag};
 
-use links::{FileLinks, Found, LinkIndex};
+use index::{Found, IndexedFile, VaultIndex};
 use session::SessionFile;
 use std::{
     io,
@@ -144,7 +146,7 @@ pub struct Vault {
     /// `None` where the vault can't be written to, so can't be locked.
     _lock: Option<VaultLock>,
     /// Shared with the watcher, which reports what changes.
-    links: Arc<Mutex<LinkIndex>>,
+    index: Arc<Mutex<VaultIndex>>,
 }
 
 impl Vault {
@@ -169,7 +171,7 @@ impl Vault {
             name,
             fs: Box::new(plain),
             _lock: lock,
-            links: Arc::default(),
+            index: Arc::default(),
         })
     }
 
@@ -255,11 +257,11 @@ impl Vault {
         &self,
         mut on_change: impl FnMut(Vec<VaultPath>) + Send + 'static,
     ) -> Result<Watch, Error> {
-        let links = self.links.clone();
+        let index = self.index.clone();
         Ok(self.fs.watch(Box::new(move |paths: Vec<VaultPath>| {
             let paths: Vec<VaultPath> = paths.into_iter().filter(|p| !in_tool_folder(p)).collect();
             if !paths.is_empty() {
-                link_index(&links).changed(paths.iter().cloned());
+                lock_index(&index).changed(paths.iter().cloned());
                 on_change(paths);
             }
         }))?)
@@ -270,19 +272,31 @@ impl Vault {
     /// no file has resolves to a note with that front matter alias. `None`
     /// is an unresolved link.
     pub fn resolve(&self, from: &VaultPath, link: &str) -> Option<VaultPath> {
-        self.with_links(|files| files.resolve(from, link))
+        self.with_index(|files| files.resolve(from, link))
     }
 
     /// The notes that link to the note `to`, each with its links there in
     /// context, in path order: what the notes on disk say, so an open
     /// note's edits count once saved.
     pub fn backlinks(&self, to: &VaultPath) -> Vec<Backlink> {
-        self.with_links(|files| files.backlinks(to))
+        self.with_index(|files| files.backlinks(to))
+    }
+
+    /// Every tag in the vault's notes, by name ignoring case, with how
+    /// often it's written: as Obsidian's tag pane counts them.
+    pub fn tags(&self) -> Vec<TagCount> {
+        self.with_index(|files| files.tags())
+    }
+
+    /// The notes with `tag` (with or without `#`) or a tag nested in it,
+    /// ignoring case, in path order.
+    pub fn notes_tagged(&self, tag: &str) -> Vec<VaultPath> {
+        self.with_index(|files| files.notes_tagged(tag))
     }
 
     /// Runs `f` on the link index, brought up to date.
-    fn with_links<T>(&self, f: impl FnOnce(&links::Files) -> T) -> T {
-        let mut index = link_index(&self.links);
+    fn with_index<T>(&self, f: impl FnOnce(&index::Files) -> T) -> T {
+        let mut index = lock_index(&self.index);
         f(index.current(
             |folder| self.children_of(folder, 0).unwrap_or_default(),
             |path| self.find(path),
@@ -312,10 +326,10 @@ impl Vault {
         match entries.iter().find(|e| e.name == path.name()) {
             None => Found::Nothing,
             Some(e) if e.entry_type == EntryType::Dir => Found::Folder,
-            Some(_) if check_note(path).is_err() => Found::File(FileLinks::default()),
+            Some(_) if check_note(path).is_err() => Found::File(IndexedFile::default()),
             Some(_) => match self.read_disk(path) {
                 Ok(Some(bytes)) => {
-                    Found::File(FileLinks::of_note(path, &String::from_utf8_lossy(&bytes)))
+                    Found::File(IndexedFile::of_note(path, &String::from_utf8_lossy(&bytes)))
                 }
                 Ok(None) => Found::Nothing,
                 Err(_) => Found::Unreadable,
@@ -408,7 +422,7 @@ impl Vault {
     /// Orbit changed these paths: links see it now, not when the watcher
     /// reports it.
     fn touched(&self, paths: impl IntoIterator<Item = VaultPath>) {
-        link_index(&self.links).changed(paths);
+        lock_index(&self.index).changed(paths);
     }
 
     /// Replaces (or creates) a note's text atomically. On failure the old
@@ -599,10 +613,10 @@ fn folder_name(path: &Path) -> String {
 
 /// The link index, locked. One whose holder panicked mid-update is
 /// started afresh, to be rebuilt.
-fn link_index(links: &Mutex<LinkIndex>) -> std::sync::MutexGuard<'_, LinkIndex> {
-    links.lock().unwrap_or_else(|poisoned| {
+fn lock_index(index: &Mutex<VaultIndex>) -> std::sync::MutexGuard<'_, VaultIndex> {
+    index.lock().unwrap_or_else(|poisoned| {
         let mut index = poisoned.into_inner();
-        *index = LinkIndex::default();
+        *index = VaultIndex::default();
         index
     })
 }

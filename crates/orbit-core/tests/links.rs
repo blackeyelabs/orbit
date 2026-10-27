@@ -3,41 +3,16 @@
 //! links), and `fixtures/links.obsidian.json` is what real Obsidian answers
 //! for it.
 
-use std::{fs, path::Path};
+use std::fs;
 
-use orbit_core::{Error, Vault, VaultPath};
+use orbit_core::{Error, VaultPath};
 use serde_json::Value;
+
+mod common;
+use common::{fixture_vault, fixtures, obsidian};
 
 fn p(path: &str) -> VaultPath {
     VaultPath::new(path).unwrap()
-}
-
-fn fixtures() -> &'static Path {
-    Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures"))
-}
-
-fn copy_dir(from: &Path, to: &Path) {
-    fs::create_dir_all(to).unwrap();
-    for entry in fs::read_dir(from).unwrap().flatten() {
-        let target = to.join(entry.file_name());
-        if entry.file_type().unwrap().is_dir() {
-            copy_dir(&entry.path(), &target);
-        } else {
-            fs::copy(entry.path(), target).unwrap();
-        }
-    }
-}
-
-/// A copy of the fixture vault, so opening it writes nothing into the repo.
-fn fixture_vault() -> (tempfile::TempDir, Vault) {
-    let dir = tempfile::tempdir().unwrap();
-    copy_dir(&fixtures().join("links"), dir.path());
-    let vault = Vault::open(dir.path()).unwrap();
-    (dir, vault)
-}
-
-fn obsidian() -> Value {
-    serde_json::from_slice(&fs::read(fixtures().join("links.obsidian.json")).unwrap()).unwrap()
 }
 
 /// Orbit resolves a link no file matches to a note with that alias, where
@@ -52,9 +27,9 @@ fn alias_target(link: &str) -> Option<&'static str> {
 
 #[test]
 fn links_resolve_as_in_obsidian_including_its_tie_break_for_duplicate_names() {
-    let (_dir, vault) = fixture_vault();
+    let (_dir, vault) = fixture_vault("links");
     let mut mismatches = Vec::new();
-    for case in obsidian()["resolution"].as_array().unwrap() {
+    for case in obsidian("links")["resolution"].as_array().unwrap() {
         let (from, link) = (
             case["from"].as_str().unwrap(),
             case["link"].as_str().unwrap(),
@@ -73,7 +48,7 @@ fn links_resolve_as_in_obsidian_including_its_tie_break_for_duplicate_names() {
 #[test]
 fn links_are_parsed_as_obsidian_parses_them() {
     let dir = fixtures().join("links");
-    for (note, expected) in obsidian()["parsed"].as_object().unwrap() {
+    for (note, expected) in obsidian("links")["parsed"].as_object().unwrap() {
         let source = fs::read_to_string(dir.join(note)).unwrap();
         let got: Vec<Value> = md_engine::links(&source)
             .into_iter()
@@ -91,7 +66,7 @@ fn links_are_parsed_as_obsidian_parses_them() {
 
 #[test]
 fn a_txt_note_has_its_wikilinks_too() {
-    let (_dir, vault) = fixture_vault();
+    let (_dir, vault) = fixture_vault("links");
     let text = vault.read_note(&p("notes.txt")).unwrap();
     let link = &md_engine::links(&text)[0];
     assert_eq!(
@@ -102,7 +77,7 @@ fn a_txt_note_has_its_wikilinks_too() {
 
 #[test]
 fn following_an_unresolved_link_creates_its_note() {
-    let (dir, vault) = fixture_vault();
+    let (dir, vault) = fixture_vault("links");
     let from = p("Inbox/Capture.md");
     assert_eq!(vault.resolve(&from, "Missing note"), None);
 
@@ -146,7 +121,7 @@ fn following_an_unresolved_link_creates_its_note() {
 
 #[test]
 fn following_a_link_opens_its_target_at_the_heading_or_creates_the_note() {
-    let (dir, vault) = fixture_vault();
+    let (dir, vault) = fixture_vault("links");
     let from = p("Home.md");
 
     let plan = vault.follow_link(&from, "Projects/Plan#Goals").unwrap();
@@ -182,7 +157,7 @@ fn following_a_link_opens_its_target_at_the_heading_or_creates_the_note() {
 
 #[test]
 fn notes_added_or_removed_by_other_apps_are_found_through_the_watcher() {
-    let (dir, vault) = fixture_vault();
+    let (dir, vault) = fixture_vault("links");
     let from = p("Home.md");
     assert_eq!(vault.resolve(&from, "Later"), None);
     let (tx, rx) = std::sync::mpsc::channel();

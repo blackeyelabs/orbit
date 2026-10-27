@@ -1,10 +1,10 @@
-//! Link resolution as Obsidian does it (`getLinkpathDest`, checked against
-//! Obsidian 1.14.4 in tests/links.rs), plus front matter aliases as targets
-//! where no file matches; and backlinks.
+//! The vault index: link resolution as Obsidian does it (`getLinkpathDest`,
+//! checked against Obsidian 1.14.4 in tests/links.rs), plus front matter
+//! aliases as targets where no file matches; backlinks; and tags.
 //!
 //! The vault's files are indexed in memory: by name, and each note with its
-//! aliases and links. The index is built the first time a link is
-//! resolved, then kept current from the paths that change: Orbit's own
+//! aliases, links and tags. The index is built the first time it's asked
+//! anything, then kept current from the paths that change: Orbit's own
 //! changes and the watcher's.
 
 use std::{
@@ -12,6 +12,7 @@ use std::{
     ops::Range,
 };
 
+use crate::tags::{self, TagCount};
 use crate::{EntryKind, TreeNode, VaultPath, is_plain_text_note};
 
 /// Characters of context kept on either side of a link.
@@ -35,11 +36,14 @@ pub struct Mention {
     pub link: Range<usize>,
 }
 
-/// What the index keeps of a file: if it's a note, its aliases and links.
+/// What the index keeps of a file: if it's a note, its aliases, links
+/// and tags.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct FileLinks {
+pub(crate) struct IndexedFile {
     aliases: Vec<String>,
     links: Vec<OutLink>,
+    /// Front matter's, then inline ones, without `#`.
+    tags: Vec<String>,
 }
 
 /// A link in a note.
@@ -50,12 +54,19 @@ struct OutLink {
     mention: Mention,
 }
 
-impl FileLinks {
-    /// A note's aliases (markdown only, as in Obsidian) and links (only
-    /// wikilinks in a `.txt` note, which has no markdown).
+impl IndexedFile {
+    /// A note's aliases and tags (markdown only, as in Obsidian) and links
+    /// (only wikilinks in a `.txt` note, which has no markdown).
     pub(crate) fn of_note(path: &VaultPath, source: &str) -> Self {
         let plain = is_plain_text_note(path);
-        FileLinks {
+        IndexedFile {
+            tags: if plain {
+                Vec::new()
+            } else {
+                let mut tags = md_engine::front_matter_tags(source);
+                tags.extend(md_engine::inline_tags(source));
+                tags
+            },
             aliases: if plain {
                 Vec::new()
             } else {
@@ -74,7 +85,7 @@ impl FileLinks {
 }
 
 #[derive(Default)]
-pub(crate) struct LinkIndex {
+pub(crate) struct VaultIndex {
     /// `None` until built, and after a change it can't follow file by file.
     files: Option<Files>,
     /// Changed since the index was last brought up to date.
@@ -84,7 +95,7 @@ pub(crate) struct LinkIndex {
 #[derive(Default)]
 pub(crate) struct Files {
     /// Every file (not folder), in path order.
-    files: BTreeMap<VaultPath, FileLinks>,
+    files: BTreeMap<VaultPath, IndexedFile>,
     /// Lowercased file name → files with that name, in path order.
     by_name: HashMap<String, Vec<VaultPath>>,
     /// Lowercased alias → notes with that alias, in path order.
@@ -93,15 +104,15 @@ pub(crate) struct Files {
 
 /// What a path holds now, for bringing the index up to date.
 pub(crate) enum Found {
-    /// A file, with its links if it's a note.
-    File(FileLinks),
+    /// A file, with what's indexed of it.
+    File(IndexedFile),
     Folder,
     Nothing,
     /// Something that can't be read now: the index is rebuilt.
     Unreadable,
 }
 
-impl LinkIndex {
+impl VaultIndex {
     pub(crate) fn changed(&mut self, paths: impl IntoIterator<Item = VaultPath>) {
         self.pending.extend(paths);
     }
@@ -142,11 +153,11 @@ impl Files {
             if node.kind == EntryKind::Folder {
                 self.add(&node.children, read);
             } else {
-                let links = match (node.kind == EntryKind::Note).then(|| read(&node.path)) {
-                    Some(Found::File(links)) => links,
-                    _ => FileLinks::default(),
+                let file = match (node.kind == EntryKind::Note).then(|| read(&node.path)) {
+                    Some(Found::File(file)) => file,
+                    _ => IndexedFile::default(),
                 };
-                self.files.insert(node.path.clone(), links);
+                self.files.insert(node.path.clone(), file);
             }
         }
     }
@@ -160,8 +171,8 @@ impl Files {
         read: &mut impl FnMut(&VaultPath) -> Found,
     ) -> bool {
         match found {
-            Found::File(links) => {
-                self.files.insert(path.clone(), links);
+            Found::File(file) => {
+                self.files.insert(path.clone(), file);
             }
             // A folder that's gone takes everything in it; one that's there
             // (new, or moved here) is read afresh.
@@ -287,10 +298,24 @@ impl Files {
             .collect()
     }
 
+    /// The vault's tags, counted.
+    pub(crate) fn tags(&self) -> Vec<TagCount> {
+        tags::count(self.files.values().map(|file| file.tags.as_slice()))
+    }
+
+    /// The notes with the tag `tag`, or one nested in it, in path order.
+    pub(crate) fn notes_tagged(&self, tag: &str) -> Vec<VaultPath> {
+        self.files
+            .iter()
+            .filter(|(_, file)| tags::has(&file.tags, tag))
+            .map(|(path, _)| path.clone())
+            .collect()
+    }
+
     fn reindex(&mut self) {
         self.by_name.clear();
         self.by_alias.clear();
-        for (path, FileLinks { aliases, .. }) in &self.files {
+        for (path, IndexedFile { aliases, .. }) in &self.files {
             self.by_name
                 .entry(path.name().to_lowercase())
                 .or_default()

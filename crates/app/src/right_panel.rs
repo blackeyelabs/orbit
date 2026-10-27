@@ -1,13 +1,15 @@
 //! The right panel, laid out as on the design canvas: the open note's
-//! Outline, then its Backlinks, each linking note with its links in context.
+//! Outline, then its Backlinks, each linking note with its links in context,
+//! then the vault's Tags, and the notes of the one chosen.
 
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{h_flex, v_flex};
-use gpui_kit::component::ActiveTheme as _;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::{ActiveTheme as _, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use md_engine::Heading;
-use orbit_core::{Backlink, Mention};
+use orbit_core::{Backlink, Mention, TagCount, VaultPath, same_tag};
 
 use crate::window::OrbitWindow;
 
@@ -19,11 +21,20 @@ const SECTION_GAP: f32 = 1.625;
 /// How far each heading level is indented in the Outline.
 const LEVEL_INDENT: f32 = 0.875;
 
-/// The panel for the open note, or a hint when none is.
-pub fn render(
-    note: Option<(&[Heading], &[Backlink])>,
-    cx: &mut Context<OrbitWindow>,
-) -> AnyElement {
+/// What the panel shows.
+pub struct Contents<'a> {
+    /// The open note's headings; `None` with no note open.
+    pub outline: Option<&'a [Heading]>,
+    /// The open note's backlinks.
+    pub backlinks: &'a [Backlink],
+    /// Every tag in the vault, with its count.
+    pub tags: &'a [TagCount],
+    /// The tag chosen in the Tags section, and its notes.
+    pub tagged: Option<(&'a str, &'a [VaultPath])>,
+}
+
+/// The panel: the open note's sections, or a hint when none is, then Tags.
+pub fn render(contents: Contents, cx: &mut Context<OrbitWindow>) -> AnyElement {
     let panel = v_flex()
         .id("right-panel")
         .w(rems(WIDTH))
@@ -36,10 +47,10 @@ pub fn render(
         .border_l_1()
         .border_color(cx.theme().border)
         .bg(cx.theme().sidebar);
-    match note {
-        Some((outline, backlinks)) => panel
+    match contents.outline {
+        Some(outline) => panel
             .child(render_outline(outline, cx))
-            .child(render_backlinks(backlinks, cx)),
+            .child(render_backlinks(contents.backlinks, cx)),
         None => panel.child(
             div()
                 .text_sm()
@@ -47,6 +58,7 @@ pub fn render(
                 .child("Open a note to see its outline and backlinks."),
         ),
     }
+    .child(render_tags(contents.tags, contents.tagged, cx))
     .into_any_element()
 }
 
@@ -122,6 +134,109 @@ fn render_backlinks(backlinks: &[Backlink], cx: &mut Context<OrbitWindow>) -> An
             this.child(empty("No notes link here", cx))
         })
         .into_any_element()
+}
+
+fn render_tags(
+    tags: &[TagCount],
+    tagged: Option<(&str, &[VaultPath])>,
+    cx: &mut Context<OrbitWindow>,
+) -> AnyElement {
+    let chips = tags.iter().enumerate().map(|(ix, tag)| {
+        let is_chosen = tagged.is_some_and(|(chosen, _)| same_tag(chosen, &tag.name));
+        let name = tag.name.clone();
+        let colour = tag_colour(&tag.name, cx);
+        h_flex()
+            .id(("tag", ix))
+            .h(rems(1.5))
+            .px_3()
+            .gap_2()
+            .rounded_full()
+            .border_1()
+            .border_color(colour)
+            .bg(colour.opacity(if is_chosen { 0.5 } else { 0.2 }))
+            .text_xs()
+            .font_weight(FontWeight::SEMIBOLD)
+            .cursor_pointer()
+            .hover(|this| this.bg(colour.opacity(0.35)))
+            .child(format!("#{}", tag.name))
+            .child(
+                div()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(tag.count.to_string()),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| this.choose_tag(Some(&name), cx)))
+    });
+    let notes = tagged.map(|(tag, notes)| {
+        let rows =
+            notes.iter().enumerate().map(|(ix, path)| {
+                let open = path.clone();
+                h_flex()
+                    .id(("tagged", ix))
+                    .gap_2()
+                    .py_1()
+                    .px_2()
+                    .rounded_md()
+                    .text_sm()
+                    .cursor_pointer()
+                    .hover(|this| this.bg(cx.theme().list_hover))
+                    .child(IconName::FileText)
+                    .child(div().flex_1().truncate().child(note_title(path.name())))
+                    .when(!path.parent().is_root(), |this| {
+                        this.child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .truncate()
+                                .child(path.parent().to_string()),
+                        )
+                    })
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_note(open.clone(), window, cx)
+                    }))
+            });
+        v_flex()
+            .gap_px()
+            .child(
+                h_flex()
+                    .px_2()
+                    .gap_2()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(div().flex_1().child(format!("Notes tagged #{tag}")))
+                    .child(
+                        Button::new("clear-tag")
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::Close)
+                            .tooltip("Show all tags")
+                            .on_click(cx.listener(|this, _, _, cx| this.choose_tag(None, cx))),
+                    ),
+            )
+            .children(rows)
+    });
+    v_flex()
+        .gap_3()
+        .child(section_header(IconName::Hash, "TAGS", None, cx))
+        .child(h_flex().flex_wrap().gap_2().children(chips))
+        .when(tags.is_empty(), |this| this.child(empty("No tags yet", cx)))
+        .children(notes)
+        .into_any_element()
+}
+
+/// A tag's colour: one of the theme's five, always the same for the tag.
+fn tag_colour(name: &str, cx: &App) -> Hsla {
+    let theme = cx.theme();
+    let colours = [
+        theme.chart_1,
+        theme.chart_2,
+        theme.chart_3,
+        theme.chart_4,
+        theme.chart_5,
+    ];
+    let hash = name.to_lowercase().bytes().fold(0usize, |hash, b| {
+        hash.wrapping_mul(31).wrapping_add(b.into())
+    });
+    colours[hash % colours.len()]
 }
 
 /// A link's line, the link picked out.

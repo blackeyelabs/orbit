@@ -2,14 +2,18 @@
 
 mod callout;
 mod formatting;
+mod front_matter;
 mod links;
+mod tags;
 
 pub use callout::{Callout, CalloutKind, callout};
 pub use formatting::{Format, TextEdit, format_edit};
+pub use front_matter::{aliases, front_matter_tags};
 pub use links::{
-    Heading, Link, LinkStyle, aliases, has_scheme, heading_offset, headings, links, percent_decode,
+    Heading, Link, LinkStyle, has_scheme, heading_offset, headings, links, percent_decode,
     split_target,
 };
+pub use tags::inline_tags;
 
 use unicode_segmentation::UnicodeSegmentation as _;
 

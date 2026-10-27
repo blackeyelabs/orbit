@@ -16,7 +16,9 @@ use gpui_kit::component::tree::{TreeItem, TreeState, tree};
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, TitleBar, WindowExt as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use orbit_core::{Backlink, EntryKind, Session, SessionTab, TreeNode, Vault, VaultPath, Watch};
+use orbit_core::{
+    Backlink, EntryKind, Session, SessionTab, TagCount, TreeNode, Vault, VaultPath, Watch, same_tag,
+};
 
 use crate::appearance::{self, AppSettings};
 use crate::file_actions::{self, NewNote};
@@ -59,10 +61,12 @@ pub struct OrbitWindow {
     active_tab: Option<usize>,
     left_panel_open: bool,
     right_panel_open: bool,
-    /// The active note's backlinks, while the right panel shows them.
-    backlinks: Option<(VaultPath, Vec<Backlink>)>,
-    /// Finding the backlinks, off the UI thread.
-    finding_backlinks: Option<Task<()>>,
+    /// What the right panel shows from the vault, while it's open.
+    panel_data: PanelData,
+    /// The tag chosen in the right panel, to list its notes.
+    chosen_tag: Option<String>,
+    /// Finding what the right panel shows, off the UI thread.
+    refreshing_panel: Option<Task<()>>,
     error: Option<SharedString>,
     /// Changes by other apps (and Orbit) arrive while this is held.
     _watch: Option<Watch>,
@@ -95,8 +99,9 @@ impl OrbitWindow {
             active_tab: None,
             left_panel_open: true,
             right_panel_open: false,
-            backlinks: None,
-            finding_backlinks: None,
+            panel_data: PanelData::default(),
+            chosen_tag: None,
+            refreshing_panel: None,
             error: None,
             _watch: None,
             restoring: false,
@@ -193,7 +198,7 @@ impl OrbitWindow {
     fn changed_on_disk(&mut self, paths: &[VaultPath], cx: &mut Context<Self>) {
         let expanded = self.expanded_folders(cx);
         self.refresh_tree(&expanded, cx);
-        self.refresh_backlinks(cx);
+        self.refresh_right_panel(cx);
         for tab in &self.tabs {
             let affected = paths
                 .iter()
@@ -250,30 +255,57 @@ impl OrbitWindow {
         Some(self.active()?.editor.read(cx).path().clone())
     }
 
-    /// Finds the active note's backlinks again, in the background, if the
-    /// right panel is open. Meanwhile it shows the last found for that note.
-    fn refresh_backlinks(&mut self, cx: &mut Context<Self>) {
-        let Some(path) = self.active_path(cx).filter(|_| self.right_panel_open) else {
-            self.backlinks = None;
-            self.finding_backlinks = None;
+    /// Finds what the right panel shows again, in the background, if it's
+    /// open: the active note's backlinks, the tags and the chosen tag's
+    /// notes. Meanwhile it shows what was last found.
+    fn refresh_right_panel(&mut self, cx: &mut Context<Self>) {
+        if !self.right_panel_open {
+            self.panel_data = PanelData::default();
+            self.refreshing_panel = None;
             return;
-        };
-        let vault = self.vault.clone();
-        let found = cx.background_spawn({
-            let path = path.clone();
-            async move { vault.backlinks(&path) }
+        }
+        let (vault, path, tag) = (
+            self.vault.clone(),
+            self.active_path(cx),
+            self.chosen_tag.clone(),
+        );
+        let found = cx.background_spawn(async move {
+            PanelData {
+                backlinks: path.map(|path| {
+                    let backlinks = vault.backlinks(&path);
+                    (path, backlinks)
+                }),
+                tags: vault.tags(),
+                tagged: tag.map(|tag| {
+                    let notes = vault.notes_tagged(&tag);
+                    (tag, notes)
+                }),
+            }
         });
-        self.finding_backlinks = Some(cx.spawn(async move |this, cx| {
-            let backlinks = found.await;
+        self.refreshing_panel = Some(cx.spawn(async move |this, cx| {
+            let found = found.await;
             this.update(cx, |this, cx| {
-                // Another note may be active by now.
-                if this.active_path(cx).as_ref() == Some(&path) {
-                    this.backlinks = Some((path, backlinks));
-                    cx.notify();
+                // A chosen tag no note has any more is let go.
+                if let Some(chosen) = &this.chosen_tag
+                    && !found.tags.iter().any(|tag| same_tag(&tag.name, chosen))
+                {
+                    this.chosen_tag = None;
                 }
+                this.panel_data = found;
+                cx.notify();
             })
             .ok();
         }));
+    }
+
+    /// Lists the notes of the tag `name` in the right panel, or, for the
+    /// tag already chosen or none, all the tags again.
+    pub(crate) fn choose_tag(&mut self, name: Option<&str>, cx: &mut Context<Self>) {
+        let chosen = self.chosen_tag.as_deref();
+        let same = name.zip(chosen).is_some_and(|(a, b)| same_tag(a, b));
+        self.chosen_tag = name.filter(|_| !same).map(str::to_string);
+        self.refresh_right_panel(cx);
+        cx.notify();
     }
 
     /// Puts the active note's caret on the line at `offset`.
@@ -414,7 +446,7 @@ impl OrbitWindow {
         }
         self.error = None;
         self.refresh_tree(&expanded, cx);
-        self.refresh_backlinks(cx);
+        self.refresh_right_panel(cx);
     }
 
     /// Sends an entry to the trash and closes the tabs of notes inside it.
@@ -440,7 +472,7 @@ impl OrbitWindow {
         self.error = None;
         let expanded = self.expanded_folders(cx);
         self.refresh_tree(&expanded, cx);
-        self.refresh_backlinks(cx);
+        self.refresh_right_panel(cx);
     }
 
     /// Saves the open notes at or inside `path`; false if any couldn't be.
@@ -514,7 +546,7 @@ impl OrbitWindow {
             self.active_tab = Some(ix);
             NoteEditor::focus(&tab.editor, window, cx);
             self.save_session(cx);
-            self.refresh_backlinks(cx);
+            self.refresh_right_panel(cx);
             cx.notify();
         }
     }
@@ -567,7 +599,7 @@ impl OrbitWindow {
             None => None,
         };
         self.save_session(cx);
-        self.refresh_backlinks(cx);
+        self.refresh_right_panel(cx);
         cx.notify();
     }
 
@@ -603,7 +635,7 @@ impl OrbitWindow {
                 (IconName::PanelRightClose, IconName::PanelRight),
                 cx.listener(|this, _, _, cx| {
                     this.right_panel_open = !this.right_panel_open;
-                    this.refresh_backlinks(cx);
+                    this.refresh_right_panel(cx);
                     cx.notify();
                 }),
             ))
@@ -775,12 +807,26 @@ impl OrbitWindow {
 
     fn render_right_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let outline = self.active().map(|tab| tab.editor.read(cx).outline());
-        // Until the active note's are found, none rather than another's.
-        let backlinks = match (&self.backlinks, self.active_path(cx)) {
+        // Until what's current is found, nothing rather than another note's
+        // backlinks or another tag's notes.
+        let backlinks = match (&self.panel_data.backlinks, self.active_path(cx)) {
             (Some((path, backlinks)), Some(active)) if *path == active => backlinks.as_slice(),
             _ => &[],
         };
-        right_panel::render(outline.as_deref().map(|o| (o, backlinks)), cx)
+        let tagged = match (&self.panel_data.tagged, &self.chosen_tag) {
+            (Some((tag, notes)), Some(chosen)) if tag == chosen => {
+                Some((tag.as_str(), notes.as_slice()))
+            }
+            (_, Some(chosen)) => Some((chosen.as_str(), &[][..])),
+            _ => None,
+        };
+        let contents = right_panel::Contents {
+            outline: outline.as_deref(),
+            backlinks,
+            tags: &self.panel_data.tags,
+            tagged,
+        };
+        right_panel::render(contents, cx)
     }
 
     fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -842,6 +888,16 @@ impl Render for OrbitWindow {
             .child(self.render_status_bar(cx))
             .when(grain, |this| this.child(appearance::grain(window, cx)))
     }
+}
+
+/// What the right panel shows from the vault.
+#[derive(Default)]
+struct PanelData {
+    /// The active note's backlinks, with its path.
+    backlinks: Option<(VaultPath, Vec<Backlink>)>,
+    tags: Vec<TagCount>,
+    /// The chosen tag's notes, with the tag.
+    tagged: Option<(String, Vec<VaultPath>)>,
 }
 
 /// A title-bar button that shows or hides a side panel.

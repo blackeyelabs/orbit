@@ -90,14 +90,14 @@ pub fn links(source: &str) -> Vec<Link> {
 
 /// Follows fenced code blocks line by line.
 #[derive(Default)]
-struct Fences {
+pub(crate) struct Fences {
     /// The open fence's character and length.
     open: Option<(u8, usize)>,
 }
 
 impl Fences {
     /// Whether `line` is a fence or inside a fenced block.
-    fn is_code(&mut self, line: &str) -> bool {
+    pub(crate) fn is_code(&mut self, line: &str) -> bool {
         match (fence_marker(line), self.open) {
             (Some(marker), None) => self.open = Some(marker),
             (Some((ch, len)), Some((open_ch, open_len)))
@@ -135,7 +135,7 @@ fn is_closing(line: &str) -> bool {
 
 /// Past the code span starting at `start` (a run of backticks), or just
 /// past the run if nothing closes it before a blank line.
-fn skip_code_span(source: &str, start: usize) -> usize {
+pub(crate) fn skip_code_span(source: &str, start: usize) -> usize {
     let bytes = source.as_bytes();
     let run = bytes[start..].iter().take_while(|&&b| b == b'`').count();
     let mut i = start + run;
@@ -176,7 +176,7 @@ fn link_at(source: &str, i: usize) -> Option<Link> {
 }
 
 /// `[[target#heading|alias]]` at `open`, all on one line.
-fn wikilink(source: &str, open: usize) -> Option<Link> {
+pub(crate) fn wikilink(source: &str, open: usize) -> Option<Link> {
     let inner_start = open + 2;
     let rest = &source[inner_start..];
     let line = &rest[..rest.find('\n').unwrap_or(rest.len())];
@@ -311,45 +311,6 @@ pub fn percent_decode(s: &str) -> Option<String> {
         }
     }
     String::from_utf8(out).ok()
-}
-
-/// The front matter's `aliases` (or `alias`): a flow list, a block list or
-/// one value, each unquoted.
-pub fn aliases(source: &str) -> Vec<String> {
-    let len = front_matter_len(source);
-    if len == 0 {
-        return Vec::new();
-    }
-    let mut lines = source[..len].lines().skip(1);
-    while let Some(line) = lines.next() {
-        let Some((key, value)) = line.split_once(':') else {
-            continue;
-        };
-        if !matches!(key, "aliases" | "alias") {
-            continue;
-        }
-        let value = value.trim();
-        if let Some(list) = value.strip_prefix('[').and_then(|v| v.strip_suffix(']')) {
-            return list.split(',').filter_map(unquote).collect();
-        }
-        if !value.is_empty() {
-            return unquote(value).into_iter().collect();
-        }
-        return lines
-            .map_while(|line| line.trim_start().strip_prefix("- "))
-            .filter_map(unquote)
-            .collect();
-    }
-    Vec::new()
-}
-
-fn unquote(value: &str) -> Option<String> {
-    let value = value.trim();
-    let unquoted = ['"', '\'']
-        .iter()
-        .find_map(|&q| value.strip_prefix(q).and_then(|v| v.strip_suffix(q)))
-        .unwrap_or(value);
-    (!unquoted.is_empty()).then(|| unquoted.to_string())
 }
 
 /// A heading in a note's source, outside code: `## Text`, or text
