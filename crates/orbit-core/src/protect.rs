@@ -10,7 +10,7 @@ use std::{
 };
 
 use orbit_crypto::{Header, KdfParams, MasterKey, PassphraseKey, RecoveryKey, SecretString};
-use orbit_fs::{EntryType, Sealed, VaultPath};
+use orbit_fs::{EntryType, Sealed, VaultFs as _, VaultPath};
 
 use crate::{Error, Vault, in_tool_folder, search};
 
@@ -71,6 +71,9 @@ pub(crate) struct Protection {
     /// only ciphertext: written when it next unlocks, gone when the vault
     /// closes.
     held: Mutex<Vec<Sealed>>,
+    /// Plain folders found at an unlocking folder's path, renamed: until
+    /// the person moves them in or keeps them, or the folder locks.
+    copies: Mutex<Vec<UnprotectedCopy>>,
 }
 
 impl Default for Protection {
@@ -79,8 +82,19 @@ impl Default for Protection {
             kdf: Mutex::new(KdfParams::RECOMMENDED),
             attempts: Mutex::default(),
             held: Mutex::default(),
+            copies: Mutex::default(),
         }
     }
+}
+
+/// A plain folder made at a locked protected folder's path, renamed
+/// `<name> (unprotected copy)` as the protected folder unlocked.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnprotectedCopy {
+    /// Where the plain folder is now.
+    pub copy: VaultPath,
+    /// The protected folder whose place it was in.
+    pub folder: VaultPath,
 }
 
 /// How a lock went.
@@ -157,7 +171,7 @@ impl Vault {
             params,
             &mut orbit_crypto::os_rng(),
         )
-        .map_err(|e| Error::Io(std::io::Error::other(format!("{e:?}"))))?;
+        .map_err(|e| Error::Io(crypto(e)))?;
         Ok(ProtectionKeys {
             header,
             recovery,
@@ -266,8 +280,16 @@ impl Vault {
         let mut unlocked = Vec::new();
         for (store, header) in self.fs.locked().unwrap_or_default() {
             if let Some(master) = open(&header)
-                && let Ok(root) = self.fs.mount(store, master)
+                && let Ok((root, copy)) = self.fs.mount(store, master)
             {
+                if let Some(copy) = copy {
+                    // Search and links see it under its new name.
+                    self.touched([copy.clone()]);
+                    lock(&self.protection.copies).push(UnprotectedCopy {
+                        copy,
+                        folder: root.clone(),
+                    });
+                }
                 unlocked.push(root);
             }
         }
@@ -324,12 +346,111 @@ impl Vault {
         lock(&self.protection.held).retain(|edit| self.fs.write_sealed(edit).is_err());
     }
 
+    /// Gives the unlocked protected folder at `folder` a new passphrase:
+    /// its key is re-wrapped, and no note re-encrypted. The recovery key
+    /// keeps working. It runs the slow key derivation, so do it off the UI
+    /// thread.
+    pub fn change_passphrase(&self, folder: &VaultPath, passphrase: &str) -> Result<(), Error> {
+        let params = *lock(&self.protection.kdf);
+        let passphrase = SecretString::from(passphrase);
+        self.fs
+            .rewrite_header(folder, |header, master| {
+                let header = orbit_crypto::change_passphrase(
+                    header,
+                    master,
+                    &passphrase,
+                    params,
+                    &mut orbit_crypto::os_rng(),
+                )
+                .map_err(crypto)?;
+                Ok((header, ()))
+            })
+            .map_err(not_unlocked)
+    }
+
+    /// Gives the unlocked protected folder at `folder` a new recovery key,
+    /// to show once; the old one stops working.
+    pub fn new_recovery_key(
+        &self,
+        folder: &VaultPath,
+    ) -> Result<orbit_crypto::Zeroizing<String>, Error> {
+        self.fs
+            .rewrite_header(folder, |header, master| {
+                let (header, recovery) =
+                    orbit_crypto::new_recovery_key(header, master, &mut orbit_crypto::os_rng())
+                        .map_err(crypto)?;
+                Ok((header, recovery.reveal()))
+            })
+            .map_err(not_unlocked)
+    }
+
+    /// Makes the unlocked protected folder at `folder` a plain folder again,
+    /// everything in it in plain text, and deletes its encrypted storage.
+    pub fn remove_protection(&self, folder: &VaultPath) -> Result<(), Error> {
+        match self.fs.unprotect(folder) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(Error::AlreadyExists(folder.clone()));
+            }
+            Err(e) => return Err(not_unlocked(e)),
+        }
+        search::forget_folder(self, folder);
+        self.forget_copies_of(folder);
+        self.touched([folder.clone()]);
+        Ok(())
+    }
+
+    /// Unprotected copies of `folder` aren't asked about once it's locked
+    /// or plain: there's nothing to move them into.
+    fn forget_copies_of(&self, folder: &VaultPath) {
+        lock(&self.protection.copies).retain(|c| &c.folder != folder);
+    }
+
+    /// Plain folders made at a locked protected folder's path, found as it
+    /// unlocked and renamed `<name> (unprotected copy)`: each with the
+    /// protected folder, until moved in or kept separate.
+    pub fn unprotected_copies(&self) -> Vec<UnprotectedCopy> {
+        lock(&self.protection.copies).clone()
+    }
+
+    /// Moves what's in the unprotected copy `copy` into its protected
+    /// folder, encrypting it, and deletes the copy once it's empty. What
+    /// couldn't move (its name taken there, say) stays in the copy, and is
+    /// returned.
+    pub fn merge_unprotected_copy(&self, copy: &VaultPath) -> Result<Vec<VaultPath>, Error> {
+        let folder = lock(&self.protection.copies)
+            .iter()
+            .find(|c| &c.copy == copy)
+            .map(|c| c.folder.clone())
+            .filter(|folder| self.protected_folder_of(folder).as_ref() == Some(folder))
+            .ok_or(Error::NotFound)?;
+        let mut left = Vec::new();
+        for entry in self.fs.list_dir(copy)? {
+            let path = copy.join(&entry.name)?;
+            if self.move_to(&path, &folder).is_err() {
+                left.push(path);
+            }
+        }
+        if left.is_empty() {
+            self.delete(copy)?;
+            self.keep_unprotected_copy(copy);
+        }
+        Ok(left)
+    }
+
+    /// Keeps the unprotected copy `copy` as a plain folder of its own: it's
+    /// not asked about again.
+    pub fn keep_unprotected_copy(&self, copy: &VaultPath) {
+        lock(&self.protection.copies).retain(|c| &c.copy != copy);
+    }
+
     /// Locks the unlocked protected folder at `folder`: its key is dropped,
     /// and it leaves the tree. Whether it was unlocked.
     pub fn lock(&self, folder: &VaultPath) -> bool {
         let locked = self.fs.unmount(folder);
         if locked {
             search::forget_folder(self, folder);
+            self.forget_copies_of(folder);
             self.touched([folder.clone()]);
             // What links and tags knew of the folder goes now, not when
             // they're next asked.
@@ -355,6 +476,19 @@ impl Vault {
     /// The unlocked protected folder `path` is in, or is.
     pub fn protected_folder_of(&self, path: &VaultPath) -> Option<VaultPath> {
         self.fs.protected_folder_of(path)
+    }
+}
+
+/// orbit-crypto's errors, as I/O errors.
+fn crypto(e: orbit_crypto::Error) -> std::io::Error {
+    std::io::Error::other(format!("{e:?}"))
+}
+
+/// A folder that isn't an unlocked protected one is [`Error::NotFound`].
+fn not_unlocked(e: std::io::Error) -> Error {
+    match e.kind() {
+        std::io::ErrorKind::NotFound => Error::NotFound,
+        _ => Error::Io(e),
     }
 }
 

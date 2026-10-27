@@ -96,3 +96,13 @@ fn the_interface_grows_and_shrinks_in_steps_within_its_range() {
     assert_eq!(s.interface_size_percent(), 80);
     assert!(!s.can_shrink_interface());
 }
+
+#[test]
+fn the_moving_in_warning_is_remembered_once_shown() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut settings = Settings::load(dir.path());
+    assert!(!settings.warned_moving_in);
+    settings.warned_moving_in = true;
+    settings.save(dir.path()).unwrap();
+    assert!(Settings::load(dir.path()).warned_moving_in);
+}

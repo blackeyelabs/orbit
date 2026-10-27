@@ -14,6 +14,7 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
+use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, WindowExt as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -24,7 +25,7 @@ use orbit_core::{
 use crate::window::OrbitWindow;
 
 // Canvas sizes at 100% (480 px), in rems.
-const DIALOG_WIDTH: f32 = 30.;
+pub(crate) const DIALOG_WIDTH: f32 = 30.;
 
 /// Opens the protect flow on `folder` (one of `folders`, which it can be
 /// changed to).
@@ -320,42 +321,11 @@ impl ProtectFlow {
     }
 
     fn render_passphrase(&self, cx: &mut Context<Self>) -> AnyElement {
-        let passphrase = self.passphrase(cx);
-        let confirm = self.confirm.read(cx).value();
-        let strength = passphrase_strength(&passphrase);
-        let matches = !passphrase.is_empty() && passphrase == confirm;
-        let (label, colour) = match strength {
-            Strength::Weak => ("Weak", cx.theme().danger),
-            Strength::Fair => ("Fair", cx.theme().warning),
-            Strength::Strong => ("Strong", cx.theme().success),
-        };
+        let (fields, matches) = passphrase_fields(&self.passphrase, &self.confirm, cx);
         v_flex()
             .gap_3()
             .child(step_label("2 · Set a passphrase"))
-            .child(field_label("Passphrase"))
-            .child(Input::new(&self.passphrase).mask_toggle())
-            .when(!passphrase.is_empty(), |this| {
-                this.child(div().text_xs().text_color(colour).child(label))
-            })
-            .child(field_label("Confirm passphrase"))
-            .child(Input::new(&self.confirm).mask_toggle())
-            .when(!confirm.is_empty(), |this| {
-                this.child(if matches {
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().success)
-                        .child("Passphrases match")
-                } else {
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().danger)
-                        .child("Passphrases don't match")
-                })
-            })
-            .child(text(
-                "Four or more unrelated words make a stronger passphrase than a short password \
-                 with symbols.",
-            ))
+            .child(fields)
             .when_some(self.error.clone(), |this, error| {
                 this.child(error_text(error, cx))
             })
@@ -377,63 +347,20 @@ impl ProtectFlow {
     }
 
     fn render_recovery(&self, key: &str, stored: bool, cx: &mut Context<Self>) -> AnyElement {
-        let key = key.to_string();
-        let (copied, saved) = (key.clone(), key.clone());
         v_flex()
             .gap_3()
             .child(step_label("3 · Save the recovery key"))
-            .child(text(
-                "This key opens the folder if you forget the passphrase. It's shown only once.",
-            ))
-            .child(
-                div()
-                    .p_3()
-                    .rounded_md()
-                    .bg(cx.theme().muted)
-                    .text_center()
-                    .font_family(cx.theme().mono_font_family.clone())
-                    .child(key),
-            )
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child(
-                        Button::new("copy-key")
-                            .outline()
-                            .small()
-                            .icon(IconName::Copy)
-                            .label("Copy")
-                            .on_click(move |_, _, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()))
-                            }),
-                    )
-                    .child(
-                        Button::new("save-key")
-                            .outline()
-                            .small()
-                            .icon(IconName::Download)
-                            .label("Save to file")
-                            .on_click(
-                                cx.listener(move |this, _, _, cx| this.save_key(saved.clone(), cx)),
-                            ),
-                    ),
-            )
-            .child(note(
-                "Without this key, a forgotten passphrase means permanent loss. Orbit can't \
-                 reset or recover it for you.",
+            .child(recovery_key(
+                key,
+                stored,
+                cx.listener(|this, checked: &bool, _, cx| {
+                    if let Step::Recovery { stored, .. } = &mut this.step {
+                        *stored = *checked;
+                    }
+                    cx.notify();
+                }),
                 cx,
             ))
-            .child(
-                Checkbox::new("stored")
-                    .label("I have stored my recovery key")
-                    .checked(stored)
-                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                        if let Step::Recovery { stored, .. } = &mut this.step {
-                            *stored = *checked;
-                        }
-                        cx.notify();
-                    })),
-            )
             .when_some(self.error.clone(), |this, error| {
                 this.child(error_text(error, cx))
             })
@@ -455,32 +382,138 @@ impl ProtectFlow {
             ))
             .into_any_element()
     }
+}
 
-    /// Saves the recovery key to a file the person chooses.
-    fn save_key(&mut self, key: String, cx: &mut Context<Self>) {
-        let start = std::env::var_os("HOME")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_default();
-        let chosen = cx.prompt_for_new_path(&start, Some("Orbit recovery key.txt"));
-        cx.spawn(async move |this, cx| {
+/// A new passphrase, typed twice, with its strength and whether the two
+/// match; and whether they do.
+pub(crate) fn passphrase_fields(
+    passphrase: &Entity<InputState>,
+    confirm: &Entity<InputState>,
+    cx: &App,
+) -> (AnyElement, bool) {
+    let (typed, again) = (passphrase.read(cx).value(), confirm.read(cx).value());
+    let matches = !typed.is_empty() && typed == again;
+    let (label, colour) = match passphrase_strength(&typed) {
+        Strength::Weak => ("Weak", cx.theme().danger),
+        Strength::Fair => ("Fair", cx.theme().warning),
+        Strength::Strong => ("Strong", cx.theme().success),
+    };
+    let fields = v_flex()
+        .gap_3()
+        .child(field_label("Passphrase"))
+        .child(Input::new(passphrase).mask_toggle())
+        .when(!typed.is_empty(), |this| {
+            this.child(div().text_xs().text_color(colour).child(label))
+        })
+        .child(field_label("Confirm passphrase"))
+        .child(Input::new(confirm).mask_toggle())
+        .when(!again.is_empty(), |this| {
+            this.child(if matches {
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().success)
+                    .child("Passphrases match")
+            } else {
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().danger)
+                    .child("Passphrases don't match")
+            })
+        })
+        .child(text(
+            "Four or more unrelated words make a stronger passphrase than a short password \
+             with symbols.",
+        ));
+    (fields.into_any_element(), matches)
+}
+
+/// A recovery key shown once: copy, save to a file, and the "I have stored
+/// it" checkbox, which `on_stored` hears.
+pub(crate) fn recovery_key(
+    key: &str,
+    stored: bool,
+    on_stored: impl Fn(&bool, &mut Window, &mut App) + 'static,
+    cx: &App,
+) -> impl IntoElement {
+    let key = Zeroizing::new(key.to_string());
+    let (copied, saved) = (key.clone(), key.clone());
+    v_flex()
+        .gap_3()
+        .child(text(
+            "This key opens the folder if you forget the passphrase. It's shown only once.",
+        ))
+        .child(
+            div()
+                .p_3()
+                .rounded_md()
+                .bg(cx.theme().muted)
+                .text_center()
+                .font_family(cx.theme().mono_font_family.clone())
+                .child(key.to_string()),
+        )
+        .child(
+            h_flex()
+                .gap_2()
+                .child(
+                    Button::new("copy-key")
+                        .outline()
+                        .small()
+                        .icon(IconName::Copy)
+                        .label("Copy")
+                        .on_click(move |_, _, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(copied.to_string()))
+                        }),
+                )
+                .child(
+                    Button::new("save-key")
+                        .outline()
+                        .small()
+                        .icon(IconName::Download)
+                        .label("Save to file")
+                        .on_click(move |_, window, cx| save_key(saved.clone(), window, cx)),
+                ),
+        )
+        .child(note(
+            "Without this key, a forgotten passphrase means permanent loss. Orbit can't \
+             reset or recover it for you.",
+            cx,
+        ))
+        .child(
+            Checkbox::new("stored")
+                .label("I have stored my recovery key")
+                .checked(stored)
+                .on_click(on_stored),
+        )
+}
+
+/// Saves the recovery key to a file the person chooses; a failure is a
+/// notification.
+fn save_key(key: Zeroizing<String>, window: &mut Window, cx: &mut App) {
+    let start = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default();
+    let chosen = cx.prompt_for_new_path(&start, Some("Orbit recovery key.txt"));
+    window
+        .spawn(cx, async move |cx| {
             let Ok(Ok(Some(file))) = chosen.await else {
                 return;
             };
             let text = Zeroizing::new(format!(
-                "Orbit recovery key\n\n{key}\n\nIt unlocks a protected folder if its passphrase \
-                 is forgotten. Keep it somewhere safe, away from the folder.\n"
+                "Orbit recovery key\n\n{}\n\nIt unlocks a protected folder if its passphrase \
+                 is forgotten. Keep it somewhere safe, away from the folder.\n",
+                key.as_str()
             ));
-            let written = orbit_core::save_elsewhere(&file, &text);
-            this.update(cx, |this, cx| {
-                this.error = written
-                    .err()
-                    .map(|e| format!("Couldn't save the key: {e}").into());
-                cx.notify();
-            })
-            .ok();
+            if let Err(e) = orbit_core::save_elsewhere(&file, &text) {
+                cx.update(|window, cx| {
+                    window.push_notification(
+                        Notification::error(format!("Couldn't save the key: {e}")),
+                        cx,
+                    );
+                })
+                .ok();
+            }
         })
         .detach();
-    }
 }
 
 impl Render for ProtectFlow {
@@ -570,6 +603,12 @@ impl UnlockPrompt {
                     Ok(_) => {
                         window.close_dialog(cx);
                         view.update(cx, |this, cx| this.protection_changed(cx)).ok();
+                        crate::protection_manage::ask_about_unprotected_copies(
+                            view.clone(),
+                            this.vault.clone(),
+                            window,
+                            cx,
+                        );
                     }
                     Err(UnlockError::Wrong { retry_in }) => {
                         this.error = Some(
@@ -677,7 +716,7 @@ impl Render for UnlockPrompt {
 }
 
 /// Back (or Cancel) and a primary button, enabled or not.
-fn buttons(
+pub(crate) fn buttons(
     (back, on_back): (
         &'static str,
         impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
@@ -703,22 +742,22 @@ fn buttons(
         )
 }
 
-fn step_label(label: &'static str) -> impl IntoElement {
+pub(crate) fn step_label(label: &'static str) -> impl IntoElement {
     div().text_xs().font_weight(FontWeight::BOLD).child(label)
 }
 
-fn field_label(label: &'static str) -> impl IntoElement {
+pub(crate) fn field_label(label: &'static str) -> impl IntoElement {
     div()
         .text_sm()
         .font_weight(FontWeight::SEMIBOLD)
         .child(label)
 }
 
-fn text(text: impl Into<SharedString>) -> impl IntoElement {
+pub(crate) fn text(text: impl Into<SharedString>) -> impl IntoElement {
     div().text_sm().child(text.into())
 }
 
-fn note(text: &'static str, cx: &App) -> impl IntoElement {
+pub(crate) fn note(text: &'static str, cx: &App) -> impl IntoElement {
     div()
         .p_2()
         .border_l_2()
@@ -727,11 +766,11 @@ fn note(text: &'static str, cx: &App) -> impl IntoElement {
         .child(text)
 }
 
-fn error_text(error: SharedString, cx: &App) -> impl IntoElement {
+pub(crate) fn error_text(error: SharedString, cx: &App) -> impl IntoElement {
     div().text_sm().text_color(cx.theme().danger).child(error)
 }
 
-fn busy(what: &str, cx: &App) -> AnyElement {
+pub(crate) fn busy(what: &str, cx: &App) -> AnyElement {
     div()
         .py_6()
         .text_center()

@@ -160,6 +160,15 @@ impl Drop for MasterKey {
     }
 }
 
+impl Clone for MasterKey {
+    /// A copy in memory of its own, kept out of swap as the original is.
+    fn clone(&self) -> Self {
+        let mut key = MasterKey::zeroed();
+        key.0.copy_from_slice(&self.0[..]);
+        key
+    }
+}
+
 impl PartialEq for MasterKey {
     fn eq(&self, other: &Self) -> bool {
         // No early exit, so the compare doesn't leak where keys differ.

@@ -38,6 +38,9 @@ pub struct Settings {
     pub lock_on_suspend: bool,
     /// Protected folders lock when the screen locks.
     pub lock_on_screen_lock: bool,
+    /// Whether the warning on moving a note into a protected folder (its
+    /// old plain text may still be recoverable) was shown: it's shown once.
+    pub warned_moving_in: bool,
 }
 
 impl Default for Settings {
@@ -49,6 +52,7 @@ impl Default for Settings {
             auto_lock_minutes: Some(10),
             lock_on_suspend: true,
             lock_on_screen_lock: true,
+            warned_moving_in: false,
         }
     }
 }
@@ -90,6 +94,9 @@ impl Settings {
         }
         if let Some(lock) = field("lock_on_screen_lock").and_then(|v| v.as_bool()) {
             settings.lock_on_screen_lock = lock;
+        }
+        if let Some(warned) = field("warned_moving_in").and_then(|v| v.as_bool()) {
+            settings.warned_moving_in = warned;
         }
         settings
     }

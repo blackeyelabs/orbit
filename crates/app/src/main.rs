@@ -13,6 +13,7 @@ mod link_completion;
 mod note_editor;
 mod preview;
 mod protection;
+mod protection_manage;
 mod right_panel;
 mod search_panel;
 mod settings_view;

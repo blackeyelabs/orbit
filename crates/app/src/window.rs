@@ -38,9 +38,10 @@ use crate::file_actions::Protection;
 use crate::file_actions::{self, NewNote};
 use crate::note_editor::{NoteEditor, NoteEditorEvent};
 use crate::protection;
+use crate::protection_manage;
 use crate::right_panel;
 use crate::search_panel;
-use crate::settings_view::AppearancePane;
+use crate::settings_view::{AppearancePane, SecurityPane};
 use crate::switcher::{self, Chosen, Switcher};
 use crate::vaults;
 
@@ -556,33 +557,55 @@ impl OrbitWindow {
         self.relocate(&path, "rename", || vault.rename(&path, new_name), cx);
     }
 
+    /// Moves `path` into `folder`. Out of a protected folder into a plain
+    /// one, it asks first; the first time something moves into one, it says
+    /// what of the plain copy may remain.
     pub fn move_entry(
         &mut self,
         path: VaultPath,
         folder: &VaultPath,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let protected_from = self.vault.protected_folder_of(&path);
+        let protected_to = self.vault.protected_folder_of(folder);
+        if protected_from.is_some() && protected_to.is_none() {
+            let (view, moving, into) = (cx.entity().downgrade(), path.clone(), folder.clone());
+            let move_out = move |_: &mut Window, cx: &mut App| {
+                view.update(cx, |this, cx| {
+                    let vault = this.vault.clone();
+                    this.relocate(&moving, "move", || vault.move_to(&moving, &into), cx);
+                })
+                .ok();
+            };
+            return protection_manage::confirm_move_out(path, folder.clone(), move_out, window, cx);
+        }
         let vault = self.vault.clone();
-        self.relocate(&path, "move", || vault.move_to(&path, folder), cx);
+        let moved = self.relocate(&path, "move", || vault.move_to(&path, folder), cx);
+        if moved && protected_from.is_none() && protected_to.is_some() {
+            protection_manage::warn_after_moving_in(window, cx);
+        }
     }
 
-    /// Renames or moves `path` with `relocate`, its open notes saved first.
-    /// Afterwards open tabs follow their notes, and the tree keeps its open
-    /// folders, under their new paths too.
+    /// Renames or moves `path` with `relocate`, its open notes saved first,
+    /// and says whether it moved. Afterwards open tabs follow their notes,
+    /// and the tree keeps its open folders, under their new paths too.
     fn relocate(
         &mut self,
         path: &VaultPath,
         verb: &str,
         relocate: impl FnOnce() -> Result<VaultPath, orbit_core::Error>,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         if !self.save_tabs_within(path, cx) {
-            return;
+            return false;
         }
         let to = match relocate() {
             Ok(to) => to,
-            Err(e) => return self.report(&format!("{verb} {}", path.name()), e, cx),
+            Err(e) => {
+                self.report(&format!("{verb} {}", path.name()), e, cx);
+                return false;
+            }
         };
         let expanded = self
             .expanded_folders(cx)
@@ -601,6 +624,7 @@ impl OrbitWindow {
         self.error = None;
         self.refresh_tree(&expanded, cx);
         self.refresh_right_panel(cx);
+        true
     }
 
     /// Sends an entry to the trash and closes the tabs of notes inside it.
@@ -953,12 +977,28 @@ impl OrbitWindow {
     }
 
     fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let view = cx.new(|_| AppearancePane);
+        let appearance = cx.new(|_| AppearancePane);
+        let (view, vault) = (cx.entity().downgrade(), self.vault.clone());
+        let security = cx.new(|cx| SecurityPane::new(view, vault, cx));
         window.open_dialog(cx, move |dialog, window, _| {
-            dialog
-                .title("Appearance")
-                .w(window.rem_size() * 40.)
-                .child(view.clone())
+            let heading = |title: &'static str| {
+                div()
+                    .pt_2()
+                    .text_lg()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(title)
+            };
+            dialog.title("Settings").w(window.rem_size() * 40.).child(
+                v_flex()
+                    .id("settings")
+                    .max_h(rems(36.))
+                    .overflow_y_scroll()
+                    .gap_2()
+                    .child(heading("Appearance"))
+                    .child(appearance.clone())
+                    .child(heading("Security"))
+                    .child(security.clone()),
+            )
         });
     }
 

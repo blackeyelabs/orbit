@@ -32,6 +32,16 @@ pub struct ProtectedFs {
     /// Protected folders locked since the vault opened. (Those never
     /// unlocked meanwhile, Orbit can't know the paths of.)
     locked: RwLock<Vec<Locked>>,
+    /// Held while a header is rewritten.
+    header_writes: std::sync::Mutex<()>,
+}
+
+/// A file or folder on its way into, out of or between protected folders:
+/// where it goes, and its contents (none for a folder).
+struct Moving {
+    path: VaultPath,
+    kind: EntryType,
+    contents: zeroize::Zeroizing<Vec<u8>>,
 }
 
 /// An unlocked protected folder.
@@ -79,6 +89,7 @@ impl ProtectedFs {
             plain,
             mounts: RwLock::default(),
             locked: RwLock::default(),
+            header_writes: std::sync::Mutex::default(),
         }
     }
 
@@ -114,7 +125,13 @@ impl ProtectedFs {
     /// Mounts the protected folder stored at `store`, its key in hand:
     /// reads every blob's path and returns where the folder is. Of two
     /// blobs for one path (left by a crash mid-save), the newer counts.
-    pub fn mount(&self, store: VaultPath, master: MasterKey) -> io::Result<VaultPath> {
+    /// Anything plain made at its path while it was locked is renamed
+    /// `<name> (unprotected copy)`, returned beside it.
+    pub fn mount(
+        &self,
+        store: VaultPath,
+        master: MasterKey,
+    ) -> io::Result<(VaultPath, Option<VaultPath>)> {
         let blobs = store.join("blobs")?;
         let mut entries: BTreeMap<VaultPath, Entry> = BTreeMap::new();
         for file in self.plain.list_dir(&blobs)? {
@@ -175,6 +192,14 @@ impl ProtectedFs {
         {
             return Err(invalid("a protected folder in another's place"));
         }
+        let copy = match self.plain_entry_at(&root)? {
+            true => {
+                let copy = self.free_copy_name(&mounts, &root)?;
+                self.plain.rename(&root, &copy)?;
+                Some(copy)
+            }
+            false => None,
+        };
         lock_list(&self.locked).retain(|l| l.root != root);
         mounts.push(Mount {
             store,
@@ -182,7 +207,7 @@ impl ProtectedFs {
             master,
             entries,
         });
-        Ok(root)
+        Ok((root, copy))
     }
 
     /// Locks the protected folder at `root`: its key is dropped (and
@@ -220,8 +245,12 @@ impl ProtectedFs {
     /// Refuses moving or deleting a plain folder that holds a protected one,
     /// which would leave it behind.
     fn check_holds_none(&self, path: &VaultPath) -> io::Result<()> {
-        let holds = self
-            .mounts()
+        self.check_holds_none_of(&self.mounts(), path)
+    }
+
+    /// [`Self::check_holds_none`], with the mounts in hand.
+    fn check_holds_none_of(&self, mounts: &[Mount], path: &VaultPath) -> io::Result<()> {
+        let holds = mounts
             .iter()
             .any(|m| m.root.is_within(path) && &m.root != path)
             || lock_list(&self.locked)
@@ -297,6 +326,238 @@ impl ProtectedFs {
                 .find(|r| near(r))
                 .cloned()
         })
+    }
+
+    /// Rewrites the header of the unlocked protected folder at `root` with
+    /// `rewrite`, given the header and the folder's key: a new passphrase
+    /// or recovery key. The blobs stay as they are.
+    pub fn rewrite_header<T>(
+        &self,
+        root: &VaultPath,
+        rewrite: impl FnOnce(&Header, &MasterKey) -> io::Result<(Header, T)>,
+    ) -> io::Result<T> {
+        // One rewrite at a time, so none is lost to another.
+        let _one = self.header_writes.lock().unwrap_or_else(|e| e.into_inner());
+        let (file, header, master) = {
+            let mounts = self.mounts();
+            let mount = mounts
+                .iter()
+                .find(|m| &m.root == root)
+                .ok_or(io::ErrorKind::NotFound)?;
+            let file = mount.store.join("header")?;
+            let header = Header::from_bytes(self.plain.read(&file)?);
+            (file, header, mount.master.clone())
+        };
+        // Not while holding the mounts: a new passphrase runs Argon2, and
+        // locking mustn't wait for it (ADR 0004).
+        let (header, out) = rewrite(&header, &master)?;
+        // Its storage gone meanwhile (protection removed), this fails.
+        self.plain.write(&file, header.as_bytes())?;
+        Ok(out)
+    }
+
+    /// Makes the unlocked protected folder at `root` a plain folder again:
+    /// everything in it is written in plain text, then its storage is
+    /// deleted, header first (without it, the rest is never read again).
+    /// Fails, leaving it protected, if anything plain is at its path or a
+    /// write fails.
+    pub fn unprotect(&self, root: &VaultPath) -> io::Result<()> {
+        let mut mounts = self.mounts_mut();
+        let ix = mounts
+            .iter()
+            .position(|m| &m.root == root)
+            .ok_or(io::ErrorKind::NotFound)?;
+        if self.plain_entry_at(root)? {
+            return Err(io::ErrorKind::AlreadyExists.into());
+        }
+        let mount = &mounts[ix];
+        let written = (|| {
+            // Folders come before what's in them.
+            for (path, entry) in &mount.entries {
+                match entry.kind {
+                    EntryType::Dir => self.plain.create_dir(path)?,
+                    EntryType::File => self.plain.write(path, &self.open(mount, entry)?)?,
+                }
+            }
+            self.plain.sync_dir(&root.parent())
+        })();
+        let unprotected =
+            written.and_then(|()| self.plain.remove_permanently(&mount.store.join("header")?));
+        if let Err(e) = unprotected {
+            self.plain.remove_permanently(root).ok();
+            return Err(e);
+        }
+        let mount = mounts.remove(ix);
+        // The blobs are inert now; any left over are harmless ciphertext.
+        self.plain.remove_permanently(&mount.store).ok();
+        Ok(())
+    }
+
+    /// Moves `from` into, out of or between protected folders (each side's
+    /// mount, or `None` for plain): it's written at `to`, sealed or in
+    /// plain text, then deleted outright from `from`; a plain copy isn't
+    /// left in the trash. Fails, changing nothing, if anything is at `to`.
+    fn move_across(
+        &self,
+        mounts: &mut [Mount],
+        (from, from_mount): (&VaultPath, Option<usize>),
+        (to, to_mount): (&VaultPath, Option<usize>),
+    ) -> io::Result<()> {
+        let moving: Vec<Moving> = match from_mount {
+            Some(ix) => {
+                let mount = &mounts[ix];
+                let entries: Vec<_> = mount
+                    .entries
+                    .iter()
+                    .filter(|(path, _)| path.is_within(from))
+                    .collect();
+                if entries.is_empty() {
+                    return Err(io::ErrorKind::NotFound.into());
+                }
+                entries
+                    .into_iter()
+                    .map(|(path, entry)| {
+                        let contents = match entry.kind {
+                            EntryType::File => self.open(mount, entry)?,
+                            EntryType::Dir => zeroize::Zeroizing::new(Vec::new()),
+                        };
+                        Ok(Moving {
+                            path: path.rebase(from, to),
+                            kind: entry.kind,
+                            contents,
+                        })
+                    })
+                    .collect::<io::Result<_>>()?
+            }
+            None => {
+                self.check_holds_none_of(mounts, from)?;
+                let mut moving = Vec::new();
+                self.read_plain_tree(from, to, &mut moving)?;
+                moving
+            }
+        };
+        // Nothing replaced, nor written where a locked folder's note was.
+        let taken = match to_mount {
+            Some(ix) => mounts[ix].entries.contains_key(to),
+            None => {
+                self.plain_entry_at(to)?
+                    || mounts.iter().any(|m| &m.root == to)
+                    || moving
+                        .iter()
+                        .any(|m| self.check_not_locked(&m.path).is_err())
+            }
+        };
+        if taken {
+            return Err(io::ErrorKind::AlreadyExists.into());
+        }
+        match to_mount {
+            Some(ix) => {
+                let mount = &mut mounts[ix];
+                if !matches!(mount.entries.get(&to.parent()), Some(e) if e.kind == EntryType::Dir) {
+                    return Err(io::ErrorKind::NotFound.into());
+                }
+                for m in &moving {
+                    if let Err(e) = self.seal(mount, &m.path, m.kind, &m.contents) {
+                        // Undone: what was sealed of it goes.
+                        self.remove_within(mount, to).ok();
+                        return Err(e);
+                    }
+                }
+            }
+            None => {
+                let written = moving.iter().try_for_each(|m| match m.kind {
+                    EntryType::Dir => self.plain.create_dir(&m.path),
+                    EntryType::File => self.plain.write(&m.path, &m.contents),
+                });
+                if let Err(e) = written {
+                    self.plain.remove_permanently(to).ok();
+                    return Err(e);
+                }
+            }
+        }
+        match from_mount {
+            Some(ix) => self.remove_within(&mut mounts[ix], from),
+            None => self.plain.remove_permanently(from),
+        }
+    }
+
+    /// Deletes `path` and everything in it from `mount`, blobs and all.
+    fn remove_within(&self, mount: &mut Mount, path: &VaultPath) -> io::Result<()> {
+        let gone: Vec<VaultPath> = mount
+            .entries
+            .keys()
+            .filter(|p| p.is_within(path))
+            .cloned()
+            .collect();
+        for p in gone {
+            let entry = mount.entries.remove(&p).expect("listed");
+            self.plain
+                .remove_permanently(&mount.blob_path(&entry.blob)?)?;
+        }
+        Ok(())
+    }
+
+    /// The plain file or folder `path` and everything in it, read for
+    /// writing at `to`, folders before what they hold.
+    fn read_plain_tree(
+        &self,
+        path: &VaultPath,
+        to: &VaultPath,
+        out: &mut Vec<Moving>,
+    ) -> io::Result<()> {
+        let kind = self
+            .plain
+            .list_dir(&path.parent())?
+            .into_iter()
+            .find(|e| e.name == path.name())
+            .ok_or(io::ErrorKind::NotFound)?
+            .entry_type;
+        match kind {
+            EntryType::File => out.push(Moving {
+                path: to.clone(),
+                kind,
+                contents: zeroize::Zeroizing::new(self.plain.read(path)?),
+            }),
+            EntryType::Dir => {
+                out.push(Moving {
+                    path: to.clone(),
+                    kind,
+                    contents: zeroize::Zeroizing::default(),
+                });
+                for entry in self.plain.list_dir(path)? {
+                    self.read_plain_tree(&path.join(&entry.name)?, &to.join(&entry.name)?, out)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The first `<name> (unprotected copy)` (or `… copy 2`, …) free beside
+    /// the plain `path`: nothing plain there, nor a protected folder,
+    /// unlocked (in `mounts`) or locked.
+    fn free_copy_name(&self, mounts: &[Mount], path: &VaultPath) -> io::Result<VaultPath> {
+        for n in 1.. {
+            let name = match n {
+                1 => format!("{} (unprotected copy)", path.name()),
+                n => format!("{} (unprotected copy {n})", path.name()),
+            };
+            let copy = path.parent().join(&name)?;
+            let protected = mounts.iter().any(|m| m.root == copy)
+                || lock_list(&self.locked).iter().any(|l| l.root == copy);
+            if !protected && !self.plain_entry_at(&copy)? {
+                return Ok(copy);
+            }
+        }
+        unreachable!("some copy name is free")
+    }
+
+    /// Whether the plain tree has anything at `path`.
+    fn plain_entry_at(&self, path: &VaultPath) -> io::Result<bool> {
+        match self.plain.list_dir(&path.parent()) {
+            Ok(entries) => Ok(entries.iter().any(|e| e.name == path.name())),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(e),
+        }
     }
 
     /// The unlocked protected folder `path` is in (or is), if any.
@@ -540,8 +801,9 @@ impl VaultFs for ProtectedFs {
     }
 
     /// Within one protected folder, or the folder itself: everything moved
-    /// is sealed again at its new path. Into or out of a protected folder
-    /// isn't possible yet.
+    /// is sealed again at its new path. Into, out of or between protected
+    /// folders, see [`Self::move_across`]; a protected folder never moves
+    /// into another.
     fn rename(&self, from: &VaultPath, to: &VaultPath) -> io::Result<()> {
         let mut mounts = self.mounts_mut();
         let from_mount = Self::mount_index(&mounts, from);
@@ -560,11 +822,14 @@ impl VaultFs for ProtectedFs {
             }
             (Some(ix), None) if renaming_root => ix,
             (Some(ix), Some(to)) if ix == to => ix,
-            _ => {
+            _ if renaming_root => {
                 return Err(io::Error::new(
                     io::ErrorKind::Unsupported,
-                    "moving into or out of a protected folder isn't possible yet",
+                    "a protected folder can't hold another",
                 ));
+            }
+            (from_mount, to_mount) => {
+                return self.move_across(&mut mounts, (from, from_mount), (to, to_mount));
             }
         };
         let taken = if renaming_root {
@@ -625,18 +890,7 @@ impl VaultFs for ProtectedFs {
         if !mount.entries.contains_key(path) {
             return Err(io::ErrorKind::NotFound.into());
         }
-        let gone: Vec<VaultPath> = mount
-            .entries
-            .keys()
-            .filter(|p| p.is_within(path))
-            .cloned()
-            .collect();
-        for p in gone {
-            let entry = mount.entries.remove(&p).expect("listed");
-            self.plain
-                .remove_permanently(&mount.blob_path(&entry.blob)?)?;
-        }
-        Ok(())
+        self.remove_within(mount, path)
     }
 
     fn watch(&self, on_change: ChangeHandler) -> io::Result<Watch> {
