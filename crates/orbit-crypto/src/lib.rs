@@ -133,8 +133,32 @@ impl KdfParams {
 }
 
 /// The folder's master key. Zeroized on drop.
-#[derive(Zeroize, ZeroizeOnDrop)]
-pub struct MasterKey([u8; KEY_LEN]);
+pub struct MasterKey(Box<[u8; KEY_LEN]>);
+
+impl MasterKey {
+    /// A key of zeros to fill, in memory of its own that's kept out of swap
+    /// where the system allows (best effort: a process may lock only so
+    /// much).
+    fn zeroed() -> Self {
+        #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+        let mut key = MasterKey(Box::new([0; KEY_LEN]));
+        #[cfg(target_os = "linux")]
+        // SAFETY: the range is the key's own allocation, alive as long as
+        // the lock matters; failing to lock it changes nothing else.
+        unsafe {
+            rustix::mm::mlock(key.0.as_mut_ptr().cast(), KEY_LEN).ok();
+        }
+        key
+    }
+}
+
+impl Drop for MasterKey {
+    /// Zeroized; not unlocked from memory: the page may hold another key
+    /// still, and locks go with the process anyway.
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
 
 impl PartialEq for MasterKey {
     fn eq(&self, other: &Self) -> bool {
@@ -269,8 +293,8 @@ pub fn create(
     params: KdfParams,
     rng: &mut impl CryptoRng,
 ) -> Result<(Header, RecoveryKey, MasterKey), Error> {
-    let mut master = MasterKey([0; KEY_LEN]);
-    rng.fill_bytes(&mut master.0);
+    let mut master = MasterKey::zeroed();
+    rng.fill_bytes(&mut *master.0);
     let recovery = RecoveryKey::random(rng);
     let passphrase_slot = passphrase_slot(passphrase, params, &master, rng)?;
     let recovery_slot = recovery_slot(&recovery, &master, rng);
@@ -449,7 +473,7 @@ fn assemble_header(passphrase_slot: &[u8], recovery_slot: &[u8], master: &Master
 /// HMAC over everything before the MAC, keyed from the master key, so a
 /// change to either slot (even the one not used to unlock) is detected.
 fn header_mac(covered: &[u8], master: &MasterKey) -> Hmac<Sha256> {
-    let key = derive(&master.0, b"orbit/pf/v1/header-mac");
+    let key = derive(&master.0[..], b"orbit/pf/v1/header-mac");
     let mut mac = Hmac::<Sha256>::new_from_slice(key.as_ref()).expect("any key length");
     mac.update(covered);
     mac
@@ -518,7 +542,7 @@ fn wrap_key(
         .encrypt(
             &XNonce::from(nonce),
             Payload {
-                msg: &master.0,
+                msg: &master.0[..],
                 aad,
             },
         )
@@ -534,7 +558,7 @@ fn unwrap_key(kek: &[u8; KEY_LEN], wrapped: &[u8], aad: &[u8]) -> Result<MasterK
             .decrypt(&nonce, Payload { msg: ct, aad })
             .map_err(|_| Error::WrongSecret)?,
     );
-    let mut master = MasterKey([0; KEY_LEN]);
+    let mut master = MasterKey::zeroed();
     master.0.copy_from_slice(&pt);
     Ok(master)
 }

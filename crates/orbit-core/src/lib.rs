@@ -20,7 +20,7 @@ mod tags;
 use open_note::DiskVersion;
 pub use open_note::{DiskCheck, OpenNote, Trouble};
 pub use orbit_crypto::Zeroizing;
-pub use protect::{ProtectionKeys, Strength, UnlockError, passphrase_strength};
+pub use protect::{LockOutcome, ProtectionKeys, Strength, UnlockError, passphrase_strength};
 
 pub use excerpt::Snippet;
 pub use fuzzy::{CommandMatch, NoteMatch, command_query, match_commands};

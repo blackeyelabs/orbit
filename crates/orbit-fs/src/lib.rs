@@ -12,7 +12,7 @@ use std::{
 
 mod protected;
 
-pub use protected::ProtectedFs;
+pub use protected::{ProtectedFs, Sealed};
 
 use notify_debouncer_mini::{DebounceEventResult, new_debouncer, notify::RecursiveMode};
 

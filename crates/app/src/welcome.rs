@@ -313,6 +313,7 @@ impl Render for Welcome {
         v_flex()
             .relative()
             .size_full()
+            .child(crate::auto_lock::watch_pointer())
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .child(

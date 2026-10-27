@@ -54,6 +54,17 @@ struct Locked {
     files: std::collections::HashSet<VaultPath>,
 }
 
+/// An edit sealed into a blob under its protected folder's key, ready to
+/// write without the key: an edit saved as its folder locks (ADR 0004).
+/// Only ciphertext; written later, the newest blob for a path still wins.
+pub struct Sealed {
+    store: VaultPath,
+    id: String,
+    blob: Vec<u8>,
+    /// The blob it replaces, gone once it's written.
+    replaces: Option<String>,
+}
+
 #[derive(Clone)]
 struct Entry {
     /// The blob's id: its file name under `blobs/`.
@@ -125,11 +136,15 @@ impl ProtectedFs {
                 kind,
                 mtime_ms: metadata.mtime_ms(),
             };
-            match entries.get(&path) {
-                Some(kept) if kept.mtime_ms >= entry.mtime_ms => {}
-                _ => {
-                    entries.insert(path, entry);
-                }
+            // Of two blobs for one path (left by a crash mid-save, or a
+            // sealed edit written late), the newer is the note, and the
+            // older goes.
+            let older = match entries.get(&path) {
+                Some(kept) if kept.mtime_ms >= entry.mtime_ms => Some(entry.blob),
+                _ => entries.insert(path, entry).map(|replaced| replaced.blob),
+            };
+            if let Some(older) = older {
+                self.plain.remove_permanently(&blobs.join(&older)?).ok();
             }
         }
         // The folder itself is the shallowest folder in it, and the only one
@@ -217,6 +232,46 @@ impl ProtectedFs {
                 io::ErrorKind::Unsupported,
                 "it holds a protected folder, which can't be moved or deleted with it yet",
             ));
+        }
+        Ok(())
+    }
+
+    /// Seals `contents` as the note `path`, in an unlocked protected folder,
+    /// under the folder's key, writing nothing: for [`Self::write_sealed`]
+    /// once the folder is locked.
+    pub fn seal_edit(&self, path: &VaultPath, contents: &[u8]) -> io::Result<Sealed> {
+        let mounts = self.mounts();
+        let ix = Self::mount_index(&mounts, path).ok_or(io::ErrorKind::NotFound)?;
+        let mount = &mounts[ix];
+        let blob = orbit_crypto::seal(
+            &mount.master,
+            &Metadata::new(path.to_string(), now_ms()),
+            contents,
+            &mut orbit_crypto::os_rng(),
+        )
+        .map_err(crypto)?;
+        Ok(Sealed {
+            store: mount.store.clone(),
+            id: orbit_crypto::blob_id(&blob).map_err(crypto)?,
+            blob,
+            replaces: mount.entries.get(path).map(|e| e.blob.clone()),
+        })
+    }
+
+    /// Writes a sealed edit into its folder's storage, while the folder is
+    /// locked (no key is needed: it's ciphertext); then the blob it
+    /// replaces goes. On the next unlock the newer blob is the note's.
+    pub fn write_sealed(&self, sealed: &Sealed) -> io::Result<()> {
+        if self.mounts().iter().any(|m| m.store == sealed.store) {
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
+        let blobs = sealed.store.join("blobs")?;
+        self.plain.write(&blobs.join(&sealed.id)?, &sealed.blob)?;
+        if let Some(old) = &sealed.replaces {
+            match self.plain.remove_permanently(&blobs.join(old)?) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+                _ => {}
+            }
         }
         Ok(())
     }

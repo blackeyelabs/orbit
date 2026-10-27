@@ -13,8 +13,8 @@ use crate::welcome::Welcome;
 use crate::window::OrbitWindow;
 
 struct Windows {
-    /// Vault root (real path) → its window.
-    vaults: HashMap<PathBuf, AnyWindowHandle>,
+    /// Vault root (real path) → its window, and the window's view.
+    vaults: HashMap<PathBuf, (AnyWindowHandle, WeakEntity<OrbitWindow>)>,
     welcome: Option<(AnyWindowHandle, Entity<Welcome>)>,
     recent: RecentVaults,
     config_dir: Option<PathBuf>,
@@ -36,7 +36,7 @@ pub fn init(cx: &mut App) {
     });
     cx.on_window_closed(|cx, id| {
         let windows = cx.global_mut::<Windows>();
-        windows.vaults.retain(|_, w| w.window_id() != id);
+        windows.vaults.retain(|_, (w, _)| w.window_id() != id);
         if windows
             .welcome
             .as_ref()
@@ -60,7 +60,7 @@ pub fn open_vault(root: &Path, cx: &mut App) -> Result<(), orbit_core::Error> {
         std::io::ErrorKind::NotFound => orbit_core::Error::NotFound,
         _ => orbit_core::Error::Io(e),
     })?;
-    if let Some(window) = cx.global::<Windows>().vaults.get(&root).copied()
+    if let Some(window) = cx.global::<Windows>().vaults.get(&root).map(|(w, _)| *w)
         && window
             .update(cx, |_, window, _| window.activate_window())
             .is_ok()
@@ -68,6 +68,8 @@ pub fn open_vault(root: &Path, cx: &mut App) -> Result<(), orbit_core::Error> {
         return Ok(());
     }
     let vault = Arc::new(Vault::open(&root)?);
+    let opened_view = std::rc::Rc::new(std::cell::Cell::new(None));
+    let set_view = opened_view.clone();
     let window = cx
         .open_window(
             window_options(size(px(1280.), px(800.)), cx),
@@ -75,6 +77,7 @@ pub fn open_vault(root: &Path, cx: &mut App) -> Result<(), orbit_core::Error> {
                 appearance::apply(window, cx);
                 window.set_window_title(vault.name());
                 let view = cx.new(|cx| OrbitWindow::new(vault, window, cx));
+                set_view.set(Some(view.downgrade()));
                 cx.new(|cx| Root::new(view, window, cx))
             },
         )
@@ -82,7 +85,8 @@ pub fn open_vault(root: &Path, cx: &mut App) -> Result<(), orbit_core::Error> {
             orbit_core::Error::Io(std::io::Error::other(format!("no window could open: {e}")))
         })?;
     let windows = cx.global_mut::<Windows>();
-    windows.vaults.insert(root.clone(), window.into());
+    let view = opened_view.take().expect("the window made its view");
+    windows.vaults.insert(root.clone(), (window.into(), view));
     windows.recent.add(&root);
     save_recent(windows);
     Ok(())
@@ -174,5 +178,19 @@ fn window_options(window_size: Size<Pixels>, cx: &App) -> WindowOptions {
         window_decorations: Some(WindowDecorations::Client),
         app_id: Some("orbit".into()),
         ..TitleBar::window_options()
+    }
+}
+
+/// Locks every protected folder in every vault window, as auto-lock asks.
+pub fn lock_everywhere(cx: &mut App) {
+    let windows: Vec<(AnyWindowHandle, WeakEntity<OrbitWindow>)> =
+        cx.global::<Windows>().vaults.values().cloned().collect();
+    for (handle, view) in windows {
+        handle
+            .update(cx, |_, window, cx| {
+                view.update(cx, |this, cx| this.lock_all_folders(window, cx))
+                    .ok();
+            })
+            .ok();
     }
 }

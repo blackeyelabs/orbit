@@ -3,7 +3,10 @@
 
 use std::{
     rc::Rc,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -15,7 +18,7 @@ use gpui_kit::component::input::{Editor, EditorState, InputEvent, Position};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use md_engine::{Format, Heading, TextEdit, format_edit, headings, word_count};
-use orbit_core::{DiskCheck, OpenNote, Trouble, Vault, VaultPath, is_plain_text_note};
+use orbit_core::{DiskCheck, OpenNote, Trouble, Vault, VaultPath, Zeroizing, is_plain_text_note};
 
 use crate::link_completion::LinkCompletions;
 use crate::preview::{FollowLink, PreviewContext, preview};
@@ -88,6 +91,9 @@ struct Saves {
     trouble: Option<Trouble>,
     /// Shared with writes on background threads, which run one at a time.
     disk: Arc<Mutex<Disk>>,
+    /// Set once Orbit deleted the note or its folder locked: writes that
+    /// haven't started are skipped. Unlike `disk`, never waits on a write.
+    forgotten: Arc<AtomicBool>,
 }
 
 /// What a write needs to know when its turn comes, rather than when it was
@@ -97,6 +103,15 @@ struct Disk {
     note: Option<OpenNote>,
     /// The newest revision on disk; an older write is skipped.
     written: u64,
+}
+
+impl Disk {
+    /// Lets go of the note once the editor forgot it.
+    fn forget_if(&mut self, forgotten: &AtomicBool) {
+        if forgotten.load(Ordering::Acquire) {
+            self.note = None;
+        }
+    }
 }
 
 impl Saves {
@@ -112,11 +127,14 @@ impl Saves {
                 note: Some(note),
                 written: 0,
             })),
+            forgotten: Arc::default(),
         }
     }
 
     fn disk(&self) -> std::sync::MutexGuard<'_, Disk> {
-        self.disk.lock().unwrap_or_else(|e| e.into_inner())
+        let mut disk = self.disk.lock().unwrap_or_else(|e| e.into_inner());
+        disk.forget_if(&self.forgotten);
+        disk
     }
 
     fn is_dirty(&self) -> bool {
@@ -289,15 +307,21 @@ impl NoteEditor {
         self.outline.clone()
     }
 
-    /// After Orbit deletes the note: writes still queued are dropped, so
-    /// none can bring it back.
+    /// After Orbit deletes the note, or as its folder locks: writes still
+    /// queued are dropped, so none can bring it back. Doesn't wait for one
+    /// that's writing.
     pub fn forget_disk(&mut self) {
         self.autosave = None;
-        self.saves.disk().note = None;
+        self.saves.forgotten.store(true, Ordering::Release);
     }
 
     pub fn is_dirty(&self) -> bool {
         self.saves.is_dirty()
+    }
+
+    /// The note's text if some of it isn't saved (or its last save failed).
+    pub fn unsaved_text(&self) -> Option<Zeroizing<String>> {
+        (self.is_dirty() || self.has_failed()).then(|| Zeroizing::new(self.text.to_string()))
     }
 
     pub fn has_failed(&self) -> bool {
@@ -387,6 +411,7 @@ impl NoteEditor {
         let checked = match self.saves.disk.try_lock() {
             Ok(mut guard) => {
                 let disk = &mut *guard;
+                disk.forget_if(&self.saves.forgotten);
                 disk.note.as_mut().map(|note| {
                     let check = note.check_disk(&self.vault, has_edits);
                     if let DiskCheck::Reload(_) = check {
@@ -499,9 +524,11 @@ impl NoteEditor {
     /// whether it's on disk, and the note's trouble afterwards.
     fn writer(&self, cx: &App) -> impl FnOnce() -> (u64, bool, Option<Trouble>) + Send + 'static {
         let (vault, disk) = (self.vault.clone(), self.saves.disk.clone());
+        let forgotten = self.saves.forgotten.clone();
         let (text, revision) = (self.source.read(cx).value(), self.saves.revision);
         move || {
             let mut disk = disk.lock().unwrap_or_else(|e| e.into_inner());
+            disk.forget_if(&forgotten);
             let written = disk.written;
             let Some(note) = disk.note.as_mut() else {
                 return (revision, false, None);

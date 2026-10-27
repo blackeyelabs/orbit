@@ -10,7 +10,7 @@ use std::{
 };
 
 use orbit_crypto::{Header, KdfParams, MasterKey, PassphraseKey, RecoveryKey, SecretString};
-use orbit_fs::{EntryType, VaultPath};
+use orbit_fs::{EntryType, Sealed, VaultPath};
 
 use crate::{Error, Vault, in_tool_folder, search};
 
@@ -67,6 +67,10 @@ pub(crate) struct Attempts {
 pub(crate) struct Protection {
     pub(crate) kdf: Mutex<KdfParams>,
     pub(crate) attempts: Mutex<Attempts>,
+    /// Edits sealed as their folder locked whose blobs couldn't be written,
+    /// only ciphertext: written when it next unlocks, gone when the vault
+    /// closes.
+    held: Mutex<Vec<Sealed>>,
 }
 
 impl Default for Protection {
@@ -74,8 +78,20 @@ impl Default for Protection {
         Protection {
             kdf: Mutex::new(KdfParams::RECOMMENDED),
             attempts: Mutex::default(),
+            held: Mutex::default(),
         }
     }
+}
+
+/// How a lock went.
+#[derive(Debug, PartialEq, Eq)]
+pub struct LockOutcome {
+    pub folder: VaultPath,
+    /// Notes whose edits couldn't be written: they're kept, encrypted, and
+    /// written when the folder next unlocks (while the vault stays open).
+    pub unsaved: Vec<VaultPath>,
+    /// Notes whose edits couldn't even be sealed: they're gone.
+    pub lost: Vec<VaultPath>,
 }
 
 /// How hard a passphrase is to guess.
@@ -244,6 +260,9 @@ impl Vault {
                 return Err(UnlockError::TooSoon(next - now));
             }
         }
+        // Held edits land while their folders are still locked; whichever
+        // is newer, one of them or a save since, is the note once mounted.
+        self.write_held();
         let mut unlocked = Vec::new();
         for (store, header) in self.fs.locked().unwrap_or_default() {
             if let Some(master) = open(&header)
@@ -264,6 +283,45 @@ impl Vault {
         drop(attempts);
         self.touched(unlocked.iter().cloned());
         Ok(unlocked)
+    }
+
+    /// Locks `folder`, saving the edits not yet saved in it (each a note's
+    /// path and text). Locking always wins (ADR 0004): the edits are sealed
+    /// under the folder's key, the folder locks, and only then are their
+    /// blobs written, which needs no key. One that can't be written is held,
+    /// as ciphertext, until the folder next unlocks.
+    pub fn lock_saving(
+        &self,
+        folder: &VaultPath,
+        edits: Vec<(VaultPath, orbit_crypto::Zeroizing<String>)>,
+    ) -> LockOutcome {
+        let mut sealed = Vec::new();
+        let mut lost = Vec::new();
+        for (path, text) in edits.into_iter().filter(|(path, _)| path.is_within(folder)) {
+            match self.fs.seal_edit(&path, text.as_bytes()) {
+                Ok(edit) => sealed.push((path, edit)),
+                Err(_) => lost.push(path),
+            }
+        }
+        self.lock(folder);
+        let mut unsaved = Vec::new();
+        for (path, edit) in sealed {
+            if self.fs.write_sealed(&edit).is_err() {
+                unsaved.push(path);
+                lock(&self.protection.held).push(edit);
+            }
+        }
+        LockOutcome {
+            folder: folder.clone(),
+            unsaved,
+            lost,
+        }
+    }
+
+    /// Writes the held edits whose folders are locked; those that still
+    /// can't be written stay held.
+    fn write_held(&self) {
+        lock(&self.protection.held).retain(|edit| self.fs.write_sealed(edit).is_err());
     }
 
     /// Locks the unlocked protected folder at `folder`: its key is dropped,

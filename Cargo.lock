@@ -234,7 +234,9 @@ dependencies = [
  "md-engine",
  "orbit-core",
  "orbit-fs",
+ "rustix",
  "serde_json",
+ "zbus",
 ]
 
 [[package]]
@@ -5137,6 +5139,7 @@ dependencies = [
  "orbit-crypto",
  "rand_chacha 0.10.0",
  "rand_core 0.10.1",
+ "rustix",
  "secrecy",
  "sha2 0.11.1",
  "unicode-normalization",

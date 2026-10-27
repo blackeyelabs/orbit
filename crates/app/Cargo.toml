@@ -17,3 +17,9 @@ md-engine.workspace = true
 serde_json.workspace = true
 async-channel.workspace = true
 lsp-types.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Turning off core dumps.
+rustix.workspace = true
+# Sleep and screen lock, for auto-lock: the version GPUI already uses.
+zbus = { version = "=5.19.0", default-features = false, features = ["async-io", "blocking-api"] }

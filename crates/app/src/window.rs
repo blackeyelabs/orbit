@@ -16,6 +16,7 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::list::{ListEvent, ListItem, ListState};
+use gpui_kit::component::notification::Notification;
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::tree::{TreeItem, TreeState, tree};
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, TitleBar, WindowExt as _};
@@ -23,10 +24,11 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use orbit_core::{
     Backlink, EntryKind, IndexingProgress, SearchResults, Session, SessionTab, TagCount, TreeNode,
-    Vault, VaultPath, Watch, same_tag,
+    Vault, VaultPath, Watch, Zeroizing, same_tag,
 };
 
 use crate::appearance::{self, AppSettings};
+use crate::auto_lock;
 use crate::commands::{
     CloseTab, CommandPalette, DeleteNote, LockAll, MoveNote, NewFolder, OpenAnotherVault,
     OpenSettings, ProtectFolder, QuickSwitcher, RenameNote, SearchVault, ToggleRightPanel,
@@ -841,45 +843,93 @@ impl OrbitWindow {
     pub(crate) fn lock_folder(
         &mut self,
         folder: &VaultPath,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let saved = self.close_tabs_within(folder, cx);
-        self.vault.lock(folder);
-        if !saved {
-            self.error = Some(
-                format!(
-                    "Locked {}: some edits in it couldn't be saved first, and are gone",
-                    folder.name()
-                )
-                .into(),
-            );
+        self.lock_folders(vec![folder.clone()], window, cx);
+    }
+
+    /// Locks protected folders. Each one's unsaved edits are saved first;
+    /// one that can't be is kept encrypted until it unlocks again (ADR
+    /// 0004). Their tabs close, and their editors (undo history and all)
+    /// go. A toast says what happened.
+    pub(crate) fn lock_folders(
+        &mut self,
+        folders: Vec<VaultPath>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if folders.is_empty() {
+            return;
+        }
+        let (mut unsaved, mut lost) = (Vec::new(), Vec::new());
+        for folder in &folders {
+            let edits = self.take_edits_within(folder, cx);
+            let outcome = self.vault.lock_saving(folder, edits);
+            unsaved.extend(outcome.unsaved);
+            lost.extend(outcome.lost);
         }
         self.protection_changed(cx);
+        let names = |notes: &[VaultPath]| {
+            let names: Vec<&str> = notes.iter().map(orbit_core::note_title).collect();
+            names.join(", ")
+        };
+        let mut said = Vec::new();
+        if !unsaved.is_empty() {
+            said.push(format!(
+                "Couldn't save {}. The edits are kept encrypted, and saved when you unlock \
+                 again, unless this window closes first.",
+                names(&unsaved)
+            ));
+        }
+        if !lost.is_empty() {
+            said.push(format!("Couldn't keep the last edits to {}.", names(&lost)));
+        }
+        let mut toast = Notification::new().title("Protected folders locked");
+        if !said.is_empty() {
+            toast = toast.message(said.join(" "));
+        }
+        window.push_notification(toast, cx);
+    }
+
+    /// The edits not yet saved in the notes open at or in `folder`, as
+    /// their tabs close: no more saves of them start.
+    fn take_edits_within(
+        &mut self,
+        folder: &VaultPath,
+        cx: &mut Context<Self>,
+    ) -> Vec<(VaultPath, Zeroizing<String>)> {
+        let mut edits = Vec::new();
+        while let Some(ix) = self
+            .tabs
+            .iter()
+            .position(|t| t.editor.read(cx).path().is_within(folder))
+        {
+            let editor = self.tabs[ix].editor.clone();
+            let (path, text) = {
+                let editor = editor.read(cx);
+                (editor.path().clone(), editor.unsaved_text())
+            };
+            editor.update(cx, |editor, _| editor.forget_disk());
+            edits.extend(text.map(|text| (path, text)));
+            self.remove_tab(ix, cx);
+        }
+        edits
     }
 
     /// Saves the notes open at or in `folder` and closes their tabs;
     /// whether every save worked.
     pub(crate) fn close_tabs_within(&mut self, folder: &VaultPath, cx: &mut Context<Self>) -> bool {
         let saved = self.save_tabs_within(folder, cx);
-        while let Some(ix) = self
-            .tabs
-            .iter()
-            .position(|t| t.editor.read(cx).path().is_within(folder))
-        {
-            self.tabs[ix]
-                .editor
-                .update(cx, |editor, _| editor.forget_disk());
-            self.remove_tab(ix, cx);
-        }
+        // Saved already, or reported as not.
+        self.take_edits_within(folder, cx);
         saved
     }
 
     /// Locks every unlocked protected folder.
     pub(crate) fn lock_all_folders(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        for folder in self.vault.unlocked_folders() {
-            self.lock_folder(&folder, window, cx);
-        }
+        let folders = self.vault.unlocked_folders();
+        self.lock_folders(folders, window, cx);
     }
 
     /// A folder was protected, unlocked or locked: the tree, panels and
@@ -1247,6 +1297,7 @@ impl Render for OrbitWindow {
         v_flex()
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus)
+            .child(auto_lock::watch_pointer())
             .on_action(cx.listener(|this, _: &NewNote, window, cx| {
                 this.new_note(VaultPath::root(), window, cx)
             }))

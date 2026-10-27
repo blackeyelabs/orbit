@@ -249,7 +249,7 @@ fn split_blob<'a>(master: &MasterKey, blob: &'a [u8]) -> Result<SplitBlob<'a>, E
 /// Per-blob key: HKDF of the master key and the blob id.
 fn aead_for(master: &MasterKey, id: &[u8; ID_LEN]) -> XChaCha20Poly1305 {
     let info = [b"orbit/pf/v1/blob".as_slice(), id].concat();
-    let key: Zeroizing<[u8; KEY_LEN]> = derive(&master.0, &info);
+    let key: Zeroizing<[u8; KEY_LEN]> = derive(&master.0[..], &info);
     let key: &[u8; KEY_LEN] = &key;
     XChaCha20Poly1305::new(key.into())
 }

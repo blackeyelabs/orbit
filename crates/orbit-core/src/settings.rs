@@ -31,6 +31,13 @@ pub struct Settings {
     /// The halftone texture on every surface.
     pub paper_grain: bool,
     interface_size_percent: u16,
+    /// Protected folders lock after this long without input; `None` for
+    /// never.
+    pub auto_lock_minutes: Option<u16>,
+    /// Protected folders lock when the computer sleeps.
+    pub lock_on_suspend: bool,
+    /// Protected folders lock when the screen locks.
+    pub lock_on_screen_lock: bool,
 }
 
 impl Default for Settings {
@@ -39,6 +46,9 @@ impl Default for Settings {
             theme: ThemeChoice::default(),
             paper_grain: true,
             interface_size_percent: 100,
+            auto_lock_minutes: Some(10),
+            lock_on_suspend: true,
+            lock_on_screen_lock: true,
         }
     }
 }
@@ -62,6 +72,24 @@ impl Settings {
         }
         if let Some(size) = field("interface_size_percent").and_then(|v| v.as_u64()) {
             settings.set_interface_size_percent(size.min(u64::from(u16::MAX)) as u16);
+        }
+        match field("auto_lock_minutes") {
+            Some(serde_json::Value::Null) => settings.auto_lock_minutes = None,
+            Some(minutes) => {
+                if let Some(minutes) = minutes
+                    .as_u64()
+                    .filter(|m| (1..=u64::from(u16::MAX)).contains(m))
+                {
+                    settings.auto_lock_minutes = Some(minutes as u16);
+                }
+            }
+            None => {}
+        }
+        if let Some(lock) = field("lock_on_suspend").and_then(|v| v.as_bool()) {
+            settings.lock_on_suspend = lock;
+        }
+        if let Some(lock) = field("lock_on_screen_lock").and_then(|v| v.as_bool()) {
+            settings.lock_on_screen_lock = lock;
         }
         settings
     }

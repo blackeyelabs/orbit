@@ -33,7 +33,9 @@ async-channel = "=2.5.0"
 # Watching the vault for changes made outside Orbit.
 notify-debouncer-mini = { version = "=0.7.0", default-features = false }
 # renameat2(RENAME_NOREPLACE): a rename that can never replace a file.
-rustix = { version = "=1.1.5", features = ["fs"] }
+# Also: locking keys' memory against swap (mm) and refusing core dumps
+# (process).
+rustix = { version = "=1.1.5", features = ["fs", "mm", "process"] }
 # Fuzzy matching for wikilink autocomplete (and the Switcher, later).
 nucleo-matcher = "=0.3.1"
 # Completion items for the source editor; the version Kit's editor uses.
