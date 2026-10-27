@@ -1,5 +1,5 @@
 //! The main window, laid out as on the design canvas: title bar, file tree,
-//! tab strip with the open note, status bar and (empty) right panel.
+//! tab strip with the open note, status bar and right panel.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -16,19 +16,19 @@ use gpui_kit::component::tree::{TreeItem, TreeState, tree};
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, TitleBar, WindowExt as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use orbit_core::{EntryKind, Session, SessionTab, TreeNode, Vault, VaultPath, Watch};
+use orbit_core::{Backlink, EntryKind, Session, SessionTab, TreeNode, Vault, VaultPath, Watch};
 
 use crate::appearance::{self, AppSettings};
 use crate::file_actions::{self, NewNote};
 use crate::note_editor::{NoteEditor, NoteEditorEvent};
+use crate::right_panel;
 use crate::settings_view::AppearancePane;
 use crate::vaults;
 
-// Canvas sizes at 100% (40, 280, 300 and 28 px), in rems so the
-// Interface size setting scales them with everything else.
+// Canvas sizes at 100% (40, 280 and 28 px), in rems so the Interface size
+// setting scales them with everything else.
 const TITLE_BAR_HEIGHT: f32 = 2.5;
 const SIDEBAR_WIDTH: f32 = 17.5;
-const RIGHT_PANEL_WIDTH: f32 = 18.75;
 const STATUS_BAR_HEIGHT: f32 = 1.75;
 
 /// What a tree row stands for.
@@ -59,6 +59,10 @@ pub struct OrbitWindow {
     active_tab: Option<usize>,
     left_panel_open: bool,
     right_panel_open: bool,
+    /// The active note's backlinks, while the right panel shows them.
+    backlinks: Option<(VaultPath, Vec<Backlink>)>,
+    /// Finding the backlinks, off the UI thread.
+    finding_backlinks: Option<Task<()>>,
     error: Option<SharedString>,
     /// Changes by other apps (and Orbit) arrive while this is held.
     _watch: Option<Watch>,
@@ -91,6 +95,8 @@ impl OrbitWindow {
             active_tab: None,
             left_panel_open: true,
             right_panel_open: false,
+            backlinks: None,
+            finding_backlinks: None,
             error: None,
             _watch: None,
             restoring: false,
@@ -182,11 +188,12 @@ impl OrbitWindow {
         .detach();
     }
 
-    /// A batch of changed paths: the tree reloads, and open notes at or
-    /// inside them check what's on disk now.
+    /// A batch of changed paths: the tree reloads, open notes at or inside
+    /// them check what's on disk now, and links may resolve differently.
     fn changed_on_disk(&mut self, paths: &[VaultPath], cx: &mut Context<Self>) {
         let expanded = self.expanded_folders(cx);
         self.refresh_tree(&expanded, cx);
+        self.refresh_backlinks(cx);
         for tab in &self.tabs {
             let affected = paths
                 .iter()
@@ -231,6 +238,54 @@ impl OrbitWindow {
                 }
             }
             _ => cx.open_with_system(&self.vault.file_on_disk(&followed.path)),
+        }
+    }
+
+    fn active(&self) -> Option<&OpenTab> {
+        self.tabs.get(self.active_tab?)
+    }
+
+    /// The active note's path.
+    fn active_path(&self, cx: &App) -> Option<VaultPath> {
+        Some(self.active()?.editor.read(cx).path().clone())
+    }
+
+    /// Finds the active note's backlinks again, in the background, if the
+    /// right panel is open. Meanwhile it shows the last found for that note.
+    fn refresh_backlinks(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.active_path(cx).filter(|_| self.right_panel_open) else {
+            self.backlinks = None;
+            self.finding_backlinks = None;
+            return;
+        };
+        let vault = self.vault.clone();
+        let found = cx.background_spawn({
+            let path = path.clone();
+            async move { vault.backlinks(&path) }
+        });
+        self.finding_backlinks = Some(cx.spawn(async move |this, cx| {
+            let backlinks = found.await;
+            this.update(cx, |this, cx| {
+                // Another note may be active by now.
+                if this.active_path(cx).as_ref() == Some(&path) {
+                    this.backlinks = Some((path, backlinks));
+                    cx.notify();
+                }
+            })
+            .ok();
+        }));
+    }
+
+    /// Puts the active note's caret on the line at `offset`.
+    pub(crate) fn go_to_line_of(
+        &mut self,
+        offset: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(tab) = self.active() {
+            tab.editor
+                .update(cx, |editor, cx| editor.go_to_line_of(offset, window, cx));
         }
     }
 
@@ -359,6 +414,7 @@ impl OrbitWindow {
         }
         self.error = None;
         self.refresh_tree(&expanded, cx);
+        self.refresh_backlinks(cx);
     }
 
     /// Sends an entry to the trash and closes the tabs of notes inside it.
@@ -384,6 +440,7 @@ impl OrbitWindow {
         self.error = None;
         let expanded = self.expanded_folders(cx);
         self.refresh_tree(&expanded, cx);
+        self.refresh_backlinks(cx);
     }
 
     /// Saves the open notes at or inside `path`; false if any couldn't be.
@@ -399,7 +456,12 @@ impl OrbitWindow {
     }
 
     /// Opens a note in a tab, or focuses its tab if it's already open.
-    fn open_note(&mut self, path: VaultPath, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_note(
+        &mut self,
+        path: VaultPath,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(ix) = self.tab_of(&path, cx) {
             self.active_tab = Some(ix);
         } else {
@@ -452,6 +514,7 @@ impl OrbitWindow {
             self.active_tab = Some(ix);
             NoteEditor::focus(&tab.editor, window, cx);
             self.save_session(cx);
+            self.refresh_backlinks(cx);
             cx.notify();
         }
     }
@@ -504,11 +567,12 @@ impl OrbitWindow {
             None => None,
         };
         self.save_session(cx);
+        self.refresh_backlinks(cx);
         cx.notify();
     }
 
     fn render_title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let title = match self.active_tab.and_then(|ix| self.tabs.get(ix)) {
+        let title = match self.active() {
             Some(tab) => format!("{} · {}", tab.title(cx), self.vault.name()),
             None => self.vault.name().to_string(),
         };
@@ -539,6 +603,7 @@ impl OrbitWindow {
                 (IconName::PanelRightClose, IconName::PanelRight),
                 cx.listener(|this, _, _, cx| {
                     this.right_panel_open = !this.right_panel_open;
+                    this.refresh_backlinks(cx);
                     cx.notify();
                 }),
             ))
@@ -659,7 +724,7 @@ impl OrbitWindow {
     }
 
     fn render_centre(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let body = match self.active_tab.and_then(|ix| self.tabs.get(ix)) {
+        let body = match self.active() {
             Some(tab) => div()
                 .flex_1()
                 .min_h_0()
@@ -708,11 +773,18 @@ impl OrbitWindow {
             .child(body)
     }
 
+    fn render_right_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let outline = self.active().map(|tab| tab.editor.read(cx).outline());
+        // Until the active note's are found, none rather than another's.
+        let backlinks = match (&self.backlinks, self.active_path(cx)) {
+            (Some((path, backlinks)), Some(active)) if *path == active => backlinks.as_slice(),
+            _ => &[],
+        };
+        right_panel::render(outline.as_deref().map(|o| (o, backlinks)), cx)
+    }
+
     fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let editor = self
-            .active_tab
-            .and_then(|ix| self.tabs.get(ix))
-            .map(|tab| tab.editor.read(cx));
+        let editor = self.active().map(|tab| tab.editor.read(cx));
         let left = match (&self.error, editor) {
             (Some(error), _) => error.clone(),
             (None, Some(editor)) => editor.status_text(),
@@ -764,16 +836,7 @@ impl Render for OrbitWindow {
                     })
                     .child(self.render_centre(cx))
                     .when(self.right_panel_open, |this| {
-                        // Outline and backlinks arrive in #14.
-                        this.child(
-                            div()
-                                .w(rems(RIGHT_PANEL_WIDTH))
-                                .flex_none()
-                                .h_full()
-                                .border_l_1()
-                                .border_color(cx.theme().border)
-                                .bg(cx.theme().sidebar),
-                        )
+                        this.child(self.render_right_panel(cx))
                     }),
             )
             .child(self.render_status_bar(cx))

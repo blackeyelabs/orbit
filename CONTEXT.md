@@ -44,6 +44,10 @@ _Avoid_: broken link, dead link
 A link seen from its target's side: the notes that link to the note you are viewing.
 _Avoid_: inbound link, reverse link
 
+**Outline**:
+The headings of the note you are viewing, by level.
+_Avoid_: table of contents, TOC
+
 **Tag**:
 A label from front matter `tags:` or an inline `#tag`. `/` nests tags, and matching ignores case.
 _Avoid_: label, category, keyword

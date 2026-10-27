@@ -2,6 +2,7 @@
 //! or just the Editor in Source mode for `.txt`), with autosave.
 
 use std::{
+    rc::Rc,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -13,7 +14,7 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Editor, EditorState, InputEvent, Position};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use md_engine::{Format, TextEdit, format_edit, word_count};
+use md_engine::{Format, Heading, TextEdit, format_edit, headings, word_count};
 use orbit_core::{DiskCheck, OpenNote, Trouble, Vault, VaultPath, is_plain_text_note};
 
 use crate::preview::{FollowLink, PreviewContext, preview};
@@ -151,6 +152,8 @@ pub struct NoteEditor {
     /// What the preview renders: the source with its links rewritten.
     shown: SharedString,
     words: usize,
+    /// The source's headings, for the Outline.
+    outline: Rc<[Heading]>,
     saves: Saves,
     /// Text from disk for the editor to show, on the next frame.
     reload: Option<String>,
@@ -206,6 +209,7 @@ impl NoteEditor {
             mode,
             source,
             words: word_count(&text),
+            outline: outline_of(mode, &text),
             text: text.into(),
             reload: None,
             saved_elsewhere: None,
@@ -232,6 +236,7 @@ impl NoteEditor {
     fn follow_path(&mut self, path: VaultPath, cx: &mut Context<Self>) {
         self.preview = PreviewContext::new(self.vault.clone(), path.clone(), self.follow.clone());
         self.mode = Mode::of(&path);
+        self.outline = outline_of(self.mode, &self.text);
         self.path = path;
         self.links_changed(cx);
     }
@@ -246,13 +251,28 @@ impl NoteEditor {
 
     /// Puts the caret on the heading a link named, if the note has it.
     pub fn go_to_heading(&mut self, subpath: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(offset) = md_engine::heading_offset(&self.text, subpath) else {
-            return;
-        };
-        let line = self.text[..offset].matches('\n').count() as u32;
+        if let Some(offset) = md_engine::heading_offset(&self.text, subpath) {
+            self.go_to_line_of(offset, window, cx);
+        }
+    }
+
+    /// Puts the caret at the start of the line holding `offset`, scrolled
+    /// into view.
+    pub fn go_to_line_of(&mut self, offset: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let offset = offset.min(self.text.len());
+        let line = self.text.as_bytes()[..offset]
+            .iter()
+            .filter(|&&b| b == b'\n')
+            .count() as u32;
         self.source.update(cx, |source, cx| {
             source.set_cursor_position(Position { line, character: 0 }, window, cx)
         });
+        NoteEditor::focus(&cx.entity(), window, cx);
+    }
+
+    /// The note's headings as of the last edit; none in Source mode.
+    pub fn outline(&self) -> Rc<[Heading]> {
+        self.outline.clone()
     }
 
     /// After Orbit deletes the note: writes still queued are dropped, so
@@ -323,15 +343,21 @@ impl NoteEditor {
     }
 
     fn edited(&mut self, cx: &mut Context<Self>) {
-        self.text = self.source.read(cx).value();
-        self.words = word_count(&self.text);
-        self.links_changed(cx);
+        self.set_text(self.source.read(cx).value(), cx);
         self.saves.revision += 1;
         self.autosave = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(AUTOSAVE_DELAY).await;
             this.update(cx, |this, cx| this.save(cx)).ok();
         }));
         cx.notify();
+    }
+
+    /// The source as of now, and everything derived from it.
+    fn set_text(&mut self, text: SharedString, cx: &mut Context<Self>) {
+        self.words = word_count(&text);
+        self.outline = outline_of(self.mode, &text);
+        self.text = text;
+        self.links_changed(cx);
     }
 
     /// The watcher saw the note's path change: the note reloads if it has no
@@ -387,9 +413,7 @@ impl NoteEditor {
     /// takes it on the next frame, which has the window it needs.
     fn show_saved_text(&mut self, text: String, cx: &mut Context<Self>) {
         self.reload = Some(text.clone());
-        self.text = text.into();
-        self.words = word_count(&self.text);
-        self.links_changed(cx);
+        self.set_text(text.into(), cx);
         self.autosave = None;
         self.saves.saved = self.saves.revision;
         cx.notify();
@@ -695,5 +719,13 @@ impl Render for NoteEditor {
             .size_full()
             .children(banner)
             .child(body)
+    }
+}
+
+/// A note's Outline: its headings, unless it's plain text.
+fn outline_of(mode: Mode, text: &str) -> Rc<[Heading]> {
+    match mode {
+        Mode::Split => headings(text).into(),
+        Mode::Source => Rc::new([]),
     }
 }

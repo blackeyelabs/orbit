@@ -13,11 +13,12 @@ mod settings;
 use open_note::DiskVersion;
 pub use open_note::{DiskCheck, OpenNote, Trouble};
 
+pub use links::{Backlink, Mention};
 pub use recent::{RecentVault, RecentVaults};
 pub use session::{Session, SessionTab};
 pub use settings::{Settings, ThemeChoice, default_config_dir};
 
-use links::{Found, LinkIndex};
+use links::{FileLinks, Found, LinkIndex};
 use session::SessionFile;
 use std::{
     io,
@@ -269,12 +270,23 @@ impl Vault {
     /// no file has resolves to a note with that front matter alias. `None`
     /// is an unresolved link.
     pub fn resolve(&self, from: &VaultPath, link: &str) -> Option<VaultPath> {
+        self.with_links(|files| files.resolve(from, link))
+    }
+
+    /// The notes that link to the note `to`, each with its links there in
+    /// context, in path order: what the notes on disk say, so an open
+    /// note's edits count once saved.
+    pub fn backlinks(&self, to: &VaultPath) -> Vec<Backlink> {
+        self.with_links(|files| files.backlinks(to))
+    }
+
+    /// Runs `f` on the link index, brought up to date.
+    fn with_links<T>(&self, f: impl FnOnce(&links::Files) -> T) -> T {
         let mut index = link_index(&self.links);
-        let files = index.current(
+        f(index.current(
             |folder| self.children_of(folder, 0).unwrap_or_default(),
             |path| self.find(path),
-        );
-        files.resolve(from, link)
+        ))
     }
 
     /// Builds the index links resolve with, which reads every markdown
@@ -283,26 +295,31 @@ impl Vault {
         self.resolve(&VaultPath::root(), "");
     }
 
-    /// What's at `path` now, for the link index.
+    /// What's at `path` now, for the link index: only notes are read.
     fn find(&self, path: &VaultPath) -> Found {
-        let is_folder = |path: &VaultPath| {
-            self.fs.list_dir(&path.parent()).is_ok_and(|entries| {
-                entries
-                    .iter()
-                    .any(|e| e.name == path.name() && e.entry_type == EntryType::Dir)
-            })
-        };
+        if path.is_root() {
+            return Found::Folder;
+        }
         if in_tool_folder(path) {
             return Found::Nothing;
         }
-        match self.read_disk(path) {
-            Ok(Some(bytes)) if links::is_markdown(path) => {
-                Found::File(md_engine::aliases(&String::from_utf8_lossy(&bytes)))
-            }
-            Ok(Some(_)) => Found::File(Vec::new()),
-            Ok(None) => Found::Nothing,
-            Err(_) if is_folder(path) => Found::Folder,
-            Err(_) => Found::Unreadable,
+        let entries = match self.fs.list_dir(&path.parent()) {
+            Ok(entries) => entries,
+            // Its folder went with it.
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Found::Nothing,
+            Err(_) => return Found::Unreadable,
+        };
+        match entries.iter().find(|e| e.name == path.name()) {
+            None => Found::Nothing,
+            Some(e) if e.entry_type == EntryType::Dir => Found::Folder,
+            Some(_) if check_note(path).is_err() => Found::File(FileLinks::default()),
+            Some(_) => match self.read_disk(path) {
+                Ok(Some(bytes)) => {
+                    Found::File(FileLinks::of_note(path, &String::from_utf8_lossy(&bytes)))
+                }
+                Ok(None) => Found::Nothing,
+                Err(_) => Found::Unreadable,
+            },
         }
     }
 

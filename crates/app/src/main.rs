@@ -8,6 +8,7 @@ mod file_actions;
 mod instance;
 mod note_editor;
 mod preview;
+mod right_panel;
 mod settings_view;
 mod vaults;
 mod welcome;

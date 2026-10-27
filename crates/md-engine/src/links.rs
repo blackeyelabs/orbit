@@ -352,31 +352,123 @@ fn unquote(value: &str) -> Option<String> {
     (!unquoted.is_empty()).then(|| unquoted.to_string())
 }
 
-/// Where the heading a link's subpath names starts. Matching ignores case
-/// and surrounding space; for nested subpaths (`A#B`) the last one counts.
-pub fn heading_offset(source: &str, subpath: &str) -> Option<usize> {
-    let wanted = subpath.rsplit('#').next()?.trim().to_lowercase();
+/// A heading in a note's source, outside code: `## Text`, or text
+/// underlined with `===` or `---`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Heading {
+    /// 1 to 6.
+    pub level: u8,
+    /// Its text as written, without the `#`s around it; an underlined
+    /// heading's lines joined with spaces.
+    pub text: String,
+    /// Where its (first) line starts in the source, in bytes.
+    pub offset: usize,
+}
+
+/// The block a line is in, as far as underlined headings care.
+enum Block {
+    /// Between blocks.
+    None,
+    /// A paragraph, which an underline makes a heading: where it starts,
+    /// and its lines so far.
+    Paragraph(usize, Vec<String>),
+    /// A list item, quote or indented code, which can't be underlined.
+    Other,
+}
+
+/// The source's headings in order. One without text isn't listed.
+pub fn headings(source: &str) -> Vec<Heading> {
+    let mut found = Vec::new();
     let mut offset = front_matter_len(source);
     let mut fences = Fences::default();
+    let mut block = Block::None;
     for line in source[offset..].split_inclusive('\n') {
         let start = offset;
         offset += line.len();
         if fences.is_code(line) {
+            block = Block::None;
             continue;
         }
         let trimmed = line.trim_start_matches(' ');
-        let level = trimmed.bytes().take_while(|&b| b == b'#').count();
-        if !(1..=6).contains(&level) || line.len() - trimmed.len() > 3 {
+        let indent = line.len() - trimmed.len();
+        let content = trimmed.trim_end();
+        if content.is_empty() {
+            block = Block::None;
             continue;
         }
-        let text = &trimmed[level..];
-        if !(text.starts_with([' ', '\t']) || text.trim().is_empty()) {
+        if let Some((level, text)) = atx_heading(trimmed).filter(|_| indent <= 3) {
+            block = Block::None;
+            if !text.is_empty() {
+                found.push(Heading {
+                    level,
+                    text: text.to_string(),
+                    offset: start,
+                });
+            }
             continue;
         }
-        let text = text.trim().trim_end_matches('#').trim();
-        if text.to_lowercase() == wanted {
-            return Some(start);
-        }
+        block = match block {
+            Block::Paragraph(first, lines) if indent <= 3 && is_underline(content) => {
+                let level = if content.starts_with('=') { 1 } else { 2 };
+                found.push(Heading {
+                    level,
+                    text: lines.join(" "),
+                    offset: first,
+                });
+                Block::None
+            }
+            Block::Paragraph(first, mut lines) => {
+                lines.push(content.to_string());
+                Block::Paragraph(first, lines)
+            }
+            Block::Other => Block::Other,
+            Block::None if indent > 3 || starts_other_block(content) => Block::Other,
+            Block::None => Block::Paragraph(start, vec![content.to_string()]),
+        };
     }
-    None
+    found
+}
+
+/// `## Text ##` → (2, `Text`).
+fn atx_heading(line: &str) -> Option<(u8, &str)> {
+    let level = line.bytes().take_while(|&b| b == b'#').count();
+    let text = &line[level..];
+    if !(1..=6).contains(&level) || !(text.starts_with([' ', '\t']) || text.trim().is_empty()) {
+        return None;
+    }
+    Some((level as u8, text.trim().trim_end_matches('#').trim()))
+}
+
+/// `===` or `---`, all one character.
+fn is_underline(line: &str) -> bool {
+    let first = line.as_bytes()[0];
+    (first == b'=' || first == b'-') && line.bytes().all(|b| b == first)
+}
+
+/// A list item, quote, rule or table row: never a heading's text.
+fn starts_other_block(line: &str) -> bool {
+    let ordered = line.split_once(['.', ')']).is_some_and(|(n, rest)| {
+        !n.is_empty()
+            && n.bytes().all(|b| b.is_ascii_digit())
+            && (rest.is_empty() || rest.starts_with(' '))
+    });
+    let bullet = matches!(
+        line.as_bytes(),
+        [b'-' | b'*' | b'+'] | [b'-' | b'*' | b'+', b' ' | b'\t', ..]
+    );
+    let marks: Vec<char> = line.chars().filter(|c| !c.is_whitespace()).collect();
+    let rule = marks.len() >= 3
+        && matches!(marks[0], '*' | '_' | '-')
+        && marks.iter().all(|&c| c == marks[0]);
+    ordered || bullet || rule || line.starts_with(['>', '|'])
+}
+
+/// Where the heading a link's subpath names starts. Matching ignores case
+/// and surrounding space; for nested subpaths (`A#B`) the last one counts.
+pub fn heading_offset(source: &str, subpath: &str) -> Option<usize> {
+    let wanted = subpath.rsplit('#').next()?.trim().to_lowercase();
+    headings(source)
+        .into_iter()
+        .find(|h| h.text.to_lowercase() == wanted)
+        .map(|h| h.offset)
 }
