@@ -37,19 +37,34 @@ pub fn tree_menu(
     path: VaultPath,
     kind: EntryKind,
     folders: Vec<VaultPath>,
+    protection: Protection,
 ) -> PopupMenu {
     let item = |label, icon, act| menu_item(&view, &path, label, icon, act);
     let menu = if kind == EntryKind::Folder {
-        menu.item(item(
-            "New note",
-            IconName::FilePlus,
-            Box::new(OrbitWindow::new_note),
-        ))
-        .item(item(
-            "New folder",
-            IconName::FolderPlus,
-            Box::new(OrbitWindow::new_folder),
-        ))
+        let menu = menu
+            .item(item(
+                "New note",
+                IconName::FilePlus,
+                Box::new(OrbitWindow::new_note),
+            ))
+            .item(item(
+                "New folder",
+                IconName::FolderPlus,
+                Box::new(OrbitWindow::new_folder),
+            ));
+        match protection {
+            Protection::Plain => menu.item(item(
+                "Protect folder…",
+                IconName::Lock,
+                Box::new(|this, path, window, cx| this.ask_protect(path, window, cx)),
+            )),
+            Protection::Root => menu.item(item(
+                "Lock",
+                IconName::Lock,
+                Box::new(|this, path, window, cx| this.lock_folder(&path, window, cx)),
+            )),
+            Protection::Inside => menu,
+        }
         .separator()
     } else {
         menu
@@ -75,6 +90,16 @@ pub fn tree_menu(
     )
     .separator()
     .item(item("Delete", IconName::Trash, Box::new(ask_delete)))
+}
+
+/// Whether a tree entry is in a protected folder.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Protection {
+    Plain,
+    /// An unlocked protected folder itself.
+    Root,
+    /// Inside an unlocked protected folder.
+    Inside,
 }
 
 /// What a menu item does to the window, given the entry's path.
@@ -199,18 +224,29 @@ pub fn ask_move(
 
 /// Confirms before sending an entry to the system trash.
 pub fn ask_delete(
-    _: &mut OrbitWindow,
+    this: &mut OrbitWindow,
     path: VaultPath,
     window: &mut Window,
     cx: &mut Context<OrbitWindow>,
 ) {
     let view = cx.entity().downgrade();
+    // Protected notes skip the trash, which would keep them in plain text.
+    let (explanation, button) = match this.is_protected(&path) {
+        true => (
+            "It's deleted for good: protected notes aren't kept in the system trash.",
+            "Delete",
+        ),
+        false => (
+            "It moves to the system trash, where you can restore it.",
+            "Move to trash",
+        ),
+    };
     window.open_dialog(cx, move |dialog, _, _| {
         let (view, path) = (view.clone(), path.clone());
         dialog
             .title(format!("Delete {}?", path.name()))
-            .child("It moves to the system trash, where you can restore it.")
-            .footer(footer("Move to trash", move |window, cx| {
+            .child(explanation)
+            .footer(footer(button, move |window, cx| {
                 let path = path.clone();
                 view.update(cx, |this, cx| this.delete_entry(path, window, cx))
                     .ok();

@@ -241,3 +241,35 @@ fn weak_kdf_parameters_are_refused_when_creating_or_changing() {
         Some(Error::BadParams)
     );
 }
+
+#[test]
+fn a_passphrase_key_opens_every_header_sharing_its_salt_and_no_other() {
+    use orbit_crypto::{passphrase_key, unlock_with_passphrase_key};
+    let mut rng = ChaCha20Rng::seed_from_u64(7);
+    let passphrase = SecretString::from("correct horse battery staple");
+    let (header, _, master) = create(&passphrase, KdfParams::INSECURE_TEST, &mut rng).unwrap();
+    let key = passphrase_key(&header, &passphrase).unwrap();
+    assert!(unlock_with_passphrase_key(&header, &key).unwrap() == master);
+    // The same key, from the same salt and parameters, wherever it's read.
+    assert_eq!(
+        key.salt(),
+        passphrase_key(&header, &passphrase).unwrap().salt()
+    );
+
+    // Another header (another salt), even with the same passphrase.
+    let (other, _, _) = create(&passphrase, KdfParams::INSECURE_TEST, &mut rng).unwrap();
+    assert_ne!(
+        passphrase_key(&other, &passphrase).unwrap().salt(),
+        key.salt()
+    );
+    assert_eq!(
+        unlock_with_passphrase_key(&other, &key).err(),
+        Some(Error::WrongSecret)
+    );
+    // A wrong passphrase's key opens nothing.
+    let wrong = passphrase_key(&header, &SecretString::from("nope")).unwrap();
+    assert_eq!(
+        unlock_with_passphrase_key(&header, &wrong).err(),
+        Some(Error::WrongSecret)
+    );
+}

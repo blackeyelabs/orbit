@@ -5,6 +5,8 @@ edition.workspace = true
 
 [dependencies]
 orbit-crypto.workspace = true
+rand_core.workspace = true
+zeroize.workspace = true
 tempfile.workspace = true
 trash.workspace = true
 notify-debouncer-mini.workspace = true

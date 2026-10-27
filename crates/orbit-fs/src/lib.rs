@@ -10,6 +10,10 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+mod protected;
+
+pub use protected::ProtectedFs;
+
 use notify_debouncer_mini::{DebounceEventResult, new_debouncer, notify::RecursiveMode};
 
 /// Where protected folders keep their encrypted storage, at the vault root
@@ -194,6 +198,22 @@ impl PlainFs {
             ));
         }
         Ok(PlainFs { root })
+    }
+
+    /// Makes a folder's entries survive a crash: those just made in it.
+    pub fn sync_dir(&self, dir: &VaultPath) -> io::Result<()> {
+        fs::File::open(self.resolve(dir)?)?.sync_all()
+    }
+
+    /// Deletes a file, or a folder and everything in it, for good: what
+    /// protecting a folder leaves behind, and protected storage.
+    pub fn remove_permanently(&self, path: &VaultPath) -> io::Result<()> {
+        let target = self.entry_path(path)?;
+        if target.symlink_metadata()?.is_dir() {
+            fs::remove_dir_all(target)
+        } else {
+            fs::remove_file(target)
+        }
     }
 
     pub fn root(&self) -> &Path {

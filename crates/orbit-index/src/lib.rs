@@ -232,6 +232,17 @@ impl SearchIndex {
         self.reader.reload()
     }
 
+    /// Empties the index, its files on disk too: not just marked deleted,
+    /// which would leave their text in the cache until a merge.
+    pub fn clear(&self) -> tantivy::Result<()> {
+        let mut writer = self.writer();
+        writer.delete_all_documents()?;
+        writer.commit()?;
+        writer.garbage_collect_files().wait()?;
+        drop(writer);
+        self.reader.reload()
+    }
+
     /// Up to `limit` notes with every word (the last one may be unfinished)
     /// in their title or text, and every filter; best first. Filters alone
     /// list every note they match.

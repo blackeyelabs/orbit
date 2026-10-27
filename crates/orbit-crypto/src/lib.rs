@@ -9,6 +9,9 @@
 mod blob;
 
 pub use blob::{Metadata, blob_id, open, open_metadata, seal};
+/// For passing passphrases in, and plaintext out, without copies lingering.
+pub use secrecy::SecretString;
+pub use zeroize::Zeroizing;
 
 use chacha20poly1305::{
     KeyInit, XChaCha20Poly1305, XNonce,
@@ -17,10 +20,10 @@ use chacha20poly1305::{
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use rand_core::CryptoRng;
-use secrecy::{ExposeSecret, SecretString};
+use secrecy::ExposeSecret;
 use sha2::Sha256;
 use unicode_normalization::UnicodeNormalization;
-use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 const HEADER_MAGIC: &[u8; 8] = b"ORBITPF\0";
 const FORMAT_VERSION: u8 = 1;
@@ -278,14 +281,72 @@ pub fn create(
 /// Unlocks with the passphrase. Tampering with any part of the header is
 /// reported as [`Error::WrongSecret`], like a wrong passphrase.
 pub fn unlock(header: &Header, passphrase: &SecretString) -> Result<MasterKey, Error> {
+    unlock_with_passphrase_key(header, &passphrase_key(header, passphrase)?)
+}
+
+/// What a passphrase derives for a header's passphrase slot: Argon2's
+/// output, for its salt and parameters. Any header with the same salt and
+/// parameters takes it, so trying one passphrase against several folders
+/// runs Argon2 once per distinct salt. Zeroized on drop.
+#[derive(Zeroize, ZeroizeOnDrop)]
+pub struct PassphraseKey {
+    /// The slot's parameters and salt, which the key is for.
+    salt: [u8; PARAMS_LEN + SALT_LEN],
+    kek: [u8; KEY_LEN],
+}
+
+impl PassphraseKey {
+    /// The parameters and salt the key was derived for: equal for headers
+    /// it opens alike.
+    pub fn salt(&self) -> &[u8] {
+        &self.salt
+    }
+}
+
+/// The parameters and salt of a header's passphrase slot: two headers with
+/// the same take the same [`PassphraseKey`].
+pub fn passphrase_salt(header: &Header) -> Result<Vec<u8>, Error> {
+    let h = parse_header(header.as_bytes())?;
+    Ok(h.passphrase_slot[..PARAMS_LEN + SALT_LEN].to_vec())
+}
+
+/// Runs Argon2 for `passphrase` with the header's salt and parameters
+/// (refusing parameters past Orbit's ceiling first).
+pub fn passphrase_key(header: &Header, passphrase: &SecretString) -> Result<PassphraseKey, Error> {
     let h = parse_header(header.as_bytes())?;
     let (params, rest) = h.passphrase_slot.split_at(PARAMS_LEN);
-    let (salt, wrapped) = rest.split_at(SALT_LEN);
+    let salt = &rest[..SALT_LEN];
     let kek = passphrase_kek(passphrase, KdfParams::from_bytes(params), salt)?;
-    let aad = slot_aad(SLOT_PASSPHRASE, &h.passphrase_slot[..PARAMS_LEN + SALT_LEN]);
-    let master = unwrap_key(&kek, wrapped, &aad)?;
+    let mut key = PassphraseKey {
+        salt: [0; PARAMS_LEN + SALT_LEN],
+        kek: *kek,
+    };
+    key.salt
+        .copy_from_slice(&h.passphrase_slot[..PARAMS_LEN + SALT_LEN]);
+    Ok(key)
+}
+
+/// Unlocks with a key derived for this header's salt and parameters. A key
+/// for others, like a wrong passphrase's, is [`Error::WrongSecret`].
+pub fn unlock_with_passphrase_key(
+    header: &Header,
+    key: &PassphraseKey,
+) -> Result<MasterKey, Error> {
+    let h = parse_header(header.as_bytes())?;
+    let fields = &h.passphrase_slot[..PARAMS_LEN + SALT_LEN];
+    if fields != key.salt {
+        return Err(Error::WrongSecret);
+    }
+    let wrapped = &h.passphrase_slot[PARAMS_LEN + SALT_LEN..];
+    let master = unwrap_key(&key.kek, wrapped, &slot_aad(SLOT_PASSPHRASE, fields))?;
     verify_header_mac(header.as_bytes(), h.mac, &master)?;
     Ok(master)
+}
+
+/// The operating system's random number generator, for new folders, keys
+/// and blobs. Panics if the system can't provide randomness.
+pub fn os_rng() -> impl CryptoRng {
+    rand_core::UnwrapErr(getrandom::SysRng)
 }
 
 /// Unlocks with the recovery key instead of the passphrase.

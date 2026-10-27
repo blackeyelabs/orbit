@@ -12,13 +12,14 @@ insecure-test-kdf = []
 aead-stream = { version = "=0.6.0", features = ["alloc"] }
 argon2 = { version = "=0.6.0", features = ["zeroize"] }
 chacha20poly1305 = { version = "=0.11.0", features = ["zeroize"] }
+getrandom.workspace = true
 hkdf = "=0.13.0"
 hmac = { version = "=0.13.0", features = ["zeroize"] }
-rand_core = "=0.10.1"
+rand_core.workspace = true
 secrecy = "=0.10.3"
 sha2 = { version = "=0.11.1", features = ["zeroize"] }
 unicode-normalization = "=0.1.26"
-zeroize = { version = "=1.9.0", features = ["derive"] }
+zeroize.workspace = true
 
 [dev-dependencies]
 orbit-crypto = { path = ".", features = ["insecure-test-kdf"] }

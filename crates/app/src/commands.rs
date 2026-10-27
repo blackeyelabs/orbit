@@ -31,7 +31,13 @@ actions!(
         /// Settings › Appearance.
         OpenSettings,
         /// The Welcome screen, for another vault.
-        OpenAnotherVault
+        OpenAnotherVault,
+        /// The unlock prompt, for protected folders.
+        Unlock,
+        /// Lock every unlocked protected folder.
+        LockAll,
+        /// The protect flow, for the open note's folder.
+        ProtectFolder
     ]
 );
 
@@ -45,6 +51,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("alt-1", ToggleSidebar, window),
         KeyBinding::new("alt-2", ToggleRightPanel, window),
         KeyBinding::new("ctrl-,", OpenSettings, window),
+        KeyBinding::new("ctrl-shift-l", LockAll, window),
     ]);
 }
 
@@ -98,6 +105,9 @@ pub fn all() -> &'static [Command] {
         command!("Toggle right panel", ToggleRightPanel, WINDOW),
         command!("Open settings", OpenSettings, WINDOW),
         command!("Open another vault", OpenAnotherVault, WINDOW),
+        command!("Unlock…", Unlock, WINDOW),
+        command!("Lock all protected folders", LockAll, WINDOW),
+        command!("Protect a folder…", ProtectFolder, WINDOW),
     ];
     COMMANDS
 }

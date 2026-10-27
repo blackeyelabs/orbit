@@ -6,10 +6,13 @@ edition.workspace = true
 [dependencies]
 md-engine.workspace = true
 nucleo-matcher.workspace = true
+orbit-crypto.workspace = true
 orbit-index.workspace = true
 orbit-fs.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+# Fast Argon2 (KdfParams::INSECURE_TEST) for tests only.
+orbit-crypto = { workspace = true, features = ["insecure-test-kdf"] }
 tempfile.workspace = true

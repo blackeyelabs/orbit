@@ -11,6 +11,7 @@ mod instance;
 mod link_completion;
 mod note_editor;
 mod preview;
+mod protection;
 mod right_panel;
 mod search_panel;
 mod settings_view;

@@ -8,12 +8,12 @@ use std::{
     ops::Range,
     sync::{
         Mutex, OnceLock,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use orbit_fs::EntryType;
+use orbit_fs::{EntryType, VaultFs as _};
 use orbit_index::{NoteDoc, Query, SearchIndex};
 
 use crate::excerpt::{Snippet, excerpt};
@@ -74,6 +74,13 @@ pub(crate) struct Search {
     /// While the vault is being indexed.
     progress: Mutex<Option<IndexingProgress>>,
     complete: AtomicBool,
+    /// Held while a note is read into the index, and while the index is
+    /// emptied or a folder protected: nothing read before a folder is
+    /// protected lands in the cache after it's emptied.
+    writing: Mutex<()>,
+    /// Bumped each time the index is emptied, so a pass of indexing that
+    /// ran meanwhile knows it isn't complete.
+    emptied: AtomicU64,
 }
 
 impl Search {
@@ -94,7 +101,14 @@ impl Vault {
     pub fn index_search(&self) {
         let index = self.search_index();
         *lock(&self.search.progress) = Some(IndexingProgress { done: 0, total: 0 });
-        self.reindex_within(index, &VaultPath::root(), true);
+        loop {
+            let emptied = self.search.emptied.load(Ordering::Acquire);
+            self.reindex_within(index, &VaultPath::root(), true);
+            // Emptied meanwhile: what was read before is gone; again.
+            if self.search.emptied.load(Ordering::Acquire) == emptied {
+                break;
+            }
+        }
         self.search.complete.store(true, Ordering::Release);
         *lock(&self.search.progress) = None;
     }
@@ -221,8 +235,12 @@ impl Vault {
     }
 
     /// Reads a note or canvas into the index; one that can't be read is
-    /// left out.
+    /// left out, and so is a protected one: the index is cached on disk.
     fn index_file(&self, index: &SearchIndex, path: &VaultPath, modified: Option<u64>) {
+        let _writing = lock(&self.search.writing);
+        if self.fs.protected_folder_of(path).is_some() {
+            return index.remove(path.as_str());
+        }
         let modified = modified.unwrap_or(0);
         let doc = match EntryKind::of_file(path.name()) {
             EntryKind::Canvas => self.fs.read(path).ok().map(|bytes| {
@@ -245,7 +263,8 @@ impl Vault {
     /// Every note and canvas in `folder` (`depth` folders down from the
     /// vault root), with when it last changed.
     fn searchable_on_disk(&self, folder: &VaultPath, depth: usize, found: &mut Vec<OnDisk>) {
-        if (!folder.is_root() && crate::in_tool_folder(folder)) || depth > MAX_DEPTH {
+        let protected = self.fs.protected_folder_of(folder).is_some();
+        if (!folder.is_root() && crate::in_tool_folder(folder)) || protected || depth > MAX_DEPTH {
             return;
         }
         let Ok(entries) = self.fs.list_dir(folder) else {
@@ -256,7 +275,10 @@ impl Vault {
                 continue;
             };
             match entry.entry_type {
-                EntryType::Dir if !is_tool_folder(&entry.name) => {
+                EntryType::Dir
+                    if !is_tool_folder(&entry.name)
+                        && self.fs.protected_folder_of(&path).is_none() =>
+                {
                     self.searchable_on_disk(&path, depth + 1, found)
                 }
                 EntryType::File if EntryKind::of_file(&entry.name).is_searchable() => {
@@ -354,4 +376,21 @@ fn nanos(modified: SystemTime) -> u64 {
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Empties the search index, cache files and all, to be built again: what
+/// it held of a folder just protected mustn't stay on disk.
+pub(crate) fn forget_everything(vault: &Vault) {
+    let _writing = lock(&vault.search.writing);
+    let index = vault.search_index();
+    if let Err(e) = index.clear() {
+        eprintln!("orbit: couldn't clear the search index: {e}");
+    }
+    vault.search.emptied.fetch_add(1, Ordering::AcqRel);
+    vault.search.complete.store(false, Ordering::Release);
+}
+
+/// Holds off reading notes into the search index until dropped.
+pub(crate) fn hold_writes(vault: &Vault) -> std::sync::MutexGuard<'_, ()> {
+    lock(&vault.search.writing)
 }

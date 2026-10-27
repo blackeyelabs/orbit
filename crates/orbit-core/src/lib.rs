@@ -9,6 +9,7 @@ mod excerpt;
 mod fuzzy;
 mod index;
 mod open_note;
+mod protect;
 mod recent;
 mod search;
 mod session;
@@ -18,6 +19,8 @@ mod tags;
 
 use open_note::DiskVersion;
 pub use open_note::{DiskCheck, OpenNote, Trouble};
+pub use orbit_crypto::Zeroizing;
+pub use protect::{ProtectionKeys, Strength, UnlockError, passphrase_strength};
 
 pub use excerpt::Snippet;
 pub use fuzzy::{CommandMatch, NoteMatch, command_query, match_commands};
@@ -49,7 +52,9 @@ pub struct Followed {
     pub created: bool,
 }
 pub use orbit_fs::Watch;
-use orbit_fs::{EntryType, ORBIT_DIR, PROTECTED_STORAGE_DIR, PlainFs, VaultFs, VaultLock};
+use orbit_fs::{
+    EntryType, ORBIT_DIR, PROTECTED_STORAGE_DIR, PlainFs, ProtectedFs, VaultFs, VaultLock,
+};
 
 /// Folders that belong to tools, not to the vault's content: Orbit's own
 /// cache, Obsidian's settings, git, and protected-folder storage.
@@ -110,6 +115,8 @@ pub enum Error {
     NotFound,
     /// The vault is open already, in another window.
     AlreadyOpen,
+    /// A protected folder can't hold another: this one is in the way.
+    Nested(VaultPath),
     /// The path isn't a note.
     NotANote(VaultPath),
     /// The note isn't UTF-8 text, so editing it could lose bytes.
@@ -138,6 +145,10 @@ impl std::fmt::Display for Error {
         match self {
             Error::NotFound => f.write_str("vault folder not found"),
             Error::AlreadyOpen => f.write_str("the vault is already open in another window"),
+            Error::Nested(p) => write!(
+                f,
+                "{p} is protected, and protected folders can't hold one another"
+            ),
             Error::NotANote(p) => write!(f, "not a note: {p}"),
             Error::NotUtf8(p) => write!(f, "{p} isn't UTF-8 text, so Orbit won't open it"),
             Error::AlreadyExists(p) => write!(f, "{p} already exists"),
@@ -156,7 +167,8 @@ impl std::error::Error for Error {}
 pub struct Vault {
     root: PathBuf,
     name: String,
-    fs: Box<dyn VaultFs>,
+    fs: ProtectedFs,
+    protection: protect::Protection,
     /// `None` where the vault can't be written to, so can't be locked.
     _lock: Option<VaultLock>,
     /// Shared with the watcher, which reports what changes.
@@ -185,7 +197,8 @@ impl Vault {
         Ok(Vault {
             root,
             name,
-            fs: Box::new(plain),
+            fs: ProtectedFs::new(plain),
+            protection: protect::Protection::default(),
             _lock: lock,
             index: Arc::default(),
             search: Arc::default(),
@@ -226,7 +239,9 @@ impl Vault {
 
     /// Whether a tab can be part of the session: a note in the vault's content.
     fn is_restorable(&self, path: &VaultPath) -> bool {
-        check_note(path).is_ok() && !in_tool_folder(path)
+        check_note(path).is_ok()
+            && !in_tool_folder(path)
+            && self.fs.protected_folder_of(path).is_none()
     }
 
     /// The vault's display name: its folder's name.

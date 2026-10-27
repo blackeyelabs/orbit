@@ -28,11 +28,14 @@ use orbit_core::{
 
 use crate::appearance::{self, AppSettings};
 use crate::commands::{
-    CloseTab, CommandPalette, DeleteNote, MoveNote, NewFolder, OpenAnotherVault, OpenSettings,
-    QuickSwitcher, RenameNote, SearchVault, ToggleRightPanel, ToggleSidebar,
+    CloseTab, CommandPalette, DeleteNote, LockAll, MoveNote, NewFolder, OpenAnotherVault,
+    OpenSettings, ProtectFolder, QuickSwitcher, RenameNote, SearchVault, ToggleRightPanel,
+    ToggleSidebar, Unlock,
 };
+use crate::file_actions::Protection;
 use crate::file_actions::{self, NewNote};
 use crate::note_editor::{NoteEditor, NoteEditorEvent};
+use crate::protection;
 use crate::right_panel;
 use crate::search_panel;
 use crate::settings_view::AppearancePane;
@@ -806,6 +809,99 @@ impl OrbitWindow {
         }
     }
 
+    /// The unlock prompt.
+    pub(crate) fn ask_unlock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let view = cx.entity().downgrade();
+        protection::ask_unlock(view, self.vault.clone(), window, cx);
+    }
+
+    /// The protect flow, on `folder`.
+    pub(crate) fn ask_protect(
+        &mut self,
+        folder: VaultPath,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let folders = self.vault.protectable_folders();
+        if let Err(e) = self.vault.can_protect(&folder) {
+            return self.report(&format!("protect {}", folder.name()), e, cx);
+        }
+        let view = cx.entity().downgrade();
+        protection::ask_protect(view, self.vault.clone(), folder, folders, window, cx);
+    }
+
+    /// Whether `path` is in an unlocked protected folder.
+    pub(crate) fn is_protected(&self, path: &VaultPath) -> bool {
+        self.vault.protected_folder_of(path).is_some()
+    }
+
+    /// Locks a protected folder. Its open notes are saved first and their
+    /// tabs closed; if a save fails, the folder locks anyway (ADR 0004)
+    /// and says what was lost.
+    pub(crate) fn lock_folder(
+        &mut self,
+        folder: &VaultPath,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let saved = self.close_tabs_within(folder, cx);
+        self.vault.lock(folder);
+        if !saved {
+            self.error = Some(
+                format!(
+                    "Locked {}: some edits in it couldn't be saved first, and are gone",
+                    folder.name()
+                )
+                .into(),
+            );
+        }
+        self.protection_changed(cx);
+    }
+
+    /// Saves the notes open at or in `folder` and closes their tabs;
+    /// whether every save worked.
+    pub(crate) fn close_tabs_within(&mut self, folder: &VaultPath, cx: &mut Context<Self>) -> bool {
+        let saved = self.save_tabs_within(folder, cx);
+        while let Some(ix) = self
+            .tabs
+            .iter()
+            .position(|t| t.editor.read(cx).path().is_within(folder))
+        {
+            self.tabs[ix]
+                .editor
+                .update(cx, |editor, _| editor.forget_disk());
+            self.remove_tab(ix, cx);
+        }
+        saved
+    }
+
+    /// Locks every unlocked protected folder.
+    pub(crate) fn lock_all_folders(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for folder in self.vault.unlocked_folders() {
+            self.lock_folder(&folder, window, cx);
+        }
+    }
+
+    /// A folder was protected, unlocked or locked: the tree, panels and
+    /// search show it, or don't any more.
+    pub(crate) fn protection_changed(&mut self, cx: &mut Context<Self>) {
+        let mut expanded = self.expanded_folders(cx);
+        expanded.extend(self.vault.unlocked_folders());
+        self.refresh_tree(&expanded, cx);
+        self.refresh_right_panel(cx);
+        for tab in &self.tabs {
+            tab.editor.update(cx, |editor, cx| editor.links_changed(cx));
+        }
+        if self.vault.search_progress().is_none() {
+            // Protecting a folder empties the search index, to be rebuilt.
+            self.index_vault(cx);
+        }
+        if self.search.is_some() {
+            self.run_search(cx);
+        }
+        cx.notify();
+    }
+
     fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let view = cx.new(|_| AppearancePane);
         window.open_dialog(cx, move |dialog, window, _| {
@@ -872,6 +968,8 @@ impl OrbitWindow {
         let entries = self.entries.clone();
         let (menu_view, menu_entries, folders) =
             (view.clone(), self.entries.clone(), self.folders());
+        let (menu_vault, protected): (Arc<Vault>, Rc<Vec<VaultPath>>) =
+            (self.vault.clone(), Rc::new(self.vault.unlocked_folders()));
         let unsaved: Rc<HashSet<VaultPath>> = Rc::new(
             self.tabs
                 .iter()
@@ -969,6 +1067,8 @@ impl OrbitWindow {
                                 _ => IconName::File,
                             };
                             let is_unsaved = entry_info.is_some_and(|e| unsaved.contains(&e.path));
+                            let is_protected =
+                                entry_info.is_some_and(|e| protected.contains(&e.path));
                             let mut item = ListItem::new(ix)
                                 .pl(px(12. + 16. * entry.depth() as f32))
                                 .child(
@@ -976,7 +1076,14 @@ impl OrbitWindow {
                                         .gap_2()
                                         .child(icon)
                                         .child(entry.item().label.clone())
-                                        .when(is_unsaved, |this| this.child(unsaved_dot(cx))),
+                                        .when(is_unsaved, |this| this.child(unsaved_dot(cx)))
+                                        .when(is_protected, |this| {
+                                            this.child(
+                                                div()
+                                                    .text_color(cx.theme().success)
+                                                    .child(IconName::LockOpen),
+                                            )
+                                        }),
                                 );
                             if let Some(TreeEntryInfo { path, kind }) = entry_info.cloned()
                                 && kind != EntryKind::Folder
@@ -998,6 +1105,11 @@ impl OrbitWindow {
                                     info.path.clone(),
                                     info.kind,
                                     folders.clone(),
+                                    match menu_vault.protected_folder_of(&info.path) {
+                                        Some(root) if root == info.path => Protection::Root,
+                                        Some(_) => Protection::Inside,
+                                        None => Protection::Plain,
+                                    },
                                 ),
                                 None => menu,
                             }
@@ -1112,7 +1224,15 @@ impl OrbitWindow {
                     .when(failed, |this| this.text_color(cx.theme().danger))
                     .child(left),
             )
-            .child(right)
+            .child(
+                h_flex()
+                    .gap_3()
+                    .child(right)
+                    .child(protection::status_control(
+                        &self.vault.unlocked_folders(),
+                        cx,
+                    )),
+            )
     }
 }
 
@@ -1129,6 +1249,23 @@ impl Render for OrbitWindow {
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &NewNote, window, cx| {
                 this.new_note(VaultPath::root(), window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &Unlock, window, cx| this.ask_unlock(window, cx)))
+            .on_action(
+                cx.listener(|this, _: &LockAll, window, cx| this.lock_all_folders(window, cx)),
+            )
+            .on_action(cx.listener(|this, _: &ProtectFolder, window, cx| {
+                // The open note's folder, or else the first that can be.
+                let protectable = this.vault.protectable_folders();
+                let folder = this
+                    .active_path(cx)
+                    .map(|p| p.parent())
+                    .filter(|f| protectable.contains(f))
+                    .or_else(|| protectable.into_iter().next());
+                match folder {
+                    Some(folder) => this.ask_protect(folder, window, cx),
+                    None => this.report("protect a folder", "there's no folder to protect", cx),
+                }
             }))
             .on_action(
                 cx.listener(|this, _: &SearchVault, window, cx| this.focus_search(window, cx)),
