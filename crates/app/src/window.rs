@@ -353,18 +353,30 @@ impl OrbitWindow {
             expanded.insert(followed.path.parent());
             self.refresh_tree(&expanded, cx);
         }
-        match EntryKind::of_file(followed.path.name()) {
-            EntryKind::Note => {
-                self.open_note(followed.path.clone(), window, cx);
-                if let (Some(heading), Some(ix)) =
-                    (&followed.heading, self.tab_of(&followed.path, cx))
-                {
-                    self.tabs[ix]
-                        .editor
-                        .update(cx, |editor, cx| editor.go_to_heading(heading, window, cx));
-                }
+        self.open_file(followed.path.clone(), window, cx);
+        if let (Some(heading), Some(ix)) = (&followed.heading, self.tab_of(&followed.path, cx)) {
+            self.tabs[ix]
+                .editor
+                .update(cx, |editor, cx| editor.go_to_heading(heading, window, cx));
+        }
+    }
+
+    /// Opens any file in the vault: a note in a tab; a canvas, which Orbit
+    /// can't show yet (ADR 0005), with a word saying so; anything else in
+    /// its own app.
+    pub(crate) fn open_file(
+        &mut self,
+        path: VaultPath,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match EntryKind::of_file(path.name()) {
+            EntryKind::Note => self.open_note(path, window, cx),
+            EntryKind::Canvas => {
+                let file = self.vault.file_on_disk(&path);
+                file_actions::canvas_unavailable(&path, file, window, cx);
             }
-            _ => cx.open_with_system(&self.vault.file_on_disk(&followed.path)),
+            _ => cx.open_with_system(&self.vault.file_on_disk(&path)),
         }
     }
 
@@ -953,6 +965,7 @@ impl OrbitWindow {
                                 }
                                 Some(EntryKind::Folder) => IconName::FolderClosed,
                                 Some(EntryKind::Note) => IconName::FileText,
+                                Some(EntryKind::Canvas) => IconName::LayoutDashboard,
                                 _ => IconName::File,
                             };
                             let is_unsaved = entry_info.is_some_and(|e| unsaved.contains(&e.path));
@@ -965,15 +978,13 @@ impl OrbitWindow {
                                         .child(entry.item().label.clone())
                                         .when(is_unsaved, |this| this.child(unsaved_dot(cx))),
                                 );
-                            if let Some(TreeEntryInfo {
-                                path,
-                                kind: EntryKind::Note,
-                            }) = entry_info.cloned()
+                            if let Some(TreeEntryInfo { path, kind }) = entry_info.cloned()
+                                && kind != EntryKind::Folder
                             {
                                 let view = view.clone();
                                 item = item.on_click(move |_, window, cx| {
                                     let path = path.clone();
-                                    view.update(cx, |this, cx| this.open_note(path, window, cx))
+                                    view.update(cx, |this, cx| this.open_file(path, window, cx))
                                         .ok();
                                 });
                             }

@@ -18,7 +18,8 @@ use orbit_index::{NoteDoc, Query, SearchIndex};
 
 use crate::excerpt::{Snippet, excerpt};
 use crate::{
-    EntryKind, MAX_DEPTH, Vault, VaultPath, is_plain_text_note, is_tool_folder, note_title, tags,
+    EntryKind, MAX_DEPTH, Vault, VaultPath, canvas, is_plain_text_note, is_tool_folder, note_title,
+    tags,
 };
 
 /// Snippets shown for each note.
@@ -164,8 +165,8 @@ impl Vault {
             };
             match entry {
                 Some(e) if e.entry_type == EntryType::File => {
-                    if EntryKind::of_file(&e.name) == EntryKind::Note {
-                        self.index_note(index, path, e.modified.map(nanos));
+                    if EntryKind::of_file(&e.name).is_searchable() {
+                        self.index_file(index, path, e.modified.map(nanos));
                     }
                 }
                 // A folder (made, moved here, or the whole vault), or one
@@ -184,7 +185,7 @@ impl Vault {
     fn reindex_within(&self, index: &SearchIndex, folder: &VaultPath, progress: bool) {
         let mut on_disk = Vec::new();
         let depth = folder.as_str().split('/').filter(|s| !s.is_empty()).count();
-        self.notes_on_disk(folder, depth, &mut on_disk);
+        self.searchable_on_disk(folder, depth, &mut on_disk);
         let inside = format!("{folder}/");
         let within =
             |path: &str| folder.is_root() || path == folder.as_str() || path.starts_with(&inside);
@@ -205,7 +206,7 @@ impl Vault {
             .collect();
         let total = changed.len();
         for (done, (path, modified)) in changed.into_iter().enumerate() {
-            self.index_note(index, path, *modified);
+            self.index_file(index, path, *modified);
             if progress && (done + 1).is_multiple_of(BATCH) {
                 commit(index);
                 *lock(&self.search.progress) = Some(IndexingProgress {
@@ -219,19 +220,31 @@ impl Vault {
         commit(index);
     }
 
-    /// Reads a note into the index; one that can't be read is left out.
-    fn index_note(&self, index: &SearchIndex, path: &VaultPath, modified: Option<u64>) {
-        match self.read_note(path) {
-            Ok(text) => {
-                index.put(note_doc(path, &text, modified.unwrap_or(0))).ok();
+    /// Reads a note or canvas into the index; one that can't be read is
+    /// left out.
+    fn index_file(&self, index: &SearchIndex, path: &VaultPath, modified: Option<u64>) {
+        let modified = modified.unwrap_or(0);
+        let doc = match EntryKind::of_file(path.name()) {
+            EntryKind::Canvas => self.fs.read(path).ok().map(|bytes| {
+                let cards = canvas::card_text(&String::from_utf8_lossy(&bytes));
+                canvas_doc(path, cards, modified)
+            }),
+            _ => self
+                .read_note(path)
+                .ok()
+                .map(|text| note_doc(path, &text, modified)),
+        };
+        match doc {
+            Some(doc) => {
+                index.put(doc).ok();
             }
-            Err(_) => index.remove(path.as_str()),
+            None => index.remove(path.as_str()),
         }
     }
 
-    /// Every note in `folder` (`depth` folders down from the vault root),
-    /// with when it last changed.
-    fn notes_on_disk(&self, folder: &VaultPath, depth: usize, found: &mut Vec<OnDisk>) {
+    /// Every note and canvas in `folder` (`depth` folders down from the
+    /// vault root), with when it last changed.
+    fn searchable_on_disk(&self, folder: &VaultPath, depth: usize, found: &mut Vec<OnDisk>) {
         if (!folder.is_root() && crate::in_tool_folder(folder)) || depth > MAX_DEPTH {
             return;
         }
@@ -244,14 +257,26 @@ impl Vault {
             };
             match entry.entry_type {
                 EntryType::Dir if !is_tool_folder(&entry.name) => {
-                    self.notes_on_disk(&path, depth + 1, found)
+                    self.searchable_on_disk(&path, depth + 1, found)
                 }
-                EntryType::File if EntryKind::of_file(&entry.name) == EntryKind::Note => {
+                EntryType::File if EntryKind::of_file(&entry.name).is_searchable() => {
                     found.push((path, entry.modified.map(nanos)))
                 }
                 _ => {}
             }
         }
+    }
+}
+
+/// A canvas as the index takes it: its name, and its cards' text.
+fn canvas_doc(path: &VaultPath, cards: String, modified: u64) -> NoteDoc {
+    NoteDoc {
+        path: path.to_string(),
+        title: note_title(path).to_string(),
+        body: cards,
+        tags: Vec::new(),
+        folders: folders_of(path),
+        modified,
     }
 }
 
@@ -269,11 +294,7 @@ fn note_doc(path: &VaultPath, source: &str, modified: u64) -> NoteDoc {
         note_tags = md_engine::front_matter_tags(source);
         note_tags.extend(md_engine::inline_tags(source));
     }
-    let folders = path
-        .as_str()
-        .match_indices('/')
-        .map(|(i, _)| path.as_str()[..i].to_lowercase())
-        .collect();
+    let folders = folders_of(path);
     NoteDoc {
         path: path.to_string(),
         title,
@@ -286,6 +307,14 @@ fn note_doc(path: &VaultPath, source: &str, modified: u64) -> NoteDoc {
         folders,
         modified,
     }
+}
+
+/// Every folder `path` is in, lowercased, from the vault root down.
+fn folders_of(path: &VaultPath) -> Vec<String> {
+    path.as_str()
+        .match_indices('/')
+        .map(|(i, _)| path.as_str()[..i].to_lowercase())
+        .collect()
 }
 
 /// The first lines with matches, each with its matches marked.

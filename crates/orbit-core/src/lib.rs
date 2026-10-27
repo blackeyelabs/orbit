@@ -4,6 +4,7 @@
 //! `orbit-api`); [`Settings`] holds the app-wide preferences beside it.
 //! Neither has a GPUI dependency.
 
+mod canvas;
 mod excerpt;
 mod fuzzy;
 mod index;
@@ -78,6 +79,11 @@ pub enum EntryKind {
 }
 
 impl EntryKind {
+    /// Notes and canvases are searched; other files aren't.
+    pub(crate) fn is_searchable(self) -> bool {
+        matches!(self, EntryKind::Note | EntryKind::Canvas)
+    }
+
     /// The kind of a file, from its name's extension.
     pub fn of_file(name: &str) -> Self {
         let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
@@ -513,8 +519,9 @@ impl Vault {
     }
 
     /// Renames a note or folder within its folder. A note or canvas keeps
-    /// its extension unless the new name has a recognised one (`.md` to
-    /// `.txt`, say). Links to it aren't rewritten yet.
+    /// its extension unless the new name has one of the same kind (`.md` to
+    /// `.txt`, say): a note never becomes a canvas or an attachment, nor a
+    /// canvas a note. Links to it aren't rewritten yet.
     pub fn rename(&self, path: &VaultPath, new_name: &str) -> Result<VaultPath, Error> {
         if path.is_root() || in_tool_folder(path) {
             return Err(Error::InvalidName(path.to_string()));
@@ -530,7 +537,7 @@ impl Vault {
             Some((_, ext))
                 if !is_folder
                     && old_kind != EntryKind::Attachment
-                    && EntryKind::of_file(new_name) == EntryKind::Attachment =>
+                    && EntryKind::of_file(new_name) != old_kind =>
             {
                 format!("{new_name}.{ext}")
             }

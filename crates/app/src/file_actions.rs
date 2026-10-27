@@ -219,6 +219,29 @@ pub fn ask_delete(
     });
 }
 
+/// Opening a canvas, which Orbit can search but not show or edit yet
+/// (ADR 0005): says so, and offers the app the system opens it with.
+pub fn canvas_unavailable(
+    path: &VaultPath,
+    file: std::path::PathBuf,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let name = path.name().to_string();
+    window.open_dialog(cx, move |dialog, _, _| {
+        let file = file.clone();
+        dialog
+            .title("Canvas editing isn't available yet")
+            .child(format!(
+                "Orbit can find {name} by the text on its cards, but can't show or edit canvases yet."
+            ))
+            .footer(footer("Open in another app", move |window, cx| {
+                cx.open_with_system(&file);
+                window.close_dialog(cx);
+            }))
+    });
+}
+
 /// Cancel and a primary button that runs `ok`.
 fn footer(
     ok_label: &'static str,

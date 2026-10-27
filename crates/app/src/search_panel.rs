@@ -141,7 +141,7 @@ fn render_result(ix: usize, result: &SearchResult, cx: &mut Context<OrbitWindow>
                 .iter()
                 .map(|snippet| render_snippet(snippet, cx)),
         )
-        .on_click(cx.listener(move |this, _, window, cx| this.open_note(path.clone(), window, cx)))
+        .on_click(cx.listener(move |this, _, window, cx| this.open_file(path.clone(), window, cx)))
         .into_any_element()
 }
 
