@@ -103,6 +103,8 @@ fn split_quoted(input: &str) -> Vec<&str> {
 /// A note a search found.
 pub struct Hit {
     pub path: String,
+    /// How well it matches: higher is better, comparable within an index.
+    pub score: f32,
     /// Its text, as indexed.
     pub body: String,
     /// Where the words searched for are in `body`, in bytes.
@@ -303,11 +305,12 @@ impl SearchIndex {
             &(TopDocs::with_limit(limit).order_by_score(), Count),
         )?;
         let mut hits = Vec::new();
-        for (_, address) in top {
+        for (score, address) in top {
             let doc: TantivyDocument = searcher.doc(address)?;
             let text = |field| doc.get_first(field).and_then(|v| v.as_str()).unwrap_or("");
             let body = text(f.body).to_string();
             hits.push(Hit {
+                score,
                 path: text(f.path).to_string(),
                 matches: self.matches(&body, &terms),
                 body,

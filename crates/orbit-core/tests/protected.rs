@@ -287,25 +287,26 @@ fn passphrases_are_rated_by_how_hard_they_are_to_guess() {
 }
 
 #[test]
-fn nothing_is_written_into_a_locked_folder() {
+fn a_locked_folders_notes_are_never_written_in_plain_text() {
     let (dir, vault) = vault_with_secrets();
     let folder = p("Zanzibar Diary");
     let keys = vault.prepare_protection("pass").unwrap();
     vault.protect_folder(&folder, keys).unwrap();
     vault.lock(&folder);
-    // As a save that lands after the lock would, or a link followed.
+    // As a save that lands after the lock would.
     assert!(
         vault
-            .save_note(&p("Zanzibar Diary/otter-confession.md"), "late edit")
+            .save_note(
+                &p("Zanzibar Diary/otter-confession.md"),
+                "the quiet albatross"
+            )
             .is_err()
     );
-    assert!(vault.create_note(&folder).is_err());
     assert!(
-        vault
-            .create_linked_note(&p("Public.md"), "Zanzibar Diary/x")
-            .is_err()
+        !dir.path()
+            .join("Zanzibar Diary/otter-confession.md")
+            .exists()
     );
-    assert!(!dir.path().join("Zanzibar Diary").exists());
     assert_no_leak(dir.path());
 }
 

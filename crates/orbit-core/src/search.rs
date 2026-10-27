@@ -4,10 +4,10 @@
 //! reads the notes that changed since.
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     ops::Range,
     sync::{
-        Mutex, OnceLock,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
@@ -60,26 +60,28 @@ pub struct IndexingProgress {
     pub total: usize,
 }
 
-/// The vault's search index and what it has yet to catch up with.
+/// The vault's search indexes and what they have yet to catch up with.
 ///
-/// Its index is cached on disk, so a protected note must never reach it:
-/// once protected folders mount into the tree, their notes need an index
-/// of their own, in memory only (#22).
+/// Plain notes are in an index cached on disk; a protected note must never
+/// reach it. Each unlocked protected folder's notes are in an index of
+/// their own, in memory only, dropped when the folder locks.
 #[derive(Default)]
 pub(crate) struct Search {
-    /// Opened on first use: from the cache, or new.
+    /// For plain notes: opened on first use, from the cache, or new.
     index: OnceLock<SearchIndex>,
-    /// Changed since the index last caught up.
+    /// For each unlocked protected folder's notes, by where it is.
+    protected: Mutex<HashMap<VaultPath, Arc<SearchIndex>>>,
+    /// Changed since the indexes last caught up.
     pending: Mutex<Vec<VaultPath>>,
     /// While the vault is being indexed.
     progress: Mutex<Option<IndexingProgress>>,
     complete: AtomicBool,
-    /// Held while a note is read into the index, and while the index is
-    /// emptied or a folder protected: nothing read before a folder is
+    /// Held while a note is read into an index, and while the plain index
+    /// is emptied or a folder protected: nothing read before a folder is
     /// protected lands in the cache after it's emptied.
     writing: Mutex<()>,
-    /// Bumped each time the index is emptied, so a pass of indexing that
-    /// ran meanwhile knows it isn't complete.
+    /// Bumped each time the plain index is emptied, so a pass of indexing
+    /// that ran meanwhile knows it isn't complete.
     emptied: AtomicU64,
 }
 
@@ -93,17 +95,33 @@ impl Search {
 /// `None` if that isn't known.
 type OnDisk = (VaultPath, Option<u64>);
 
+/// The index a note goes in.
+enum IndexFor<'a> {
+    Plain(&'a SearchIndex),
+    Protected(Arc<SearchIndex>),
+}
+
+impl std::ops::Deref for IndexFor<'_> {
+    type Target = SearchIndex;
+
+    fn deref(&self) -> &SearchIndex {
+        match self {
+            IndexFor::Plain(index) => index,
+            IndexFor::Protected(index) => index,
+        }
+    }
+}
+
 impl Vault {
-    /// Brings the search index up to date with the whole vault: from the
-    /// cache, only the notes changed since it was saved are read. It can
-    /// take a while; searches meanwhile say they may be incomplete, and
-    /// [`Self::search_progress`] says how far it's got.
+    /// Brings the search indexes up to date with the whole vault: from the
+    /// cache, only the plain notes changed since it was saved are read. It
+    /// can take a while; searches meanwhile say they may be incomplete,
+    /// and [`Self::search_progress`] says how far it's got.
     pub fn index_search(&self) {
-        let index = self.search_index();
         *lock(&self.search.progress) = Some(IndexingProgress { done: 0, total: 0 });
         loop {
             let emptied = self.search.emptied.load(Ordering::Acquire);
-            self.reindex_within(index, &VaultPath::root(), true);
+            self.reindex_within(&VaultPath::root(), true);
             // Emptied meanwhile: what was read before is gone; again.
             if self.search.emptied.load(Ordering::Acquire) == emptied {
                 break;
@@ -118,30 +136,38 @@ impl Vault {
         *lock(&self.search.progress)
     }
 
-    /// Indexes the notes changed since the index last caught up (searches
+    /// Indexes the notes changed since the indexes last caught up (searches
     /// do this first too): to call when notes change, so searches don't
     /// wait for it.
     pub fn update_search(&self) {
-        self.catch_up(self.search_index());
+        self.catch_up();
     }
 
     /// Up to `limit` notes for `input`: words to find (the last may be
-    /// unfinished), with `tag:` and `in:` filters. Changes not yet indexed
-    /// are indexed first.
+    /// unfinished), with `tag:` and `in:` filters; plain and unlocked
+    /// protected notes alike. Changes not yet indexed are indexed first.
     pub fn search(&self, input: &str, limit: usize) -> SearchResults {
-        let index = self.search_index();
-        self.catch_up(index);
+        self.catch_up();
         let complete = self.search.complete.load(Ordering::Acquire);
-        let Ok(hits) = index.search(&Query::parse(input), limit) else {
-            return SearchResults {
-                complete,
-                ..SearchResults::default()
-            };
-        };
+        let query = Query::parse(input);
+        let mut hits = Vec::new();
+        let mut matching_notes = 0;
+        for index in self.all_indexes() {
+            if let Ok(found) = index.search(&query, limit) {
+                matching_notes += found.total;
+                // Scores aren't comparable between indexes (each has its own
+                // word statistics): each index's are scaled by its best, so
+                // the order across them is rough but none crowds out another.
+                let best = found.hits.first().map_or(1., |h| h.score.max(f32::EPSILON));
+                hits.extend(found.hits.into_iter().map(|h| (h.score / best, h)));
+            }
+        }
+        // Stable: on a tie, plain notes first.
+        hits.sort_by(|(a, _), (b, _)| b.total_cmp(a));
+        hits.truncate(limit);
         let results: Vec<SearchResult> = hits
-            .hits
             .into_iter()
-            .filter_map(|hit| {
+            .filter_map(|(_, hit)| {
                 let path = VaultPath::new(&hit.path).ok()?;
                 Some(SearchResult {
                     title: note_title(&path).to_string(),
@@ -152,7 +178,7 @@ impl Vault {
             })
             .collect();
         SearchResults {
-            matching_notes: hits.total,
+            matching_notes,
             matches: results.iter().map(|r| r.matches).sum(),
             results,
             complete,
@@ -168,8 +194,51 @@ impl Vault {
         })
     }
 
-    /// Indexes the paths changed since the index last caught up.
-    fn catch_up(&self, index: &SearchIndex) {
+    /// The unlocked protected folder `root`'s index, in memory: made when
+    /// first needed. `None` if it isn't unlocked (it may have just locked).
+    fn protected_index(&self, root: &VaultPath) -> Option<Arc<SearchIndex>> {
+        let mut indexes = self.unlocked_indexes();
+        if !self.fs.mounted().contains(root) {
+            return None;
+        }
+        let index = indexes.entry(root.clone()).or_insert_with(|| {
+            Arc::new(SearchIndex::open(None).expect("an index in memory opens"))
+        });
+        Some(index.clone())
+    }
+
+    /// The protected folders' indexes, each of a folder still unlocked
+    /// where it was: those of folders locked, moved or deleted are dropped.
+    fn unlocked_indexes(&self) -> std::sync::MutexGuard<'_, HashMap<VaultPath, Arc<SearchIndex>>> {
+        let mut indexes = lock(&self.search.protected);
+        let mounted = self.fs.mounted();
+        indexes.retain(|root, _| mounted.contains(root));
+        indexes
+    }
+
+    /// The index for `path`: its protected folder's, or the plain one.
+    /// `None` for a protected folder that's no longer unlocked.
+    fn index_for(&self, path: &VaultPath) -> Option<IndexFor<'_>> {
+        match self.fs.protected_folder_of(path) {
+            Some(root) => self.protected_index(&root).map(IndexFor::Protected),
+            None => Some(IndexFor::Plain(self.search_index())),
+        }
+    }
+
+    /// The plain index, then each unlocked protected folder's.
+    fn all_indexes(&self) -> Vec<IndexFor<'_>> {
+        let mut all = vec![IndexFor::Plain(self.search_index())];
+        all.extend(
+            self.unlocked_indexes()
+                .values()
+                .cloned()
+                .map(IndexFor::Protected),
+        );
+        all
+    }
+
+    /// Indexes the paths changed since the indexes last caught up.
+    fn catch_up(&self) {
         let changed = std::mem::take(&mut *lock(&self.search.pending));
         for path in &changed {
             let entry = if path.is_root() {
@@ -180,26 +249,51 @@ impl Vault {
             match entry {
                 Some(e) if e.entry_type == EntryType::File => {
                     if EntryKind::of_file(&e.name).is_searchable() {
-                        self.index_file(index, path, e.modified.map(nanos));
+                        self.index_file(path, e.modified.map(nanos));
                     }
                 }
-                // A folder (made, moved here, or the whole vault), or one
-                // that's gone: brought up to date with what's there now.
-                _ => self.reindex_within(index, path, false),
+                // A folder (made, moved here, unlocked, or the whole vault),
+                // or one that's gone: brought up to date with what's there.
+                _ => self.reindex_within(path, false),
             }
         }
         if !changed.is_empty() {
-            commit(index);
+            for index in self.all_indexes() {
+                commit(&index);
+            }
         }
     }
 
-    /// Brings what the index has in `folder` up to date with the disk:
-    /// notes gone are taken out, and notes new or changed since they were
-    /// indexed are read. With `progress`, says how far it's got.
-    fn reindex_within(&self, index: &SearchIndex, folder: &VaultPath, progress: bool) {
+    /// Brings what the indexes have in `folder` up to date with the disk.
+    /// With `progress`, says how far the plain index has got.
+    fn reindex_within(&self, folder: &VaultPath, progress: bool) {
+        if let Some(root) = self.fs.protected_folder_of(folder) {
+            if let Some(index) = self.protected_index(&root) {
+                self.reindex_into(&index, folder, false);
+            }
+            return;
+        }
+        self.reindex_into(self.search_index(), folder, progress);
+        for root in self
+            .fs
+            .mounted()
+            .into_iter()
+            .filter(|r| r.is_within(folder))
+        {
+            if let Some(index) = self.protected_index(&root) {
+                self.reindex_into(&index, &root, false);
+            }
+        }
+    }
+
+    /// Brings what `index` has in `folder` up to date: notes gone are
+    /// taken out, and notes new or changed since they were indexed are
+    /// read. A protected folder in a plain one is another index's.
+    fn reindex_into(&self, index: &SearchIndex, folder: &VaultPath, progress: bool) {
         let mut on_disk = Vec::new();
         let depth = folder.as_str().split('/').filter(|s| !s.is_empty()).count();
-        self.searchable_on_disk(folder, depth, &mut on_disk);
+        let into_protected = self.fs.protected_folder_of(folder).is_some();
+        self.searchable_on_disk(folder, depth, into_protected, &mut on_disk);
         let inside = format!("{folder}/");
         let within =
             |path: &str| folder.is_root() || path == folder.as_str() || path.starts_with(&inside);
@@ -220,7 +314,7 @@ impl Vault {
             .collect();
         let total = changed.len();
         for (done, (path, modified)) in changed.into_iter().enumerate() {
-            self.index_file(index, path, *modified);
+            self.index_file(path, *modified);
             if progress && (done + 1).is_multiple_of(BATCH) {
                 commit(index);
                 *lock(&self.search.progress) = Some(IndexingProgress {
@@ -234,13 +328,13 @@ impl Vault {
         commit(index);
     }
 
-    /// Reads a note or canvas into the index; one that can't be read is
-    /// left out, and so is a protected one: the index is cached on disk.
-    fn index_file(&self, index: &SearchIndex, path: &VaultPath, modified: Option<u64>) {
+    /// Reads a note or canvas into its index: a protected one's into its
+    /// folder's, in memory. One that can't be read is left out.
+    fn index_file(&self, path: &VaultPath, modified: Option<u64>) {
         let _writing = lock(&self.search.writing);
-        if self.fs.protected_folder_of(path).is_some() {
-            return index.remove(path.as_str());
-        }
+        let Some(index) = self.index_for(path) else {
+            return;
+        };
         let modified = modified.unwrap_or(0);
         let doc = match EntryKind::of_file(path.name()) {
             EntryKind::Canvas => self.fs.read(path).ok().map(|bytes| {
@@ -261,10 +355,16 @@ impl Vault {
     }
 
     /// Every note and canvas in `folder` (`depth` folders down from the
-    /// vault root), with when it last changed.
-    fn searchable_on_disk(&self, folder: &VaultPath, depth: usize, found: &mut Vec<OnDisk>) {
-        let protected = self.fs.protected_folder_of(folder).is_some();
-        if (!folder.is_root() && crate::in_tool_folder(folder)) || protected || depth > MAX_DEPTH {
+    /// vault root), with when it last changed. Protected folders in it are
+    /// left out unless `protected` (it's one, being indexed).
+    fn searchable_on_disk(
+        &self,
+        folder: &VaultPath,
+        depth: usize,
+        protected: bool,
+        found: &mut Vec<OnDisk>,
+    ) {
+        if (!folder.is_root() && crate::in_tool_folder(folder)) || depth > MAX_DEPTH {
             return;
         }
         let Ok(entries) = self.fs.list_dir(folder) else {
@@ -277,9 +377,9 @@ impl Vault {
             match entry.entry_type {
                 EntryType::Dir
                     if !is_tool_folder(&entry.name)
-                        && self.fs.protected_folder_of(&path).is_none() =>
+                        && (protected || self.fs.protected_folder_of(&path).is_none()) =>
                 {
-                    self.searchable_on_disk(&path, depth + 1, found)
+                    self.searchable_on_disk(&path, depth + 1, protected, found)
                 }
                 EntryType::File if EntryKind::of_file(&entry.name).is_searchable() => {
                     found.push((path, entry.modified.map(nanos)))
@@ -288,6 +388,12 @@ impl Vault {
             }
         }
     }
+}
+
+/// Drops the protected folder `root`'s index, as it locks.
+pub(crate) fn forget_folder(vault: &Vault, root: &VaultPath) {
+    let _writing = lock(&vault.search.writing);
+    lock(&vault.search.protected).remove(root);
 }
 
 /// A canvas as the index takes it: its name, and its cards' text.

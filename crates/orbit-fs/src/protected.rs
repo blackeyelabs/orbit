@@ -29,10 +29,9 @@ const FOLDER_MARK: char = '/';
 pub struct ProtectedFs {
     plain: PlainFs,
     mounts: RwLock<Vec<Mount>>,
-    /// Protected folders locked since the vault opened: nothing is written
-    /// at their paths while they're locked, where it would be plain text.
-    /// (Those never unlocked meanwhile, Orbit can't know the paths of.)
-    locked: RwLock<Vec<VaultPath>>,
+    /// Protected folders locked since the vault opened. (Those never
+    /// unlocked meanwhile, Orbit can't know the paths of.)
+    locked: RwLock<Vec<Locked>>,
 }
 
 /// An unlocked protected folder.
@@ -44,6 +43,15 @@ struct Mount {
     master: MasterKey,
     /// Everything in it, itself included, by vault path.
     entries: BTreeMap<VaultPath, Entry>,
+}
+
+/// A protected folder that's locked: where it is, and the files it held,
+/// which nothing is written at while it's locked (a save landing after the
+/// lock would be their text, in plain). New files there are another
+/// matter: like any, they're plain.
+struct Locked {
+    root: VaultPath,
+    files: std::collections::HashSet<VaultPath>,
 }
 
 #[derive(Clone)]
@@ -152,7 +160,7 @@ impl ProtectedFs {
         {
             return Err(invalid("a protected folder in another's place"));
         }
-        lock_list(&self.locked).retain(|p| p != &root);
+        lock_list(&self.locked).retain(|l| l.root != root);
         mounts.push(Mount {
             store,
             root: root.clone(),
@@ -166,24 +174,30 @@ impl ProtectedFs {
     /// zeroized), and it leaves the tree. Whether it was unlocked.
     pub fn unmount(&self, root: &VaultPath) -> bool {
         let mut mounts = self.mounts_mut();
-        let before = mounts.len();
-        mounts.retain(|m| &m.root != root);
-        let unmounted = mounts.len() < before;
-        if unmounted {
-            lock_list(&self.locked).push(root.clone());
-        }
-        unmounted
+        let Some(ix) = mounts.iter().position(|m| &m.root == root) else {
+            return false;
+        };
+        let mount = mounts.remove(ix);
+        let files = mount
+            .entries
+            .iter()
+            .filter(|(_, e)| e.kind == EntryType::File)
+            .map(|(path, _)| path.clone())
+            .collect();
+        lock_list(&self.locked).push(Locked {
+            root: root.clone(),
+            files,
+        });
+        true
     }
 
-    /// Refuses writing at `path` if it's in a protected folder that's
-    /// locked: it would land in plain text.
+    /// Refuses writing the file `path` if a locked protected folder held
+    /// it: it would land in plain text. Said as for any taken path, so it
+    /// gives nothing away.
     fn check_not_locked(&self, path: &VaultPath) -> io::Result<()> {
         let locked = self.locked.read().unwrap_or_else(|e| e.into_inner());
-        if locked.iter().any(|root| path.is_within(root)) {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "it's in a locked protected folder",
-            ));
+        if locked.iter().any(|l| l.files.contains(path)) {
+            return Err(io::ErrorKind::AlreadyExists.into());
         }
         Ok(())
     }
@@ -197,7 +211,7 @@ impl ProtectedFs {
             .any(|m| m.root.is_within(path) && &m.root != path)
             || lock_list(&self.locked)
                 .iter()
-                .any(|root| root.is_within(path));
+                .any(|l| l.root.is_within(path));
         if holds {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -221,7 +235,13 @@ impl ProtectedFs {
             .iter()
             .map(|m| m.root.clone())
             .find(|r| near(r));
-        mounted.or_else(|| lock_list(&self.locked).iter().find(|r| near(r)).cloned())
+        mounted.or_else(|| {
+            lock_list(&self.locked)
+                .iter()
+                .map(|l| &l.root)
+                .find(|r| near(r))
+                .cloned()
+        })
     }
 
     /// The unlocked protected folder `path` is in (or is), if any.
@@ -452,7 +472,6 @@ impl VaultFs for ProtectedFs {
         let mut mounts = self.mounts_mut();
         let Some(ix) = Self::mount_index(&mounts, dir) else {
             drop(mounts);
-            self.check_not_locked(dir)?;
             return self.plain.create_dir(dir);
         };
         let mount = &mut mounts[ix];
@@ -585,7 +604,7 @@ impl Mount {
     }
 }
 
-fn lock_list(list: &RwLock<Vec<VaultPath>>) -> RwLockWriteGuard<'_, Vec<VaultPath>> {
+fn lock_list<T>(list: &RwLock<Vec<T>>) -> RwLockWriteGuard<'_, Vec<T>> {
     list.write().unwrap_or_else(|e| e.into_inner())
 }
 

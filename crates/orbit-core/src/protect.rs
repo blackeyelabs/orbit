@@ -271,6 +271,7 @@ impl Vault {
     pub fn lock(&self, folder: &VaultPath) -> bool {
         let locked = self.fs.unmount(folder);
         if locked {
+            search::forget_folder(self, folder);
             self.touched([folder.clone()]);
             // What links and tags knew of the folder goes now, not when
             // they're next asked.
