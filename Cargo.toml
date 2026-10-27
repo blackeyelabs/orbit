@@ -38,3 +38,5 @@ rustix = { version = "=1.1.5", features = ["fs"] }
 nucleo-matcher = "=0.3.1"
 # Completion items for the source editor; the version Kit's editor uses.
 lsp-types = "=0.97.0"
+# Vault search's full-text index (ADR 0006). No zstd: it would bring C code.
+tantivy = { version = "=0.27.0", default-features = false, features = ["mmap", "lz4-compression"] }

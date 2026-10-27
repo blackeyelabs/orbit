@@ -12,6 +12,8 @@ actions!(
         QuickSwitcher,
         /// The Command palette.
         CommandPalette,
+        /// Vault search, in the sidebar.
+        SearchVault,
         /// A new folder at the vault root, named next.
         NewFolder,
         /// Rename the open note.
@@ -38,6 +40,7 @@ pub fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("ctrl-o", QuickSwitcher, window),
         KeyBinding::new("ctrl-p", CommandPalette, window),
+        KeyBinding::new("ctrl-shift-f", SearchVault, window),
         KeyBinding::new("ctrl-w", CloseTab, window),
         KeyBinding::new("alt-1", ToggleSidebar, window),
         KeyBinding::new("alt-2", ToggleRightPanel, window),
@@ -80,6 +83,7 @@ pub fn all() -> &'static [Command] {
     }
     const COMMANDS: &[Command] = &[
         command!("Open a note", QuickSwitcher, WINDOW),
+        command!("Search the vault", SearchVault, WINDOW),
         command!("New note", crate::file_actions::NewNote, WINDOW),
         command!("New folder", NewFolder, WINDOW),
         command!("Save", note_editor::Save, NOTE, true),

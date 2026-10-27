@@ -59,6 +59,19 @@ pub(crate) fn has(tags: &[String], wanted: &str) -> bool {
         })
 }
 
+/// `tags` and every tag they're nested in, once each, for matching:
+/// lowercased, without `#`.
+pub(crate) fn with_all_parents(tags: &[String]) -> Vec<String> {
+    let mut all: Vec<String> = tags
+        .iter()
+        .flat_map(|tag| with_parents(tag))
+        .map(normal)
+        .collect();
+    all.sort();
+    all.dedup();
+    all
+}
+
 /// `a/b/c` → `a`, `a/b`, `a/b/c`. Empty parts name nothing (`a//b` is
 /// `a` and `a//b`, `a/` just `a`), and nor do digits alone (`2024/01` is
 /// just itself).

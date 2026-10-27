@@ -4,10 +4,12 @@
 //! `orbit-api`); [`Settings`] holds the app-wide preferences beside it.
 //! Neither has a GPUI dependency.
 
+mod excerpt;
 mod fuzzy;
 mod index;
 mod open_note;
 mod recent;
+mod search;
 mod session;
 mod settings;
 mod suggest;
@@ -16,9 +18,11 @@ mod tags;
 use open_note::DiskVersion;
 pub use open_note::{DiskCheck, OpenNote, Trouble};
 
+pub use excerpt::Snippet;
 pub use fuzzy::{CommandMatch, NoteMatch, command_query, match_commands};
 pub use index::{Backlink, Mention};
 pub use recent::{RecentVault, RecentVaults};
+pub use search::{IndexingProgress, SearchResult, SearchResults};
 pub use session::{Session, SessionTab};
 pub use settings::{Settings, ThemeChoice, default_config_dir};
 pub use suggest::{LinkSuggestion, LinkSuggestions};
@@ -151,6 +155,8 @@ pub struct Vault {
     _lock: Option<VaultLock>,
     /// Shared with the watcher, which reports what changes.
     index: Arc<Mutex<VaultIndex>>,
+    /// Vault search, told of changes the same way.
+    search: Arc<search::Search>,
 }
 
 impl Vault {
@@ -176,6 +182,7 @@ impl Vault {
             fs: Box::new(plain),
             _lock: lock,
             index: Arc::default(),
+            search: Arc::default(),
         })
     }
 
@@ -256,16 +263,17 @@ impl Vault {
     /// Reports paths changed by any app (Orbit included), in debounced
     /// batches, until the returned [`Watch`] is dropped. Tool folders are
     /// left out. `on_change` runs on a background thread.
-    /// Links resolve with these changes before `on_change` hears of them.
+    /// Links and search see these changes before `on_change` hears of them.
     pub fn watch(
         &self,
         mut on_change: impl FnMut(Vec<VaultPath>) + Send + 'static,
     ) -> Result<Watch, Error> {
-        let index = self.index.clone();
+        let (index, search) = (self.index.clone(), self.search.clone());
         Ok(self.fs.watch(Box::new(move |paths: Vec<VaultPath>| {
             let paths: Vec<VaultPath> = paths.into_iter().filter(|p| !in_tool_folder(p)).collect();
             if !paths.is_empty() {
                 lock_index(&index).changed(paths.iter().cloned());
+                search.changed(paths.iter().cloned());
                 on_change(paths);
             }
         }))?)
@@ -345,13 +353,10 @@ impl Vault {
         if in_tool_folder(path) {
             return Found::Nothing;
         }
-        let entries = match self.fs.list_dir(&path.parent()) {
-            Ok(entries) => entries,
-            // Its folder went with it.
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Found::Nothing,
-            Err(_) => return Found::Unreadable,
+        let Ok(entry) = self.entry_at(path) else {
+            return Found::Unreadable;
         };
-        match entries.iter().find(|e| e.name == path.name()) {
+        match entry {
             None => Found::Nothing,
             Some(e) if e.entry_type == EntryType::Dir => Found::Folder,
             Some(_) if check_note(path).is_err() => Found::File(IndexedFile::default()),
@@ -362,6 +367,16 @@ impl Vault {
                 Ok(None) => Found::Nothing,
                 Err(_) => Found::Unreadable,
             },
+        }
+    }
+
+    /// What's at `path` (not the root) in its folder's listing; `None` if
+    /// nothing is, or its folder went too.
+    fn entry_at(&self, path: &VaultPath) -> io::Result<Option<orbit_fs::DirEntry>> {
+        match self.fs.list_dir(&path.parent()) {
+            Ok(entries) => Ok(entries.into_iter().find(|e| e.name == path.name())),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
         }
     }
 
@@ -447,10 +462,12 @@ impl Vault {
         Ok(path)
     }
 
-    /// Orbit changed these paths: links see it now, not when the watcher
-    /// reports it.
+    /// Orbit changed these paths: links and search see it now, not when
+    /// the watcher reports it.
     fn touched(&self, paths: impl IntoIterator<Item = VaultPath>) {
-        lock_index(&self.index).changed(paths);
+        let paths: Vec<VaultPath> = paths.into_iter().collect();
+        lock_index(&self.index).changed(paths.iter().cloned());
+        self.search.changed(paths);
     }
 
     /// Replaces (or creates) a note's text atomically. On failure the old

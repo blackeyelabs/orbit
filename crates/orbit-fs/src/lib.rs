@@ -7,7 +7,7 @@ use std::{
     fs,
     io::{self, Write as _},
     path::{Component, Path, PathBuf},
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use notify_debouncer_mini::{DebounceEventResult, new_debouncer, notify::RecursiveMode};
@@ -131,6 +131,8 @@ pub enum EntryType {
 pub struct DirEntry {
     pub name: String,
     pub entry_type: EntryType,
+    /// When it last changed, where that's known.
+    pub modified: Option<SystemTime>,
 }
 
 /// Storage for a vault's files.
@@ -167,6 +169,14 @@ pub trait VaultFs: Send + Sync {
     /// Holds the vault, so it's open in one window at a time: fails with
     /// `WouldBlock` while anything else holds it, in this process or another.
     fn lock(&self) -> io::Result<VaultLock>;
+    /// A folder on the local disk, made if need be, where Orbit may keep
+    /// the cache `name` (such as the search index) for this vault; `None`
+    /// where its contents mustn't be kept on disk. The cache's owner reads
+    /// and writes in it directly: the one exception to vault files going
+    /// through this trait (ADR 0006).
+    fn cache_dir(&self, _name: &str) -> Option<PathBuf> {
+        None
+    }
 }
 
 /// A vault folder on the local disk.
@@ -251,16 +261,22 @@ impl VaultFs for PlainFs {
             let Ok(real) = self.resolve(&path) else {
                 continue;
             };
-            let entry_type = if real.is_dir() {
+            let metadata = fs::metadata(&real).ok();
+            let entry_type = if metadata.as_ref().is_some_and(fs::Metadata::is_dir) {
                 EntryType::Dir
             } else {
                 EntryType::File
             };
+            let modified = metadata.and_then(|m| m.modified().ok());
             let is_link = entry.file_type().is_ok_and(|t| t.is_symlink());
             if is_link && entry_type == EntryType::Dir && real_dir.starts_with(&real) {
                 continue;
             }
-            entries.push(DirEntry { name, entry_type });
+            entries.push(DirEntry {
+                name,
+                entry_type,
+                modified,
+            });
         }
         Ok(entries)
     }
@@ -338,6 +354,13 @@ impl VaultFs for PlainFs {
             fs::TryLockError::Error(e) => e,
         })?;
         Ok(VaultLock(Box::new(file)))
+    }
+
+    /// In the vault's `.vault/`, where Orbit keeps its own things.
+    fn cache_dir(&self, name: &str) -> Option<PathBuf> {
+        let dir = self.root.join(ORBIT_DIR).join(name);
+        fs::create_dir_all(&dir).ok()?;
+        Some(dir)
     }
 
     /// Through a symlink, the link's target is replaced and the link kept.

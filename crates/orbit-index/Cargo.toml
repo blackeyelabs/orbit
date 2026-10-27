@@ -4,4 +4,4 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-orbit-core.workspace = true
+tantivy.workspace = true

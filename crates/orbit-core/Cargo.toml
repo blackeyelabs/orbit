@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 md-engine.workspace = true
 nucleo-matcher.workspace = true
+orbit-index.workspace = true
 orbit-fs.workspace = true
 serde.workspace = true
 serde_json.workspace = true

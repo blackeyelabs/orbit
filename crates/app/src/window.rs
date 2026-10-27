@@ -4,12 +4,17 @@
 use std::{
     collections::{HashMap, HashSet},
     rc::Rc,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::list::{ListEvent, ListItem, ListState};
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::tree::{TreeItem, TreeState, tree};
@@ -17,17 +22,19 @@ use gpui_kit::component::{ActiveTheme as _, Sizable as _, TitleBar, WindowExt as
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use orbit_core::{
-    Backlink, EntryKind, Session, SessionTab, TagCount, TreeNode, Vault, VaultPath, Watch, same_tag,
+    Backlink, EntryKind, IndexingProgress, SearchResults, Session, SessionTab, TagCount, TreeNode,
+    Vault, VaultPath, Watch, same_tag,
 };
 
 use crate::appearance::{self, AppSettings};
 use crate::commands::{
     CloseTab, CommandPalette, DeleteNote, MoveNote, NewFolder, OpenAnotherVault, OpenSettings,
-    QuickSwitcher, RenameNote, ToggleRightPanel, ToggleSidebar,
+    QuickSwitcher, RenameNote, SearchVault, ToggleRightPanel, ToggleSidebar,
 };
 use crate::file_actions::{self, NewNote};
 use crate::note_editor::{NoteEditor, NoteEditorEvent};
 use crate::right_panel;
+use crate::search_panel;
 use crate::settings_view::AppearancePane;
 use crate::switcher::{self, Chosen, Switcher};
 use crate::vaults;
@@ -37,6 +44,11 @@ use crate::vaults;
 const TITLE_BAR_HEIGHT: f32 = 2.5;
 const SIDEBAR_WIDTH: f32 = 17.5;
 const STATUS_BAR_HEIGHT: f32 = 1.75;
+
+/// Notes a search lists at most.
+const SEARCH_LIMIT: usize = 50;
+/// How often indexing progress is shown.
+const INDEXING_TICK: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// The key context of the window's own shortcuts.
 pub const KEY_CONTEXT: &str = "OrbitWindow";
@@ -75,6 +87,14 @@ pub struct OrbitWindow {
     panel_data: PanelData,
     /// The tag chosen in the right panel, to list its notes.
     chosen_tag: Option<String>,
+    /// Vault search's query field, atop the sidebar.
+    search_input: Entity<InputState>,
+    /// What's searched for and what was found, while the field isn't empty.
+    search: Option<(String, SearchResults)>,
+    /// Searching, off the UI thread.
+    searching: Option<Task<()>>,
+    /// While the vault is being indexed.
+    indexing: Option<IndexingProgress>,
     /// The Switcher, while it's open.
     switcher: Option<(Entity<ListState<Switcher>>, Subscription)>,
     /// Finding what the right panel shows, off the UI thread.
@@ -116,15 +136,22 @@ impl OrbitWindow {
             chosen_tag: None,
             refreshing_panel: None,
             switcher: None,
+            search_input: cx.new(|cx| InputState::new(window, cx).placeholder("Search the vault")),
+            search: None,
+            searching: None,
+            indexing: None,
             error: None,
             _watch: None,
             restoring: false,
         };
         this.refresh_tree(&HashSet::new(), cx);
-        // Off the UI thread, so the first preview doesn't wait for it.
-        let vault = this.vault.clone();
-        cx.background_spawn(async move { vault.index_links() })
-            .detach();
+        cx.subscribe(&this.search_input, |this, _, event: &InputEvent, cx| {
+            if let InputEvent::Change = event {
+                this.run_search(cx);
+            }
+        })
+        .detach();
+        this.index_vault(cx);
         this.watch_vault(cx);
         this.restore_session(window, cx);
         this
@@ -185,6 +212,74 @@ impl OrbitWindow {
             .position(|t| t.editor.read(cx).path() == path)
     }
 
+    /// Indexes the vault for links and search, off the UI thread (so the
+    /// first preview doesn't wait for it), showing how far it's got.
+    fn index_vault(&mut self, cx: &mut Context<Self>) {
+        let vault = self.vault.clone();
+        let done = Arc::new(AtomicBool::new(false));
+        cx.background_spawn({
+            let done = done.clone();
+            async move {
+                vault.index_links();
+                vault.index_search();
+                done.store(true, Ordering::Release);
+            }
+        })
+        .detach();
+        let vault = self.vault.clone();
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(INDEXING_TICK).await;
+                let finished = done.load(Ordering::Acquire);
+                let progress = vault.search_progress();
+                let shown = this.update(cx, |this, cx| {
+                    this.indexing = progress.filter(|_| !finished);
+                    if finished {
+                        // Results found meanwhile may have been incomplete.
+                        this.run_search(cx);
+                    }
+                    cx.notify();
+                });
+                if finished || shown.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Searches the vault for what's in the search field, off the UI thread.
+    fn run_search(&mut self, cx: &mut Context<Self>) {
+        let query = self.search_input.read(cx).value().trim().to_string();
+        if query.is_empty() {
+            self.search = None;
+            self.searching = None;
+            cx.notify();
+            return;
+        }
+        let vault = self.vault.clone();
+        let found = cx.background_spawn({
+            let query = query.clone();
+            async move { vault.search(&query, SEARCH_LIMIT) }
+        });
+        self.searching = Some(cx.spawn(async move |this, cx| {
+            let found = found.await;
+            this.update(cx, |this, cx| {
+                this.search = Some((query, found));
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    /// To the search field, the sidebar shown.
+    fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.left_panel_open = true;
+        self.search_input
+            .update(cx, |input, cx| input.focus(window, cx));
+        cx.notify();
+    }
+
     /// Follows changes other apps, git or sync make while the vault is open.
     fn watch_vault(&mut self, cx: &mut Context<Self>) {
         let (tx, rx) = async_channel::unbounded();
@@ -213,6 +308,19 @@ impl OrbitWindow {
         let expanded = self.expanded_folders(cx);
         self.refresh_tree(&expanded, cx);
         self.refresh_right_panel(cx);
+        // Indexed now, off the UI thread, rather than at the next search.
+        let vault = self.vault.clone();
+        let updated = cx.background_spawn(async move { vault.update_search() });
+        cx.spawn(async move |this, cx| {
+            updated.await;
+            this.update(cx, |this, cx| {
+                if this.search.is_some() {
+                    this.run_search(cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
         for tab in &self.tabs {
             let affected = paths
                 .iter()
@@ -747,7 +855,7 @@ impl OrbitWindow {
             ))
     }
 
-    fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_sidebar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let view = cx.entity().downgrade();
         let entries = self.entries.clone();
         let (menu_view, menu_entries, folders) =
@@ -810,55 +918,82 @@ impl OrbitWindow {
                     ),
             )
             .child(
-                div().flex_1().min_h_0().child(
-                    tree(&self.tree, move |ix, entry, _selected, _, cx| {
-                        let id = entry.item().id.clone();
-                        let entry_info = entries.get(&id);
-                        let kind = entry_info.map(|e| e.kind);
-                        let icon = match kind {
-                            Some(EntryKind::Folder) if entry.is_expanded() => IconName::FolderOpen,
-                            Some(EntryKind::Folder) => IconName::FolderClosed,
-                            Some(EntryKind::Note) => IconName::FileText,
-                            _ => IconName::File,
-                        };
-                        let is_unsaved = entry_info.is_some_and(|e| unsaved.contains(&e.path));
-                        let mut item = ListItem::new(ix)
-                            .pl(px(12. + 16. * entry.depth() as f32))
-                            .child(
-                                h_flex()
-                                    .gap_2()
-                                    .child(icon)
-                                    .child(entry.item().label.clone())
-                                    .when(is_unsaved, |this| this.child(unsaved_dot(cx))),
-                            );
-                        if let Some(TreeEntryInfo {
-                            path,
-                            kind: EntryKind::Note,
-                        }) = entry_info.cloned()
-                        {
-                            let view = view.clone();
-                            item = item.on_click(move |_, window, cx| {
-                                let path = path.clone();
-                                view.update(cx, |this, cx| this.open_note(path, window, cx))
-                                    .ok();
-                            });
-                        }
-                        item
-                    })
-                    .context_menu(move |_, entry, menu, _, _| {
-                        match menu_entries.get(&entry.item().id) {
-                            Some(info) => file_actions::tree_menu(
-                                menu,
-                                menu_view.clone(),
-                                info.path.clone(),
-                                info.kind,
-                                folders.clone(),
-                            ),
-                            None => menu,
-                        }
-                    }),
+                div().px_3().pb_2().child(
+                    Input::new(&self.search_input)
+                        .small()
+                        .prefix(IconName::Search)
+                        .when(self.search.is_none(), |input| {
+                            input.suffix(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .children(Kbd::binding_for_action(
+                                        &SearchVault,
+                                        Some(KEY_CONTEXT),
+                                        window,
+                                    )),
+                            )
+                        })
+                        .cleanable(true),
                 ),
             )
+            .when_some(self.search.as_ref(), |this, (query, found)| {
+                this.child(search_panel::render(query, found, cx))
+            })
+            .when(self.search.is_none(), |this| {
+                this.child(
+                    div().flex_1().min_h_0().child(
+                        tree(&self.tree, move |ix, entry, _selected, _, cx| {
+                            let id = entry.item().id.clone();
+                            let entry_info = entries.get(&id);
+                            let kind = entry_info.map(|e| e.kind);
+                            let icon = match kind {
+                                Some(EntryKind::Folder) if entry.is_expanded() => {
+                                    IconName::FolderOpen
+                                }
+                                Some(EntryKind::Folder) => IconName::FolderClosed,
+                                Some(EntryKind::Note) => IconName::FileText,
+                                _ => IconName::File,
+                            };
+                            let is_unsaved = entry_info.is_some_and(|e| unsaved.contains(&e.path));
+                            let mut item = ListItem::new(ix)
+                                .pl(px(12. + 16. * entry.depth() as f32))
+                                .child(
+                                    h_flex()
+                                        .gap_2()
+                                        .child(icon)
+                                        .child(entry.item().label.clone())
+                                        .when(is_unsaved, |this| this.child(unsaved_dot(cx))),
+                                );
+                            if let Some(TreeEntryInfo {
+                                path,
+                                kind: EntryKind::Note,
+                            }) = entry_info.cloned()
+                            {
+                                let view = view.clone();
+                                item = item.on_click(move |_, window, cx| {
+                                    let path = path.clone();
+                                    view.update(cx, |this, cx| this.open_note(path, window, cx))
+                                        .ok();
+                                });
+                            }
+                            item
+                        })
+                        .context_menu(move |_, entry, menu, _, _| {
+                            match menu_entries.get(&entry.item().id) {
+                                Some(info) => file_actions::tree_menu(
+                                    menu,
+                                    menu_view.clone(),
+                                    info.path.clone(),
+                                    info.kind,
+                                    folders.clone(),
+                                ),
+                                None => menu,
+                            }
+                        }),
+                    ),
+                )
+            })
     }
 
     fn render_centre(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -946,6 +1081,10 @@ impl OrbitWindow {
             Some(editor) => editor.summary_text(cx),
             None => self.vault.name().to_string().into(),
         };
+        let right: SharedString = match self.indexing {
+            Some(progress) => format!("{} · {right}", search_panel::progress_text(progress)).into(),
+            None => right,
+        };
         let failed = self.error.is_some() || editor.is_some_and(|e| e.has_failed());
         h_flex()
             .h(rems(STATUS_BAR_HEIGHT))
@@ -980,6 +1119,9 @@ impl Render for OrbitWindow {
             .on_action(cx.listener(|this, _: &NewNote, window, cx| {
                 this.new_note(VaultPath::root(), window, cx)
             }))
+            .on_action(
+                cx.listener(|this, _: &SearchVault, window, cx| this.focus_search(window, cx)),
+            )
             .on_action(
                 cx.listener(|this, _: &QuickSwitcher, window, cx| {
                     this.open_switcher("", window, cx)
@@ -1030,7 +1172,7 @@ impl Render for OrbitWindow {
                     .flex_1()
                     .min_h_0()
                     .when(self.left_panel_open, |this| {
-                        this.child(self.render_sidebar(cx))
+                        this.child(self.render_sidebar(window, cx))
                     })
                     .child(self.render_centre(cx))
                     .when(self.right_panel_open, |this| {

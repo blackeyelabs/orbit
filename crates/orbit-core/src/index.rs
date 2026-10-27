@@ -12,11 +12,9 @@ use std::{
     ops::Range,
 };
 
+use crate::excerpt::excerpt;
 use crate::tags::{self, TagCount};
 use crate::{EntryKind, TreeNode, VaultPath, is_plain_text_note, note_title, without_md};
-
-/// Characters of context kept on either side of a link.
-const CONTEXT_CHARS: usize = 60;
 
 /// A note that links to another, with each of its links there.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -395,43 +393,11 @@ fn folder_of(path: &str) -> &str {
     path.rsplit_once('/').map_or("", |(folder, _)| folder)
 }
 
-/// The link at `span` in its line of `source`, cut to [`CONTEXT_CHARS`]
-/// either side at word boundaries.
+/// The link at `span`, in the words around it on its line.
 fn mention(source: &str, span: Range<usize>) -> Mention {
-    let line_start = source[..span.start].rfind('\n').map_or(0, |n| n + 1);
-    let line_end = source[span.end..]
-        .find(['\n', '\r'])
-        .map_or(source.len(), |n| span.end + n);
-    let before = source[line_start..span.start].trim_start();
-    let after = source[span.end..line_end].trim_end();
-    let (before, cut_before) = match before.char_indices().rev().nth(CONTEXT_CHARS - 1) {
-        // Start at the next word, if there's one before the link.
-        Some((cut, _)) => {
-            let rest = &before[cut..];
-            let word = rest.find(char::is_whitespace).map_or(0, |n| n + 1);
-            (rest[word..].trim_start(), true)
-        }
-        None => (before, false),
-    };
-    let (after, cut_after) = match after.char_indices().nth(CONTEXT_CHARS) {
-        Some((cut, _)) => {
-            let kept = &after[..cut];
-            let word = kept.rfind(char::is_whitespace).unwrap_or(cut);
-            (kept[..word].trim_end(), true)
-        }
-        None => (after, false),
-    };
-    let mut context = String::new();
-    if cut_before {
-        context.push('…');
+    let excerpt = excerpt(source, span.clone(), &[span]);
+    Mention {
+        link: excerpt.highlights[0].clone(),
+        context: excerpt.text,
     }
-    context.push_str(before);
-    let link = context.len()..context.len() + span.len();
-    // A markdown link's text can run over a line end.
-    context.push_str(&source[span].replace(['\n', '\r'], " "));
-    context.push_str(after);
-    if cut_after {
-        context.push('…');
-    }
-    Mention { context, link }
 }

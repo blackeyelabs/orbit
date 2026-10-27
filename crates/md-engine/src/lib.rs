@@ -25,6 +25,11 @@ pub fn word_count(source: &str) -> usize {
     source[front_matter_len(source)..].unicode_words().count()
 }
 
+/// A note's text after its front matter.
+pub fn without_front_matter(source: &str) -> &str {
+    &source[front_matter_len(source)..]
+}
+
 /// The byte length of a leading YAML front matter block (with any BOM), or 0.
 fn front_matter_len(source: &str) -> usize {
     let start = if source.starts_with('\u{feff}') { 3 } else { 0 };
