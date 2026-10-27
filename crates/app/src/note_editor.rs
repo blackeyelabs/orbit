@@ -10,7 +10,8 @@ use std::{
     time::Duration,
 };
 
-use gpui_kit::base::{h_flex, v_flex};
+use gpui_kit::base::input::{Copy as CopyText, Cut};
+use gpui_kit::base::{TextSelection, h_flex, v_flex};
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::Sizable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -20,6 +21,7 @@ use gpui_kit::*;
 use md_engine::{Format, Heading, TextEdit, format_edit, headings, word_count};
 use orbit_core::{DiskCheck, OpenNote, Trouble, Vault, VaultPath, Zeroizing, is_plain_text_note};
 
+use crate::clipboard_guard::{self, Copying};
 use crate::link_completion::LinkCompletions;
 use crate::preview::{FollowLink, PreviewContext, preview};
 
@@ -186,6 +188,13 @@ pub struct NoteEditor {
     autosave: Option<Task<()>>,
     /// The scroll restored from the session, until the editor is laid out.
     restored_scroll: Option<f32>,
+    /// While a Copy or Cut agreed to in a protected note runs: it goes
+    /// ahead.
+    copy_agreed: bool,
+    /// Held by the note's whole view, so the protected preview's selection
+    /// goes when focus leaves the note (else Copy elsewhere would take it).
+    focus: FocusHandle,
+    _focus_out: Subscription,
     _subscription: Subscription,
 }
 
@@ -228,6 +237,12 @@ impl NoteEditor {
             .ok();
         });
         let preview = PreviewContext::new(vault.clone(), path.clone(), follow.clone());
+        let focus = cx.focus_handle();
+        let focus_out = cx.on_focus_out(&focus, window, |this, _, window, cx| {
+            if this.is_protected() {
+                TextSelection::clear(window, cx);
+            }
+        });
         let shown = preview.rewrite_links(&text).into();
         NoteEditor {
             preview,
@@ -246,8 +261,55 @@ impl NoteEditor {
             saved_elsewhere: None,
             autosave: None,
             restored_scroll: None,
+            copy_agreed: false,
+            focus,
+            _focus_out: focus_out,
             _subscription: subscription,
         }
+    }
+
+    /// Copy or Cut in a protected note, before the editor or preview has
+    /// it: asked about first, then cleared from the clipboard later
+    /// (clipboard_guard). In the editor, once agreed, the editor copies as
+    /// it would have (every cursor's selection); even with nothing
+    /// selected it asks, as other cursors may have some. The preview's
+    /// selection is taken now, since a dialog clears it.
+    fn copy_protected(&mut self, copying: Copying, window: &mut Window, cx: &mut Context<Self>) {
+        if self.copy_agreed {
+            return;
+        }
+        let editor = self.source.read(cx).focus_handle(cx);
+        if editor.contains_focused(window, cx) {
+            cx.stop_propagation();
+            let this = cx.entity().downgrade();
+            let copy = move |window: &mut Window, cx: &mut App| {
+                this.update(cx, |this, _| this.copy_agreed = true).ok()?;
+                editor.dispatch_action(copying.action().as_ref(), window, cx);
+                this.update(cx, |this, _| this.copy_agreed = false).ok()?;
+                clipboard_guard::clipboard_text(cx)
+            };
+            return clipboard_guard::ask(copying, copy, window, cx);
+        }
+        // The preview has nothing to cut.
+        if copying == Copying::Cut {
+            return;
+        }
+        let selected = Zeroizing::new(TextSelection::selected_text(window, cx));
+        let selected = Zeroizing::new(selected.trim().to_string());
+        if selected.is_empty() {
+            return;
+        }
+        cx.stop_propagation();
+        let copy = move |_: &mut Window, cx: &mut App| {
+            cx.write_to_clipboard(ClipboardItem::new_string(selected.to_string()));
+            Some(selected.clone())
+        };
+        clipboard_guard::ask(copying, copy, window, cx);
+    }
+
+    /// Whether the note is in a protected folder (unlocked, as it's open).
+    fn is_protected(&self) -> bool {
+        self.vault.protected_folder_of(&self.path).is_some()
     }
 
     pub fn path(&self) -> &VaultPath {
@@ -759,9 +821,19 @@ impl Render for NoteEditor {
                         )),
                 )
             });
+        let protected = self.is_protected();
         v_flex()
             .key_context(KEY_CONTEXT)
+            .track_focus(&self.focus)
             .size_full()
+            .when(protected, |this| {
+                this.capture_action(cx.listener(|this, _: &CopyText, window, cx| {
+                    this.copy_protected(Copying::Copy, window, cx)
+                }))
+                .capture_action(cx.listener(|this, _: &Cut, window, cx| {
+                    this.copy_protected(Copying::Cut, window, cx)
+                }))
+            })
             .children(banner)
             .child(body)
     }

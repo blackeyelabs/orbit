@@ -14,6 +14,7 @@ use gpui_kit::*;
 use orbit_core::{ThemeChoice, Vault, VaultPath};
 
 use crate::appearance::AppSettings;
+use crate::clipboard_guard;
 use crate::protection_manage;
 use crate::window::OrbitWindow;
 
@@ -238,6 +239,10 @@ impl SecurityPane {
     }
 }
 
+/// How long text copied from a protected note stays in the clipboard, in
+/// seconds.
+const CLEAR_CLIPBOARD_CHOICES: [u16; 4] = [10, 30, 60, 120];
+
 /// Opens one of the dialogs that manage an unlocked protected folder.
 type OpenDialog = fn(WeakEntity<OrbitWindow>, Arc<Vault>, VaultPath, &mut Window, &mut App);
 
@@ -261,6 +266,19 @@ impl Render for SecurityPane {
             };
             button.on_click(cx.listener(move |_, _, window, cx| {
                 change(window, cx, |s| s.auto_lock_minutes = minutes);
+            }))
+        });
+        let clear_choices = CLEAR_CLIPBOARD_CHOICES.iter().map(|&seconds| {
+            let label = clipboard_guard::after(seconds);
+            let button = Button::new(("clear-clipboard", usize::from(seconds)))
+                .label(label)
+                .small();
+            let button = match settings.clear_clipboard_seconds == seconds {
+                true => button.primary(),
+                false => button.outline(),
+            };
+            button.on_click(cx.listener(move |_, _, window, cx| {
+                change(window, cx, |s| s.clear_clipboard_seconds = seconds);
             }))
         });
         v_flex()
@@ -303,6 +321,23 @@ impl Render for SecurityPane {
                         let checked = *checked;
                         change(window, cx, |s| s.lock_on_screen_lock = checked);
                     })),
+                cx,
+            ))
+            .child(row(
+                "Ask before copying",
+                "Copying from a protected note asks first.",
+                Switch::new("ask-before-protected-copy")
+                    .checked(settings.ask_before_protected_copy)
+                    .on_click(cx.listener(|_, checked: &bool, window, cx| {
+                        let checked = *checked;
+                        change(window, cx, |s| s.ask_before_protected_copy = checked);
+                    })),
+                cx,
+            ))
+            .child(row(
+                "Clear the clipboard after",
+                "Text copied from a protected note is cleared from the clipboard.",
+                h_flex().gap_1().children(clear_choices),
                 cx,
             ))
             .child(

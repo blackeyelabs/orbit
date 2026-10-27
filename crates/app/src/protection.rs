@@ -461,7 +461,7 @@ pub(crate) fn recovery_key(
                         .icon(IconName::Copy)
                         .label("Copy")
                         .on_click(move |_, _, cx| {
-                            cx.write_to_clipboard(ClipboardItem::new_string(copied.to_string()))
+                            crate::clipboard_guard::copy_secret(copied.clone(), cx)
                         }),
                 )
                 .child(

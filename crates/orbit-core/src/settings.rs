@@ -41,6 +41,11 @@ pub struct Settings {
     /// Whether the warning on moving a note into a protected folder (its
     /// old plain text may still be recoverable) was shown: it's shown once.
     pub warned_moving_in: bool,
+    /// Copying from a protected note asks first, until "Don't ask again".
+    pub ask_before_protected_copy: bool,
+    /// Text copied from a protected note leaves the clipboard after this
+    /// many seconds: never zero, so it always does.
+    pub clear_clipboard_seconds: u16,
 }
 
 impl Default for Settings {
@@ -53,6 +58,8 @@ impl Default for Settings {
             lock_on_suspend: true,
             lock_on_screen_lock: true,
             warned_moving_in: false,
+            ask_before_protected_copy: true,
+            clear_clipboard_seconds: 30,
         }
     }
 }
@@ -97,6 +104,15 @@ impl Settings {
         }
         if let Some(warned) = field("warned_moving_in").and_then(|v| v.as_bool()) {
             settings.warned_moving_in = warned;
+        }
+        if let Some(ask) = field("ask_before_protected_copy").and_then(|v| v.as_bool()) {
+            settings.ask_before_protected_copy = ask;
+        }
+        if let Some(seconds) = field("clear_clipboard_seconds")
+            .and_then(|v| v.as_u64())
+            .filter(|s| (1..=u64::from(u16::MAX)).contains(s))
+        {
+            settings.clear_clipboard_seconds = seconds as u16;
         }
         settings
     }

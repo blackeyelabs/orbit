@@ -4,6 +4,7 @@
 
 mod appearance;
 mod auto_lock;
+mod clipboard_guard;
 mod commands;
 mod diagram_block;
 mod file_actions;

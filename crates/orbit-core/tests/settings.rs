@@ -106,3 +106,26 @@ fn the_moving_in_warning_is_remembered_once_shown() {
     settings.save(dir.path()).unwrap();
     assert!(Settings::load(dir.path()).warned_moving_in);
 }
+
+#[test]
+fn copying_from_protected_notes_asks_and_clears_after_30_seconds_by_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = Settings::load(dir.path());
+    assert!(settings.ask_before_protected_copy);
+    assert_eq!(settings.clear_clipboard_seconds, 30);
+
+    fs::write(
+        dir.path().join("settings.json"),
+        r#"{"ask_before_protected_copy": false, "clear_clipboard_seconds": 0}"#,
+    )
+    .unwrap();
+    let mut settings = Settings::load(dir.path());
+    assert!(!settings.ask_before_protected_copy, "don't ask again");
+    assert_eq!(
+        settings.clear_clipboard_seconds, 30,
+        "never zero: protected text always leaves the clipboard"
+    );
+    settings.clear_clipboard_seconds = 120;
+    settings.save(dir.path()).unwrap();
+    assert_eq!(Settings::load(dir.path()).clear_clipboard_seconds, 120);
+}
