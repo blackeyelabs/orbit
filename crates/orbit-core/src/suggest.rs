@@ -1,10 +1,9 @@
-//! Wikilink autocomplete: notes fuzzy-matched by path, name and aliases.
+//! Wikilink autocomplete: notes fuzzy-matched by path and aliases, each
+//! with the link Orbit writes for it.
 
-use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
-use nucleo_matcher::{Config, Matcher, Utf32Str};
-
+use crate::VaultPath;
+use crate::fuzzy;
 use crate::index::Files;
-use crate::{VaultPath, without_md};
 
 /// What a typed `[[query` suggests.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -37,46 +36,14 @@ impl LinkSuggestion {
     }
 }
 
-/// Up to `limit` notes matching `query`, best first; for an empty query,
-/// the first notes in path order.
+/// Up to `limit` notes for a typed `[[query`, each with its link.
 pub(crate) fn suggest(files: &Files, query: &str, limit: usize) -> Vec<LinkSuggestion> {
-    let pattern = Pattern::new(
-        query,
-        CaseMatching::Ignore,
-        Normalization::Smart,
-        AtomKind::Fuzzy,
-    );
-    let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
-    let mut buf = Vec::new();
-    let mut score = |text: &str| pattern.score(Utf32Str::new(text, &mut buf), &mut matcher);
-    let mut found: Vec<(u32, &VaultPath, Option<&String>)> = files
-        .notes()
-        .filter_map(|(path, aliases)| {
-            // A markdown note's path without `.md`, as it's written.
-            let written = without_md(path.as_str());
-            let by_path = score(written).map(|s| (s, None));
-            let by_alias = aliases
-                .iter()
-                .filter_map(|alias| score(alias).map(|s| (s, Some(alias))))
-                .max_by_key(|(s, _)| *s);
-            // The path wins a tie.
-            let (score, alias) = match (by_path, by_alias) {
-                (Some(p), Some(a)) if a.0 > p.0 => a,
-                (Some(p), _) => p,
-                (None, a) => a?,
-            };
-            Some((score, path, alias))
-        })
-        .collect();
-    // Best first; then shorter paths, then path order.
-    found.sort_by_key(|(score, path, _)| (std::cmp::Reverse(*score), path.as_str().len()));
-    found
+    fuzzy::find_notes(files, query, limit)
         .into_iter()
-        .take(limit)
-        .map(|(_, path, alias)| LinkSuggestion {
-            link: files.link_text(path),
-            path: path.clone(),
-            alias: alias.cloned(),
+        .map(|found| LinkSuggestion {
+            link: files.link_text(&found.path),
+            path: found.path,
+            alias: found.alias,
         })
         .collect()
 }

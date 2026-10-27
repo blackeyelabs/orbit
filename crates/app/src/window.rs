@@ -10,7 +10,7 @@ use std::{
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::list::ListItem;
+use gpui_kit::component::list::{ListEvent, ListItem, ListState};
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::tree::{TreeItem, TreeState, tree};
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, TitleBar, WindowExt as _};
@@ -21,10 +21,15 @@ use orbit_core::{
 };
 
 use crate::appearance::{self, AppSettings};
+use crate::commands::{
+    CloseTab, CommandPalette, DeleteNote, MoveNote, NewFolder, OpenAnotherVault, OpenSettings,
+    QuickSwitcher, RenameNote, ToggleRightPanel, ToggleSidebar,
+};
 use crate::file_actions::{self, NewNote};
 use crate::note_editor::{NoteEditor, NoteEditorEvent};
 use crate::right_panel;
 use crate::settings_view::AppearancePane;
+use crate::switcher::{self, Chosen, Switcher};
 use crate::vaults;
 
 // Canvas sizes at 100% (40, 280 and 28 px), in rems so the Interface size
@@ -32,6 +37,9 @@ use crate::vaults;
 const TITLE_BAR_HEIGHT: f32 = 2.5;
 const SIDEBAR_WIDTH: f32 = 17.5;
 const STATUS_BAR_HEIGHT: f32 = 1.75;
+
+/// The key context of the window's own shortcuts.
+pub const KEY_CONTEXT: &str = "OrbitWindow";
 
 /// What a tree row stands for.
 #[derive(Clone)]
@@ -53,6 +61,8 @@ impl OpenTab {
 
 pub struct OrbitWindow {
     vault: Arc<Vault>,
+    /// Focused when nothing else is, so the window's shortcuts still work.
+    focus: FocusHandle,
     tree: Entity<TreeState>,
     /// Tree item id → the entry it stands for. Shared with the tree's row
     /// renderer, which runs every frame.
@@ -65,6 +75,8 @@ pub struct OrbitWindow {
     panel_data: PanelData,
     /// The tag chosen in the right panel, to list its notes.
     chosen_tag: Option<String>,
+    /// The Switcher, while it's open.
+    switcher: Option<(Entity<ListState<Switcher>>, Subscription)>,
     /// Finding what the right panel shows, off the UI thread.
     refreshing_panel: Option<Task<()>>,
     error: Option<SharedString>,
@@ -93,6 +105,7 @@ impl OrbitWindow {
         });
         let mut this = OrbitWindow {
             vault,
+            focus: cx.focus_handle(),
             tree: cx.new(|cx| TreeState::new(cx)),
             entries: Rc::default(),
             tabs: Vec::new(),
@@ -102,6 +115,7 @@ impl OrbitWindow {
             panel_data: PanelData::default(),
             chosen_tag: None,
             refreshing_panel: None,
+            switcher: None,
             error: None,
             _watch: None,
             restoring: false,
@@ -592,6 +606,86 @@ impl OrbitWindow {
         failures == 0
     }
 
+    fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        self.left_panel_open = !self.left_panel_open;
+        cx.notify();
+    }
+
+    fn toggle_right_panel(&mut self, cx: &mut Context<Self>) {
+        self.right_panel_open = !self.right_panel_open;
+        self.refresh_right_panel(cx);
+        cx.notify();
+    }
+
+    /// Opens the Switcher on `query`: `""` for notes, `">"` for commands.
+    fn open_switcher(&mut self, query: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let note_open = self.active().is_some();
+        let state = Switcher::open(self.vault.clone(), note_open, query, window, cx);
+        let subscription =
+            cx.subscribe_in(
+                &state,
+                window,
+                |this, state, event, window, cx| match event {
+                    ListEvent::Confirm(_) => {
+                        let chosen =
+                            state.update(cx, |state, _| state.delegate_mut().take_chosen());
+                        this.close_switcher(window, cx);
+                        match chosen {
+                            Some(Chosen::Note { path, new_tab }) => {
+                                this.open_note_from_switcher(path, new_tab, window, cx)
+                            }
+                            Some(Chosen::Command(command)) => {
+                                let action = command.action();
+                                window.defer(cx, move |window, cx| {
+                                    window.dispatch_action(action, cx)
+                                });
+                            }
+                            None => {}
+                        }
+                    }
+                    ListEvent::Cancel => this.close_switcher(window, cx),
+                    ListEvent::Select(_) => {}
+                },
+            );
+        self.switcher = Some((state, subscription));
+        cx.notify();
+    }
+
+    /// Closes the Switcher, back to the open note.
+    fn close_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.switcher = None;
+        // Before any command chosen is dispatched, which goes where focus is.
+        match self.active() {
+            Some(tab) => NoteEditor::focus(&tab.editor, window, cx),
+            None => self.focus.focus(window, cx),
+        }
+        cx.notify();
+    }
+
+    /// Opens a note chosen in the Switcher: in a new tab, or in place of the
+    /// open note (saved first). A note open already is shown where it is.
+    fn open_note_from_switcher(
+        &mut self,
+        path: VaultPath,
+        new_tab: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // If the open note can't be saved, it stays, and this opens beside it.
+        let replace = self
+            .active_tab
+            .filter(|&old| !new_tab && self.tab_of(&path, cx).is_none() && self.save_tab(old, cx));
+        let before = self.tabs.len();
+        self.open_note(path, window, cx);
+        if let Some(old) = replace
+            && self.tabs.len() > before
+        {
+            let opened = self.tabs.pop().expect("a tab was just opened");
+            self.tabs[old] = opened;
+            self.show_tab(old, window, cx);
+        }
+    }
+
     fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let view = cx.new(|_| AppearancePane);
         window.open_dialog(cx, move |dialog, window, _| {
@@ -634,10 +728,7 @@ impl OrbitWindow {
                 "Toggle sidebar",
                 self.left_panel_open,
                 (IconName::PanelLeftClose, IconName::PanelLeft),
-                cx.listener(|this, _, _, cx| {
-                    this.left_panel_open = !this.left_panel_open;
-                    cx.notify();
-                }),
+                cx.listener(|this, _, _, cx| this.toggle_sidebar(cx)),
             ))
             .child(div().flex_1().text_center().text_sm().child(title))
             .child(
@@ -652,11 +743,7 @@ impl OrbitWindow {
                 "Toggle right panel",
                 self.right_panel_open,
                 (IconName::PanelRightClose, IconName::PanelRight),
-                cx.listener(|this, _, _, cx| {
-                    this.right_panel_open = !this.right_panel_open;
-                    this.refresh_right_panel(cx);
-                    cx.notify();
-                }),
+                cx.listener(|this, _, _, cx| this.toggle_right_panel(cx)),
             ))
     }
 
@@ -882,11 +969,57 @@ impl OrbitWindow {
 impl Render for OrbitWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let grain = AppSettings::get(cx).paper_grain;
+        // With nothing focused (the last tab closed), the window's shortcuts
+        // would reach nothing: the window takes focus.
+        if window.focused(cx).is_none() {
+            self.focus.focus(window, cx);
+        }
         v_flex()
-            .key_context(file_actions::KEY_CONTEXT)
+            .key_context(KEY_CONTEXT)
+            .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &NewNote, window, cx| {
                 this.new_note(VaultPath::root(), window, cx)
             }))
+            .on_action(
+                cx.listener(|this, _: &QuickSwitcher, window, cx| {
+                    this.open_switcher("", window, cx)
+                }),
+            )
+            .on_action(cx.listener(|this, _: &CommandPalette, window, cx| {
+                this.open_switcher(">", window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &NewFolder, window, cx| {
+                this.new_folder(VaultPath::root(), window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &RenameNote, window, cx| {
+                if let Some(path) = this.active_path(cx) {
+                    file_actions::ask_rename(this, path, EntryKind::Note, window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &MoveNote, window, cx| {
+                if let Some(path) = this.active_path(cx) {
+                    let view = cx.entity().downgrade();
+                    file_actions::ask_move(view, path, this.folders(), window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &DeleteNote, window, cx| {
+                if let Some(path) = this.active_path(cx) {
+                    file_actions::ask_delete(this, path, window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &CloseTab, _, cx| {
+                if let Some(ix) = this.active_tab {
+                    this.close_tab(ix, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
+            .on_action(cx.listener(|this, _: &ToggleRightPanel, _, cx| this.toggle_right_panel(cx)))
+            .on_action(
+                cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)),
+            )
+            .on_action(
+                cx.listener(|_, _: &OpenAnotherVault, _, cx| vaults::show_welcome(cx, |_| {})),
+            )
             .relative()
             .size_full()
             .bg(cx.theme().background)
@@ -906,6 +1039,17 @@ impl Render for OrbitWindow {
             )
             .child(self.render_status_bar(cx))
             .when(grain, |this| this.child(appearance::grain(window, cx)))
+            .when_some(self.switcher.as_ref(), |this, (state, _)| {
+                let view = cx.entity().downgrade();
+                this.child(switcher::render(
+                    state,
+                    move |window, cx| {
+                        view.update(cx, |this, cx| this.close_switcher(window, cx))
+                            .ok();
+                    },
+                    cx,
+                ))
+            })
     }
 }
 

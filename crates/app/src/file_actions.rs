@@ -17,15 +17,17 @@ use crate::window::OrbitWindow;
 actions!(
     file_actions,
     [
-        /// Ctrl+N: a new note at the vault root, opened in a tab.
+        /// A new note at the vault root, opened in a tab.
         NewNote
     ]
 );
 
-pub const KEY_CONTEXT: &str = "OrbitWindow";
-
 pub fn init(cx: &mut App) {
-    cx.bind_keys([KeyBinding::new("ctrl-n", NewNote, Some(KEY_CONTEXT))]);
+    cx.bind_keys([KeyBinding::new(
+        "ctrl-n",
+        NewNote,
+        Some(crate::window::KEY_CONTEXT),
+    )]);
 }
 
 /// The tree's right-click menu for one entry.
@@ -146,7 +148,7 @@ pub fn ask_rename(
 
 /// Asks which folder to move into: every folder except the entry's own and
 /// anything inside the entry.
-fn ask_move(
+pub fn ask_move(
     view: WeakEntity<OrbitWindow>,
     path: VaultPath,
     folders: Vec<VaultPath>,

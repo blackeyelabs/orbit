@@ -34,7 +34,7 @@ actions!(
     ]
 );
 
-const KEY_CONTEXT: &str = "NoteEditor";
+pub const KEY_CONTEXT: &str = "NoteEditor";
 
 /// How long typing must pause before the note saves itself.
 const AUTOSAVE_DELAY: Duration = Duration::from_millis(1500);

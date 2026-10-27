@@ -3,6 +3,7 @@
 //! Paper themes, grain) and forwards clicks to the Vault facade.
 
 mod appearance;
+mod commands;
 mod file_actions;
 #[cfg(unix)]
 mod instance;
@@ -11,6 +12,7 @@ mod note_editor;
 mod preview;
 mod right_panel;
 mod settings_view;
+mod switcher;
 mod vaults;
 mod welcome;
 mod window;
@@ -31,6 +33,8 @@ fn main() {
             appearance::init(cx);
             note_editor::init(cx);
             file_actions::init(cx);
+            commands::init(cx);
+            switcher::init(cx);
             vaults::init(cx);
             #[cfg(unix)]
             instance::listen(cx);

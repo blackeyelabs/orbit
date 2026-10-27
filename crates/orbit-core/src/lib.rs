@@ -4,6 +4,7 @@
 //! `orbit-api`); [`Settings`] holds the app-wide preferences beside it.
 //! Neither has a GPUI dependency.
 
+mod fuzzy;
 mod index;
 mod open_note;
 mod recent;
@@ -15,6 +16,7 @@ mod tags;
 use open_note::DiskVersion;
 pub use open_note::{DiskCheck, OpenNote, Trouble};
 
+pub use fuzzy::{CommandMatch, NoteMatch, command_query, match_commands};
 pub use index::{Backlink, Mention};
 pub use recent::{RecentVault, RecentVaults};
 pub use session::{Session, SessionTab};
@@ -294,6 +296,12 @@ impl Vault {
     /// ignoring case, in path order.
     pub fn notes_tagged(&self, tag: &str) -> Vec<VaultPath> {
         self.with_index(|files| files.notes_tagged(tag))
+    }
+
+    /// Up to `limit` notes for the Quick switcher's `query`, fuzzy-matched
+    /// on their paths and aliases ignoring case, best first.
+    pub fn find_notes(&self, query: &str, limit: usize) -> Vec<NoteMatch> {
+        self.with_index(|files| fuzzy::find_notes(files, query, limit))
     }
 
     /// The text Orbit writes a link to `path` with, between `[[` and `]]`:
