@@ -321,6 +321,21 @@ impl OrbitWindow {
         }
     }
 
+    /// Creates the note a link typed in `from` names, staying in `from`.
+    fn create_linked_note(&mut self, from: &VaultPath, link: &str, cx: &mut Context<Self>) {
+        match self.vault.create_linked_note(from, link) {
+            Ok(path) => {
+                let mut expanded = self.expanded_folders(cx);
+                expanded.insert(path.parent());
+                self.refresh_tree(&expanded, cx);
+                for tab in &self.tabs {
+                    tab.editor.update(cx, |editor, cx| editor.links_changed(cx));
+                }
+            }
+            Err(e) => self.report(&format!("create {link}"), e, cx),
+        }
+    }
+
     /// Reloads the tree from the vault, with the folders in `expanded` open.
     fn refresh_tree(&mut self, expanded: &HashSet<VaultPath>, cx: &mut Context<Self>) {
         let mut entries = HashMap::new();
@@ -515,6 +530,10 @@ impl OrbitWindow {
                             NoteEditorEvent::FollowLink(target) => {
                                 let from = editor.read(cx).path().clone();
                                 this.follow_link(&from, target, window, cx);
+                            }
+                            NoteEditorEvent::CreateLinkedNote(link) => {
+                                let from = editor.read(cx).path().clone();
+                                this.create_linked_note(&from, link, cx);
                             }
                         },
                     )

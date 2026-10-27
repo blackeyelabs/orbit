@@ -11,7 +11,7 @@ pub use formatting::{Format, TextEdit, format_edit};
 pub use front_matter::{aliases, front_matter_tags};
 pub use links::{
     Heading, Link, LinkStyle, has_scheme, heading_offset, headings, links, percent_decode,
-    split_target,
+    split_target, typed_link,
 };
 pub use tags::inline_tags;
 

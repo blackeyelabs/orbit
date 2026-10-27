@@ -6,6 +6,7 @@ mod appearance;
 mod file_actions;
 #[cfg(unix)]
 mod instance;
+mod link_completion;
 mod note_editor;
 mod preview;
 mod right_panel;

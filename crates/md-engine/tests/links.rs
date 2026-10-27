@@ -2,7 +2,7 @@
 //! where each sits; front matter aliases; and finding a linked heading.
 //! How Obsidian parses the fixture vault is checked in orbit-core's tests.
 
-use md_engine::{Link, LinkStyle, aliases, heading_offset, links};
+use md_engine::{Link, LinkStyle, aliases, heading_offset, links, typed_link};
 
 fn found(source: &str) -> Vec<(String, String, bool, &str)> {
     links(source)
@@ -127,4 +127,25 @@ fn a_linked_heading_is_found_ignoring_case_and_nesting() {
         heading_offset("```\n# not a heading\n```\n", "not a heading"),
         None
     );
+}
+
+#[test]
+fn the_link_being_typed_is_found_before_the_caret() {
+    // Where the typed name starts, in the text before the caret.
+    assert_eq!(typed_link("See [["), Some(6));
+    assert_eq!(typed_link("See [[Pl"), Some(6));
+    assert_eq!(typed_link("[[a]] and ![[emb"), Some(13));
+    // In bytes.
+    assert_eq!(typed_link("Café [[Ün"), Some(8));
+    // Closed, or onto a heading, alias or block: not a name any more.
+    for done in [
+        "[[Plan]] after",
+        "[[Plan#Go",
+        "[[Plan|sh",
+        "[[Plan^b",
+        "[[Plan]",
+        "no link",
+    ] {
+        assert_eq!(typed_link(done), None, "{done:?}");
+    }
 }

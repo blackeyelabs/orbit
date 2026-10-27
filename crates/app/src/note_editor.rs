@@ -17,6 +17,7 @@ use gpui_kit::*;
 use md_engine::{Format, Heading, TextEdit, format_edit, headings, word_count};
 use orbit_core::{DiskCheck, OpenNote, Trouble, Vault, VaultPath, is_plain_text_note};
 
+use crate::link_completion::LinkCompletions;
 use crate::preview::{FollowLink, PreviewContext, preview};
 
 actions!(
@@ -135,6 +136,9 @@ pub enum NoteEditorEvent {
     Close,
     /// A link was clicked in the preview: its target, `Note#Heading`.
     FollowLink(String),
+    /// "Create … as a new note" was chosen for a link being typed: the
+    /// link, whose note is wanted now.
+    CreateLinkedNote(String),
 }
 
 impl EventEmitter<NoteEditorEvent> for NoteEditor {}
@@ -147,6 +151,8 @@ pub struct NoteEditor {
     preview: PreviewContext,
     /// Tells the window a link was clicked; kept for a new path's preview.
     follow: FollowLink,
+    /// Wikilink autocomplete, which links from this note.
+    links: Rc<LinkCompletions>,
     /// The source as of the last edit.
     text: SharedString,
     /// What the preview renders: the source with its links rewritten.
@@ -175,15 +181,21 @@ impl NoteEditor {
     ) -> Self {
         let path = note.path().clone();
         let mode = Mode::of(&path);
+        let links = Rc::new(LinkCompletions::new(vault.clone(), path.clone()));
         let source = cx.new(|cx| {
-            EditorState::new(window, cx)
+            let mut source = EditorState::new(window, cx)
                 .language(match mode {
                     Mode::Split => "markdown",
                     Mode::Source => "plaintext",
                 })
                 .line_number(false)
                 .soft_wrap(true)
-                .default_value(text.clone())
+                .default_value(text.clone());
+            source.lsp_mut().completion_provider = Some(links.clone());
+            source
+                .lsp_mut()
+                .set_completion_highlighter(LinkCompletions::highlighter());
+            source
         });
         let subscription = cx.subscribe(&source, |this, _, event: &InputEvent, cx| {
             if let InputEvent::Change = event {
@@ -202,6 +214,7 @@ impl NoteEditor {
         NoteEditor {
             preview,
             follow,
+            links,
             shown,
             saves: Saves::new(note),
             vault,
@@ -234,6 +247,7 @@ impl NoteEditor {
     }
 
     fn follow_path(&mut self, path: VaultPath, cx: &mut Context<Self>) {
+        self.links.set_note(path.clone());
         self.preview = PreviewContext::new(self.vault.clone(), path.clone(), self.follow.clone());
         self.mode = Mode::of(&path);
         self.outline = outline_of(self.mode, &self.text);
@@ -344,6 +358,10 @@ impl NoteEditor {
 
     fn edited(&mut self, cx: &mut Context<Self>) {
         self.set_text(self.source.read(cx).value(), cx);
+        let caret = self.source.read(cx).cursor();
+        if let Some(link) = self.links.accepted_create(&self.text, caret) {
+            cx.emit(NoteEditorEvent::CreateLinkedNote(link));
+        }
         self.saves.revision += 1;
         self.autosave = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(AUTOSAVE_DELAY).await;

@@ -13,7 +13,7 @@ use std::{
 };
 
 use crate::tags::{self, TagCount};
-use crate::{EntryKind, TreeNode, VaultPath, is_plain_text_note};
+use crate::{EntryKind, TreeNode, VaultPath, is_plain_text_note, note_title, without_md};
 
 /// Characters of context kept on either side of a link.
 const CONTEXT_CHARS: usize = 60;
@@ -197,21 +197,57 @@ impl Files {
             .or_else(|| self.resolve_alias(from, link))
     }
 
-    fn resolve_file(&self, from: &VaultPath, link: &str) -> Option<VaultPath> {
-        // The link's lowercased path, and the files with its name; a name
-        // with no such file is tried as a markdown note's.
-        let mut wanted = link.to_lowercase();
-        let mut name = base_name(&wanted).to_string();
-        let mut candidates = name
-            .contains('.')
-            .then(|| self.by_name.get(&name))
-            .flatten();
-        if candidates.is_none() {
-            wanted = format!("{link}.md").to_lowercase();
-            name = base_name(&wanted).to_string();
-            candidates = self.by_name.get(&name);
+    /// The files a link's name could mean: the link's lowercased path, its
+    /// name, and the files with that name. A name with no such file is
+    /// tried as a markdown note's.
+    fn candidates(&self, link: &str) -> Option<Candidates<'_>> {
+        let wanted = link.to_lowercase();
+        let name = base_name(&wanted).to_string();
+        if name.contains('.')
+            && let Some(files) = self.by_name.get(&name)
+        {
+            return Some(Candidates {
+                wanted,
+                name,
+                files,
+            });
         }
-        let candidates = candidates?;
+        let wanted = format!("{link}.md").to_lowercase();
+        let name = base_name(&wanted).to_string();
+        let files = self.by_name.get(&name)?;
+        Some(Candidates {
+            wanted,
+            name,
+            files,
+        })
+    }
+
+    /// The text a link to `path` is written with: Obsidian's shortest
+    /// path when possible (`fileToLinktext`). That's the bare name (a
+    /// markdown note's without `.md`) when no other file has it, else the
+    /// path from the vault root.
+    pub(crate) fn link_text(&self, path: &VaultPath) -> String {
+        let name = note_title(path);
+        match self.candidates(name) {
+            Some(found) if found.files.as_slice() == std::slice::from_ref(path) => name.to_string(),
+            _ => without_md(path.as_str()).to_string(),
+        }
+    }
+
+    /// Every note, with its aliases, in path order.
+    pub(crate) fn notes(&self) -> impl Iterator<Item = (&VaultPath, &[String])> {
+        self.files
+            .iter()
+            .filter(|(path, _)| EntryKind::of_file(path.name()) == EntryKind::Note)
+            .map(|(path, file)| (path, file.aliases.as_slice()))
+    }
+
+    fn resolve_file(&self, from: &VaultPath, link: &str) -> Option<VaultPath> {
+        let Candidates {
+            mut wanted,
+            name,
+            files: candidates,
+        } = self.candidates(link)?;
         if name == wanted && candidates.len() == 1 {
             return Some(candidates[0].clone());
         }
@@ -339,6 +375,16 @@ fn nearest(mut candidates: Vec<&VaultPath>, folder: &str) -> Option<VaultPath> {
         (!under, c.as_str().encode_utf16().count())
     });
     candidates.first().map(|c| (*c).clone())
+}
+
+/// The files a link's name could mean.
+struct Candidates<'a> {
+    /// The link's path, lowercased, as matched: with `.md` if it had to be.
+    wanted: String,
+    /// Its name.
+    name: String,
+    /// The files with that name, in path order.
+    files: &'a Vec<VaultPath>,
 }
 
 fn base_name(path: &str) -> &str {

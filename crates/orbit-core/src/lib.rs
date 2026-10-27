@@ -9,6 +9,7 @@ mod open_note;
 mod recent;
 mod session;
 mod settings;
+mod suggest;
 mod tags;
 
 use open_note::DiskVersion;
@@ -18,6 +19,7 @@ pub use index::{Backlink, Mention};
 pub use recent::{RecentVault, RecentVaults};
 pub use session::{Session, SessionTab};
 pub use settings::{Settings, ThemeChoice, default_config_dir};
+pub use suggest::{LinkSuggestion, LinkSuggestions};
 pub use tags::{TagCount, same_tag};
 
 use index::{Found, IndexedFile, VaultIndex};
@@ -294,7 +296,25 @@ impl Vault {
         self.with_index(|files| files.notes_tagged(tag))
     }
 
-    /// Runs `f` on the link index, brought up to date.
+    /// The text Orbit writes a link to `path` with, between `[[` and `]]`:
+    /// the shortest unique path, as Obsidian writes it.
+    pub fn link_text(&self, path: &VaultPath) -> String {
+        self.with_index(|files| files.link_text(path))
+    }
+
+    /// What a `[[query` typed in the note `from` suggests: up to `limit`
+    /// notes, fuzzy-matched on their paths and aliases ignoring case, best
+    /// first; and the query as a new note's name if no link resolves to it.
+    pub fn link_suggestions(&self, from: &VaultPath, query: &str, limit: usize) -> LinkSuggestions {
+        let query = query.trim();
+        self.with_index(|files| LinkSuggestions {
+            notes: suggest::suggest(files, query, limit),
+            new_note: (!query.is_empty() && files.resolve(from, query).is_none())
+                .then(|| query.to_string()),
+        })
+    }
+
+    /// Runs `f` on the vault index, brought up to date.
     fn with_index<T>(&self, f: impl FnOnce(&index::Files) -> T) -> T {
         let mut index = lock_index(&self.index);
         f(index.current(
@@ -303,13 +323,13 @@ impl Vault {
         ))
     }
 
-    /// Builds the index links resolve with, which reads every markdown
-    /// note's front matter; otherwise the first link resolved builds it.
+    /// Builds the vault index, which reads every note; otherwise the first
+    /// link resolved, or other question asked of it, builds it.
     pub fn index_links(&self) {
         self.resolve(&VaultPath::root(), "");
     }
 
-    /// What's at `path` now, for the link index: only notes are read.
+    /// What's at `path` now, for the vault index: only notes are read.
     fn find(&self, path: &VaultPath) -> Found {
         if path.is_root() {
             return Found::Folder;
@@ -611,7 +631,7 @@ fn folder_name(path: &Path) -> String {
     )
 }
 
-/// The link index, locked. One whose holder panicked mid-update is
+/// The vault index, locked. One whose holder panicked mid-update is
 /// started afresh, to be rebuilt.
 fn lock_index(index: &Mutex<VaultIndex>) -> std::sync::MutexGuard<'_, VaultIndex> {
     index.lock().unwrap_or_else(|poisoned| {
@@ -651,6 +671,17 @@ fn is_attachment_name(name: &str) -> bool {
 
 fn session_path() -> VaultPath {
     VaultPath::new(&format!("{ORBIT_DIR}/{SESSION_FILE}")).expect("a valid vault path")
+}
+
+/// A note's title: its file name without `.md` (only lowercase, as in
+/// Obsidian); any other file's whole name.
+pub fn note_title(path: &VaultPath) -> &str {
+    without_md(path.name())
+}
+
+/// A path or name without a trailing `.md`.
+fn without_md(path: &str) -> &str {
+    path.strip_suffix(".md").unwrap_or(path)
 }
 
 /// Whether a path is shown as Source mode only: `.txt` notes are plain text.

@@ -1,5 +1,7 @@
 //! Fixture vaults shaped like Obsidian's, with real Obsidian's answers about
 //! them beside each one.
+// Each test file uses only some of these.
+#![allow(dead_code)]
 
 use std::{fs, path::Path};
 

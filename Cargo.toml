@@ -34,3 +34,7 @@ async-channel = "=2.5.0"
 notify-debouncer-mini = { version = "=0.7.0", default-features = false }
 # renameat2(RENAME_NOREPLACE): a rename that can never replace a file.
 rustix = { version = "=1.1.5", features = ["fs"] }
+# Fuzzy matching for wikilink autocomplete (and the Switcher, later).
+nucleo-matcher = "=0.3.1"
+# Completion items for the source editor; the version Kit's editor uses.
+lsp-types = "=0.97.0"

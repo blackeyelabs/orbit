@@ -276,6 +276,14 @@ fn markdown_link(source: &str, open: usize) -> Option<Link> {
     })
 }
 
+/// Where the name of a wikilink being typed starts, in `before` (a line's
+/// text up to the caret): just after its last `[[`. `None` once the link is
+/// closed or onto its heading, alias or block (`#`, `|`, `^`).
+pub fn typed_link(before: &str) -> Option<usize> {
+    let start = before.rfind("[[")? + 2;
+    (!before[start..].contains([']', '#', '|', '^'])).then_some(start)
+}
+
 /// `https:`, `mailto:` and the like: not a vault path.
 pub fn has_scheme(destination: &str) -> bool {
     match destination.split_once(':') {

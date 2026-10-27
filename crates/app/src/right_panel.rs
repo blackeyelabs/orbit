@@ -9,7 +9,7 @@ use gpui_kit::component::{ActiveTheme as _, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use md_engine::Heading;
-use orbit_core::{Backlink, Mention, TagCount, VaultPath, same_tag};
+use orbit_core::{Backlink, Mention, TagCount, VaultPath, note_title, same_tag};
 
 use crate::window::OrbitWindow;
 
@@ -102,7 +102,7 @@ fn render_outline(outline: &[Heading], cx: &mut Context<OrbitWindow>) -> AnyElem
 fn render_backlinks(backlinks: &[Backlink], cx: &mut Context<OrbitWindow>) -> AnyElement {
     let cards = backlinks.iter().enumerate().map(|(ix, backlink)| {
         let from = backlink.from.clone();
-        let title = note_title(backlink.from.name());
+        let title = note_title(&backlink.from).to_string();
         v_flex()
             .id(("backlink", ix))
             .gap_1()
@@ -180,7 +180,12 @@ fn render_tags(
                     .cursor_pointer()
                     .hover(|this| this.bg(cx.theme().list_hover))
                     .child(IconName::FileText)
-                    .child(div().flex_1().truncate().child(note_title(path.name())))
+                    .child(
+                        div()
+                            .flex_1()
+                            .truncate()
+                            .child(note_title(path).to_string()),
+                    )
                     .when(!path.parent().is_root(), |this| {
                         this.child(
                             div()
@@ -277,12 +282,4 @@ fn empty(text: &'static str, cx: &App) -> impl IntoElement {
         .text_sm()
         .text_color(cx.theme().muted_foreground)
         .child(text)
-}
-
-/// A note's name as a title: without a markdown note's extension.
-fn note_title(name: &str) -> String {
-    match name.rsplit_once('.') {
-        Some((title, ext)) if ext.eq_ignore_ascii_case("md") => title.to_string(),
-        _ => name.to_string(),
-    }
 }
