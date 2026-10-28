@@ -469,7 +469,7 @@ fn snippets(body: &str, matches: &[Range<usize>]) -> Vec<Snippet> {
 
 fn commit(index: &SearchIndex) {
     if let Err(e) = index.commit() {
-        eprintln!("orbit: couldn't update the search index: {e}");
+        tracing::warn!(error = %e, "couldn't update the search index");
     }
 }
 
@@ -490,7 +490,7 @@ pub(crate) fn forget_everything(vault: &Vault) {
     let _writing = lock(&vault.search.writing);
     let index = vault.search_index();
     if let Err(e) = index.clear() {
-        eprintln!("orbit: couldn't clear the search index: {e}");
+        tracing::warn!(error = %e, "couldn't clear the search index");
     }
     vault.search.emptied.fetch_add(1, Ordering::AcqRel);
     vault.search.complete.store(false, Ordering::Release);

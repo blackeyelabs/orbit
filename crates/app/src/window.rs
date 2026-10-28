@@ -242,10 +242,7 @@ impl OrbitWindow {
             active: self.active_tab,
         };
         if let Err(e) = self.vault.save_session(&session) {
-            eprintln!(
-                "orbit: couldn't save the session of {}: {e}",
-                self.vault.name()
-            );
+            tracing::warn!(vault = self.vault.name(), error = %e, "couldn't save the session");
         }
     }
 

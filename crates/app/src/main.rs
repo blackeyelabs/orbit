@@ -12,6 +12,7 @@ mod file_actions;
 #[cfg(unix)]
 mod instance;
 mod link_completion;
+mod logging;
 mod note_editor;
 mod preview;
 mod protection;
@@ -33,6 +34,10 @@ fn main() {
     if instance::hand_off(path.as_deref()) {
         return;
     }
+    // First, so everything after is logged, crashes included.
+    let detailed = orbit_core::default_config_dir()
+        .is_some_and(|dir| orbit_core::Settings::load(&dir).detailed_logging);
+    logging::init(detailed);
     harden_process();
     gpui_kit::application()
         .with_assets(appearance::OrbitAssets)
@@ -66,10 +71,10 @@ fn harden_process() {
             maximum: Some(0),
         };
         if let Err(e) = setrlimit(Resource::Core, none) {
-            eprintln!("orbit: couldn't turn off core dumps: {e}");
+            tracing::warn!(error = %e, "couldn't turn off core dumps");
         }
         if let Err(e) = set_dumpable_behavior(DumpableBehavior::NotDumpable) {
-            eprintln!("orbit: couldn't turn off core dumps: {e}");
+            tracing::warn!(error = %e, "couldn't keep other processes out of Orbit's memory");
         }
     }
 }

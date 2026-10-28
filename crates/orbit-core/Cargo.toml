@@ -11,6 +11,7 @@ orbit-index.workspace = true
 orbit-fs.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 # Fast Argon2 (KdfParams::INSECURE_TEST) for tests only.

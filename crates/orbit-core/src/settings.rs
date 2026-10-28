@@ -46,6 +46,8 @@ pub struct Settings {
     /// Text copied from a protected note leaves the clipboard after this
     /// many seconds: never zero, so it always does.
     pub clear_clipboard_seconds: u16,
+    /// Orbit's own crates log at debug level, for bug reports (ADR 0007).
+    pub detailed_logging: bool,
 }
 
 impl Default for Settings {
@@ -60,6 +62,7 @@ impl Default for Settings {
             warned_moving_in: false,
             ask_before_protected_copy: true,
             clear_clipboard_seconds: 30,
+            detailed_logging: false,
         }
     }
 }
@@ -107,6 +110,9 @@ impl Settings {
         }
         if let Some(ask) = field("ask_before_protected_copy").and_then(|v| v.as_bool()) {
             settings.ask_before_protected_copy = ask;
+        }
+        if let Some(detailed) = field("detailed_logging").and_then(|v| v.as_bool()) {
+            settings.detailed_logging = detailed;
         }
         if let Some(seconds) = field("clear_clipboard_seconds")
             .and_then(|v| v.as_u64())
@@ -158,9 +164,20 @@ impl Settings {
 
 /// `$XDG_CONFIG_HOME/orbit`, else `~/.config/orbit`.
 pub fn default_config_dir() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
+    xdg_dir("XDG_CONFIG_HOME", ".config")
+}
+
+/// `$XDG_STATE_HOME/orbit`, else `~/.local/state/orbit`: where logs go.
+pub fn default_state_dir() -> Option<PathBuf> {
+    xdg_dir("XDG_STATE_HOME", ".local/state")
+}
+
+/// Orbit's folder in the XDG base directory `var`, else in `fallback`
+/// under the home folder.
+fn xdg_dir(var: &str, fallback: &str) -> Option<PathBuf> {
+    let base = std::env::var_os(var)
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(fallback)))?;
     Some(base.join("orbit"))
 }

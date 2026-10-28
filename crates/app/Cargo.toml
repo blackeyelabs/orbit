@@ -17,6 +17,9 @@ md-engine.workspace = true
 serde_json.workspace = true
 async-channel.workspace = true
 lsp-types.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-appender.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Turning off core dumps.

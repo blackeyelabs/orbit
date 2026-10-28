@@ -116,7 +116,7 @@ fn save_recent(windows: &Windows) {
     if let Some(dir) = &windows.config_dir
         && let Err(e) = windows.recent.save(dir)
     {
-        eprintln!("orbit: couldn't save the recent vaults: {e}");
+        tracing::warn!(error = %e, "couldn't save the recent vaults");
     }
 }
 
@@ -153,7 +153,7 @@ pub fn show_welcome(cx: &mut App, welcome: impl FnOnce(&mut Welcome) + 'static) 
         (Ok(window), Some(view)) => {
             cx.global_mut::<Windows>().welcome = Some((window.into(), view));
         }
-        (Err(e), _) => eprintln!("orbit: couldn't open the Welcome window: {e}"),
+        (Err(e), _) => tracing::error!(error = %e, "couldn't open the Welcome window"),
         (Ok(_), None) => {}
     }
 }

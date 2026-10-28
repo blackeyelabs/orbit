@@ -69,14 +69,19 @@ impl AppSettings {
         }
     }
 
-    /// Changes the settings, saves them and re-applies the appearance.
+    /// Changes the settings, saves them and re-applies the appearance (and
+    /// the log level).
     pub fn update(window: &mut Window, cx: &mut App, change: impl FnOnce(&mut Settings)) {
         let this = cx.global_mut::<AppSettings>();
+        let was_detailed = this.settings.detailed_logging;
         change(&mut this.settings);
+        if this.settings.detailed_logging != was_detailed {
+            crate::logging::set_detailed(this.settings.detailed_logging);
+        }
         if let Some(dir) = &this.config_dir
             && let Err(e) = this.settings.save(dir)
         {
-            eprintln!("orbit: couldn't save settings: {e}");
+            tracing::warn!(error = %e, "couldn't save settings");
         }
         apply(window, cx);
     }
@@ -88,7 +93,7 @@ pub fn init(cx: &mut App) {
         .text_system()
         .add_fonts(FONTS.iter().map(|f| Cow::Borrowed(*f)).collect())
     {
-        eprintln!("orbit: couldn't load bundled fonts: {e}");
+        tracing::error!(error = %e, "couldn't load the bundled fonts");
     }
     match serde_json::from_str::<ThemeSet>(include_str!("../assets/themes/orbit-paper.json")) {
         Ok(set) => Theme::update(cx, |theme| {
@@ -97,7 +102,7 @@ pub fn init(cx: &mut App) {
             }
         }),
         // Only reachable if the bundled JSON is broken; Kit's themes still work.
-        Err(e) => eprintln!("orbit: bundled Orbit Paper theme is invalid: {e}"),
+        Err(e) => tracing::error!(error = %e, "the bundled Orbit Paper theme is invalid"),
     }
     cx.set_global(AppSettings::load());
 }

@@ -129,3 +129,13 @@ fn copying_from_protected_notes_asks_and_clears_after_30_seconds_by_default() {
     settings.save(dir.path()).unwrap();
     assert_eq!(Settings::load(dir.path()).clear_clipboard_seconds, 120);
 }
+
+#[test]
+fn detailed_logging_is_off_until_turned_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut settings = Settings::load(dir.path());
+    assert!(!settings.detailed_logging);
+    settings.detailed_logging = true;
+    settings.save(dir.path()).unwrap();
+    assert!(Settings::load(dir.path()).detailed_logging);
+}

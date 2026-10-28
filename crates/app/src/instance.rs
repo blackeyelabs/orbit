@@ -46,7 +46,13 @@ pub fn listen(cx: &mut App) {
     std::fs::remove_file(&socket).ok();
     let listener = match UnixListener::bind(&socket) {
         Ok(listener) => listener,
-        Err(e) => return eprintln!("orbit: couldn't listen at {}: {e}", socket.display()),
+        Err(e) => {
+            return tracing::warn!(
+                socket = %socket.display(),
+                error = %e,
+                "couldn't listen for other Orbit instances"
+            );
+        }
     };
     let (tx, rx) = async_channel::unbounded::<Option<PathBuf>>();
     std::thread::spawn(move || {
