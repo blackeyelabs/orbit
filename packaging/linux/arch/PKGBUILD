@@ -1,0 +1,49 @@
+# Maintainer: Orbit Authors <dev@blackeyelabs.com>
+pkgname=orbit-bin
+_pkgname=orbit
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Local-first, encrypted workspace for notes and diagrams"
+arch=('x86_64')
+url="https://github.com/blackeyelabs/orbit"
+license=('MIT')
+depends=(
+    'fontconfig'
+    'freetype2'
+    'libxkbcommon'
+    'libxkbcommon-x11'
+    'wayland'
+    'vulkan-icd-loader'
+)
+optdepends=(
+    'vulkan-driver: Hardware accelerated GPU rendering'
+)
+provides=('orbit')
+conflicts=('orbit')
+source=("https://github.com/blackeyelabs/orbit/releases/download/v${pkgver}/orbit-${pkgver}-linux-x86_64.tar.gz")
+sha256sums=('SKIP')
+
+package() {
+    cd "${srcdir}/orbit-${pkgver}-linux-x86_64"
+
+    # Executable
+    install -Dm755 orbit "${pkgdir}/usr/bin/orbit"
+
+    # Desktop Launcher
+    install -Dm644 io.github.blackeyelabs.orbit.desktop "${pkgdir}/usr/share/applications/io.github.blackeyelabs.orbit.desktop"
+
+    # AppStream Metadata
+    install -Dm644 io.github.blackeyelabs.orbit.metainfo.xml "${pkgdir}/usr/share/metainfo/io.github.blackeyelabs.orbit.metainfo.xml"
+
+    # Icons
+    for size in 16 24 32 48 64 128 256 512; do
+        if [[ -f "icons/hicolor/${size}x${size}/apps/orbit.png" ]]; then
+            install -Dm644 "icons/hicolor/${size}x${size}/apps/orbit.png" \
+                "${pkgdir}/usr/share/icons/hicolor/${size}x${size}/apps/orbit.png"
+        fi
+    done
+    if [[ -f "icons/hicolor/scalable/apps/orbit.png" ]]; then
+        install -Dm644 "icons/hicolor/scalable/apps/orbit.png" \
+            "${pkgdir}/usr/share/icons/hicolor/scalable/apps/orbit.png"
+    fi
+}

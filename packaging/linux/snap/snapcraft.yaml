@@ -1,0 +1,40 @@
+name: orbit
+base: core24
+version: '0.1.0'
+summary: Local-first, encrypted workspace for notes and diagrams
+description: |
+  Orbit is a local-first, Obsidian-like workspace for markdown notes and
+  Mermaid diagrams, kept as plain files in a folder. Selected folders can
+  be protected with real cryptographic encryption at rest.
+
+grade: stable
+confinement: strict
+
+apps:
+  orbit:
+    command: bin/orbit
+    extensions: [gnome]
+    plugs:
+      - home
+      - removable-media
+      - wayland
+      - x11
+      - opengl
+      - desktop
+      - desktop-legacy
+
+parts:
+  orbit:
+    plugin: dump
+    source: https://github.com/blackeyelabs/orbit/releases/download/v0.1.0/orbit-0.1.0-linux-x86_64.tar.gz
+    organize:
+      orbit: bin/orbit
+      io.github.blackeyelabs.orbit.desktop: usr/share/applications/io.github.blackeyelabs.orbit.desktop
+      io.github.blackeyelabs.orbit.metainfo.xml: usr/share/metainfo/io.github.blackeyelabs.orbit.metainfo.xml
+      icons: usr/share/icons
+    stage-packages:
+      - libfontconfig1
+      - libfreetype6
+      - libxkbcommon0
+      - libxkbcommon-x11-0
+      - libvulkan1

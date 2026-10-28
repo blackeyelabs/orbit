@@ -1,0 +1,20 @@
+pkgbase = orbit-bin
+	pkgdesc = Local-first, encrypted workspace for notes and diagrams
+	pkgver = 0.1.0
+	pkgrel = 1
+	url = https://github.com/blackeyelabs/orbit
+	arch = x86_64
+	license = MIT
+	depends = fontconfig
+	depends = freetype2
+	depends = libxkbcommon
+	depends = libxkbcommon-x11
+	depends = wayland
+	depends = vulkan-icd-loader
+	optdepends = vulkan-driver: Hardware accelerated GPU rendering
+	provides = orbit
+	conflicts = orbit
+	source = https://github.com/blackeyelabs/orbit/releases/download/v0.1.0/orbit-0.1.0-linux-x86_64.tar.gz
+	sha256sums = SKIP
+
+pkgname = orbit-bin

@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Orbit
+GenericName=Note Taking Application
+Comment=Local-first, encrypted workspace for notes and diagrams
+Exec=orbit %F
+Icon=orbit
+Terminal=false
+Categories=Utility;TextEditor;
+MimeType=text/markdown;text/plain;
+StartupWMClass=orbit
+StartupNotify=true
+Keywords=notes;markdown;diagrams;vault;encryption;editor;

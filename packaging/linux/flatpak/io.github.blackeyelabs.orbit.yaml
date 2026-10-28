@@ -1,0 +1,47 @@
+app-id: io.github.blackeyelabs.orbit
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+command: orbit
+
+finish-args:
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  - --device=dri
+  - --filesystem=host
+  - --talk-name=org.freedesktop.portal.FileChooser
+  - --talk-name=org.freedesktop.portal.OpenURI
+  - --talk-name=org.freedesktop.portal.Notification
+  - --talk-name=org.freedesktop.Notifications
+
+cleanup:
+  - /include
+  - /lib/pkgconfig
+
+modules:
+  - name: orbit
+    buildsystem: simple
+    build-commands:
+      # Binary
+      - install -Dm755 orbit /app/bin/orbit
+
+      # Desktop launcher
+      - install -Dm644 io.github.blackeyelabs.orbit.desktop /app/share/applications/io.github.blackeyelabs.orbit.desktop
+
+      # AppStream metadata
+      - install -Dm644 io.github.blackeyelabs.orbit.metainfo.xml /app/share/metainfo/io.github.blackeyelabs.orbit.metainfo.xml
+
+      # Freedesktop icons (named after app ID for Flatpak)
+      - for size in 16 24 32 48 64 128 256 512; do
+          if [ -f icons/hicolor/${size}x${size}/apps/orbit.png ]; then
+            install -Dm644 icons/hicolor/${size}x${size}/apps/orbit.png /app/share/icons/hicolor/${size}x${size}/apps/io.github.blackeyelabs.orbit.png;
+          fi;
+        done
+      - if [ -f icons/hicolor/scalable/apps/orbit.png ]; then
+          install -Dm644 icons/hicolor/scalable/apps/orbit.png /app/share/icons/hicolor/scalable/apps/io.github.blackeyelabs.orbit.png;
+        fi
+    sources:
+      - type: archive
+        url: https://github.com/blackeyelabs/orbit/releases/download/v0.1.0/orbit-0.1.0-linux-x86_64.tar.gz
+        sha256: 0000000000000000000000000000000000000000000000000000000000000000 # replaced on release tag

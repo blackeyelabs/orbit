@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.blackeyelabs.orbit</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Orbit</name>
+  <summary>Local-first, encrypted workspace for notes and diagrams</summary>
+  <description>
+    <p>
+      Orbit is a local-first, Obsidian-like workspace for markdown notes and
+      Mermaid diagrams, kept as plain files in a folder. Selected folders
+      can be protected with cryptographic encryption at rest.
+    </p>
+    <p>Features include:</p>
+    <ul>
+      <li>Markdown notes stored as plain files you own and control</li>
+      <li>Bidirectional links, backlinks, and tag navigation</li>
+      <li>Inline rendered Mermaid diagrams in pure Rust</li>
+      <li>Protected folders encrypted at rest with passphrase and recovery key</li>
+      <li>Instant full-text vault search and switcher</li>
+      <li>GPU-accelerated native interface with custom paper themes</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">io.github.blackeyelabs.orbit.desktop</launchable>
+  <provides>
+    <binary>orbit</binary>
+  </provides>
+  <developer id="io.github.blackeyelabs">
+    <name>Blackeye Labs</name>
+  </developer>
+  <url type="homepage">https://github.com/blackeyelabs/orbit</url>
+  <url type="bugtracker">https://github.com/blackeyelabs/orbit/issues</url>
+  <url type="vcs-browser">https://github.com/blackeyelabs/orbit</url>
+  <categories>
+    <category>Utility</category>
+    <category>TextEditor</category>
+  </categories>
+  <content_rating type="oars-1.1" />
+  <releases>
+    <release version="0.1.0" date="2026-10-28">
+      <description>
+        <p>Initial release of Orbit desktop application for Linux.</p>
+      </description>
+    </release>
+  </releases>
+</component>

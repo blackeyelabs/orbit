@@ -1,0 +1,165 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-and-package:
+    name: Build and Package Linux Release
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Parse release version
+        run: |
+          TAG_NAME="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG_NAME#v}"
+          echo "TAG_NAME=${TAG_NAME}" >> $GITHUB_ENV
+          echo "VERSION=${VERSION}" >> $GITHUB_ENV
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang pkg-config libfontconfig-dev libfreetype-dev \
+            libwayland-dev libxkbcommon-x11-dev libx11-xcb-dev libvulkan1 \
+            imagemagick zstd libarchive-tools curl
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+          rustflags: ""
+
+      - name: Install packaging tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deb,cargo-generate-rpm
+
+      - name: Install appimagetool
+        run: |
+          curl -fsSL -o /usr/local/bin/appimagetool https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x /usr/local/bin/appimagetool
+
+      - name: Generate hicolor icons
+        run: bash packaging/linux/generate-icons.sh
+
+      - name: Build release binary
+        run: |
+          cargo build --release -p app --locked
+          strip target/release/orbit
+
+      - name: Package all formats
+        run: |
+          mkdir -p dist
+
+          # 1. Standalone Tarball (.tar.gz)
+          TARBALL_DIR="orbit-${VERSION}-linux-x86_64"
+          mkdir -p "${TARBALL_DIR}"
+          cp target/release/orbit "${TARBALL_DIR}/"
+          cp packaging/linux/io.github.blackeyelabs.orbit.desktop "${TARBALL_DIR}/"
+          cp packaging/linux/io.github.blackeyelabs.orbit.metainfo.xml "${TARBALL_DIR}/"
+          cp packaging/linux/install-local.sh "${TARBALL_DIR}/"
+          cp -r packaging/linux/icons "${TARBALL_DIR}/"
+          tar -czf "dist/orbit-${VERSION}-linux-x86_64.tar.gz" "${TARBALL_DIR}"
+          rm -rf "${TARBALL_DIR}"
+
+          # 2. Debian (.deb)
+          cargo deb -p app --no-build -o "dist/orbit_${VERSION}_amd64.deb"
+
+          # 3. Fedora RPM (.rpm)
+          (cd crates/app && cargo generate-rpm --auto-req disabled -o "../../dist/orbit-${VERSION}-1.x86_64.rpm")
+
+          # 4. Arch Linux (.pkg.tar.zst)
+          packaging/linux/arch/build-arch-package.sh "${VERSION}" target/release/orbit dist
+
+          # 5. AppImage (.AppImage)
+          packaging/linux/appimage/build-appimage.sh "${VERSION}" target/release/orbit dist
+
+          # 6. Checksums
+          (cd dist && sha256sum * > SHA256SUMS.txt)
+
+          echo "Generated artifacts in dist/:"
+          ls -lh dist/
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Orbit ${{ env.TAG_NAME }}
+          draft: false
+          prerelease: false
+          files: dist/*
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-artifacts
+          path: dist/
+
+  deploy-pages-repo:
+    name: Deploy Package Repositories to GitHub Pages
+    needs: build-and-package
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: release-artifacts
+          path: dist/
+
+      - name: Install repository management tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            apt-utils createrepo-c gnupg
+
+      - name: Import GPG signing key
+        env:
+          GPG_SIGNING_KEY: ${{ secrets.GPG_SIGNING_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          if [[ -n "${GPG_SIGNING_KEY:-}" ]]; then
+            echo "${GPG_SIGNING_KEY}" | gpg --batch --import
+            echo "GPG key imported successfully."
+          else
+            echo "Warning: GPG_SIGNING_KEY not set. Repository metadata will not be signed."
+          fi
+
+      - name: Checkout or initialize gh-pages branch
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          path: gh-pages-repo
+        continue-on-error: true
+
+      - name: Setup gh-pages directory if new
+        run: |
+          if [[ ! -d "gh-pages-repo/.git" ]]; then
+            mkdir -p gh-pages-repo
+            cd gh-pages-repo
+            git init
+            git checkout -b gh-pages
+          fi
+
+      - name: Update repositories
+        env:
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          bash packaging/linux/repo/update-repository.sh dist/ gh-pages-repo 8CAE2B78404BD8F4352C3F0A47514BD5411559DC "${GPG_PASSPHRASE:-}"
+
+      - name: Deploy to gh-pages branch
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./gh-pages-repo
+          publish_branch: gh-pages
+

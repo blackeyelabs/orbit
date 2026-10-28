@@ -2,6 +2,7 @@
 name = "app"
 version.workspace = true
 edition.workspace = true
+description = "Local-first, encrypted workspace for notes and diagrams"
 
 [[bin]]
 name = "orbit"
@@ -31,3 +32,51 @@ tracing-appender.workspace = true
 rustix.workspace = true
 # Sleep and screen lock, for auto-lock: the version GPUI already uses.
 zbus = { version = "=5.19.0", default-features = false, features = ["async-io", "blocking-api"] }
+
+[package.metadata.deb]
+name = "orbit"
+maintainer = "Orbit Authors <dev@blackeyelabs.com>"
+copyright = "2026 Orbit Authors"
+license-file = ["../../packaging/linux/debian/copyright"]
+extended-description = """\
+Orbit is a local-first, Obsidian-like workspace for markdown notes \
+and Mermaid diagrams, kept as plain files in a folder. Selected folders \
+can be protected with cryptographic encryption at rest."""
+depends = "$auto, libfontconfig1, libfreetype6, libwayland-client0, libxkbcommon0, libxkbcommon-x11-0, libxcb1, libvulkan1"
+section = "editors"
+priority = "optional"
+assets = [
+    ["target/release/orbit", "usr/bin/orbit", "755"],
+    ["../../packaging/linux/io.github.blackeyelabs.orbit.desktop", "usr/share/applications/io.github.blackeyelabs.orbit.desktop", "644"],
+    ["../../packaging/linux/io.github.blackeyelabs.orbit.metainfo.xml", "usr/share/metainfo/io.github.blackeyelabs.orbit.metainfo.xml", "644"],
+    ["../../packaging/linux/icons/hicolor/16x16/apps/orbit.png", "usr/share/icons/hicolor/16x16/apps/orbit.png", "644"],
+    ["../../packaging/linux/icons/hicolor/24x24/apps/orbit.png", "usr/share/icons/hicolor/24x24/apps/orbit.png", "644"],
+    ["../../packaging/linux/icons/hicolor/32x32/apps/orbit.png", "usr/share/icons/hicolor/32x32/apps/orbit.png", "644"],
+    ["../../packaging/linux/icons/hicolor/48x48/apps/orbit.png", "usr/share/icons/hicolor/48x48/apps/orbit.png", "644"],
+    ["../../packaging/linux/icons/hicolor/64x64/apps/orbit.png", "usr/share/icons/hicolor/64x64/apps/orbit.png", "644"],
+    ["../../packaging/linux/icons/hicolor/128x128/apps/orbit.png", "usr/share/icons/hicolor/128x128/apps/orbit.png", "644"],
+    ["../../packaging/linux/icons/hicolor/256x256/apps/orbit.png", "usr/share/icons/hicolor/256x256/apps/orbit.png", "644"],
+    ["../../packaging/linux/icons/hicolor/512x512/apps/orbit.png", "usr/share/icons/hicolor/512x512/apps/orbit.png", "644"],
+    ["../../packaging/linux/icons/hicolor/scalable/apps/orbit.png", "usr/share/icons/hicolor/scalable/apps/orbit.png", "644"],
+]
+
+[package.metadata.generate-rpm]
+name = "orbit"
+summary = "Local-first, encrypted workspace for notes and diagrams"
+license = "GPL-3.0-or-later"
+assets = [
+    { source = "../../target/release/orbit", dest = "/usr/bin/orbit", mode = "755" },
+    { source = "../../packaging/linux/io.github.blackeyelabs.orbit.desktop", dest = "/usr/share/applications/io.github.blackeyelabs.orbit.desktop", mode = "644" },
+    { source = "../../packaging/linux/io.github.blackeyelabs.orbit.metainfo.xml", dest = "/usr/share/metainfo/io.github.blackeyelabs.orbit.metainfo.xml", mode = "644" },
+    { source = "../../packaging/linux/icons/hicolor/16x16/apps/orbit.png", dest = "/usr/share/icons/hicolor/16x16/apps/orbit.png", mode = "644" },
+    { source = "../../packaging/linux/icons/hicolor/24x24/apps/orbit.png", dest = "/usr/share/icons/hicolor/24x24/apps/orbit.png", mode = "644" },
+    { source = "../../packaging/linux/icons/hicolor/32x32/apps/orbit.png", dest = "/usr/share/icons/hicolor/32x32/apps/orbit.png", mode = "644" },
+    { source = "../../packaging/linux/icons/hicolor/48x48/apps/orbit.png", dest = "/usr/share/icons/hicolor/48x48/apps/orbit.png", mode = "644" },
+    { source = "../../packaging/linux/icons/hicolor/64x64/apps/orbit.png", dest = "/usr/share/icons/hicolor/64x64/apps/orbit.png", mode = "644" },
+    { source = "../../packaging/linux/icons/hicolor/128x128/apps/orbit.png", dest = "/usr/share/icons/hicolor/128x128/apps/orbit.png", mode = "644" },
+    { source = "../../packaging/linux/icons/hicolor/256x256/apps/orbit.png", dest = "/usr/share/icons/hicolor/256x256/apps/orbit.png", mode = "644" },
+    { source = "../../packaging/linux/icons/hicolor/512x512/apps/orbit.png", dest = "/usr/share/icons/hicolor/512x512/apps/orbit.png", mode = "644" },
+    { source = "../../packaging/linux/icons/hicolor/scalable/apps/orbit.png", dest = "/usr/share/icons/hicolor/scalable/apps/orbit.png", mode = "644" },
+]
+requires = { "fontconfig" = "*", "freetype" = "*", "libwayland-client" = "*", "libxkbcommon" = "*", "libxkbcommon-x11" = "*", "vulkan-loader" = "*" }
+
