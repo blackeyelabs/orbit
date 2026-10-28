@@ -17,3 +17,5 @@ tracing.workspace = true
 # Fast Argon2 (KdfParams::INSECURE_TEST) for tests only.
 orbit-crypto = { workspace = true, features = ["insecure-test-kdf"] }
 tempfile.workspace = true
+# Capturing logs, for the check that they hold no vault content.
+tracing-subscriber.workspace = true

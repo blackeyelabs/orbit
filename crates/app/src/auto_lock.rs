@@ -57,6 +57,7 @@ pub fn init(cx: &mut App) {
                 let idle = activity.last.elapsed();
                 if !activity.idle_locked && idle >= Duration::from_secs(u64::from(minutes) * 60) {
                     activity.idle_locked = true;
+                    tracing::info!(minutes, "idle: locking protected folders");
                     vaults::lock_everywhere(cx);
                 }
             });
@@ -90,6 +91,7 @@ pub fn init(cx: &mut App) {
                     Reason::Suspend => settings.lock_on_suspend,
                     Reason::ScreenLock => settings.lock_on_screen_lock,
                 };
+                tracing::info!(?reason, wanted, "the system asked to lock");
                 if wanted {
                     vaults::lock_everywhere(cx);
                 }
@@ -176,14 +178,18 @@ mod system {
         spawn(
             "orbit-sleep",
             Box::new(move || {
-                sleep(sleep_events, lock_on_suspend).ok();
+                if let Err(e) = sleep(sleep_events, lock_on_suspend) {
+                    tracing::info!(error = %e, "not locking on suspend: logind isn't reachable");
+                }
             }),
         );
         let session_events = events.clone();
         spawn(
             "orbit-session-lock",
             Box::new(move || {
-                session_lock(session_events).ok();
+                if let Err(e) = session_lock(session_events) {
+                    tracing::info!(error = %e, "not locking on session lock: logind isn't reachable");
+                }
             }),
         );
         for (name, path) in SCREENSAVERS {
@@ -191,7 +197,9 @@ mod system {
             spawn(
                 "orbit-screensaver",
                 Box::new(move || {
-                    screensaver(events, name, path).ok();
+                    if let Err(e) = screensaver(events, name, path) {
+                        tracing::debug!(service = name, error = %e, "this screensaver isn't reachable");
+                    }
                 }),
             );
         }

@@ -136,6 +136,39 @@ pub enum Error {
     Io(io::Error),
 }
 
+impl Error {
+    /// What went wrong, without the paths its message may name: for logs
+    /// (ADR 0007).
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            Error::NotFound => "not found",
+            Error::AlreadyOpen => "already open",
+            Error::Nested(_) => "nested protected folder",
+            Error::NotANote(_) => "not a note",
+            Error::NotUtf8(_) => "not UTF-8",
+            Error::AlreadyExists(_) => "already exists",
+            Error::ChangedOnDisk(_) => "changed on disk",
+            Error::DeletedOnDisk(_) => "deleted on disk",
+            Error::IntoItself(_) => "into itself",
+            Error::InvalidName(_) => "invalid name",
+            Error::Io(_) => "I/O error",
+        }
+    }
+}
+
+/// A path as logs may show it (ADR 0007): as it is, or `<protected>` for
+/// anything in a protected folder. From [`Vault::log_path`].
+pub struct LogPath(Option<VaultPath>);
+
+impl std::fmt::Display for LogPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.0 {
+            Some(path) => f.write_str(path.as_str()),
+            None => f.write_str("<protected>"),
+        }
+    }
+}
+
 impl From<io::Error> for Error {
     fn from(e: io::Error) -> Self {
         Error::Io(e)
@@ -192,10 +225,14 @@ impl Vault {
         let lock = match plain.lock() {
             Ok(lock) => Some(lock),
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Err(Error::AlreadyOpen),
-            Err(_) => None,
+            Err(e) => {
+                tracing::warn!(error = %e, "couldn't hold the vault: another window could open it too");
+                None
+            }
         };
         let root = plain.root().to_path_buf();
         let name = folder_name(&root);
+        tracing::info!(vault = %name, "vault opened");
         Ok(Vault {
             root,
             name,
@@ -205,6 +242,12 @@ impl Vault {
             index: Arc::default(),
             search: Arc::default(),
         })
+    }
+
+    /// `path` as logs may show it: hidden if it's in a protected folder,
+    /// unlocked or locked since the vault opened (ADR 0007).
+    pub fn log_path(&self, path: &VaultPath) -> LogPath {
+        LogPath((!self.fs.is_protected(path)).then(|| path.clone()))
     }
 
     /// The vault folder's real path.
@@ -305,9 +348,11 @@ impl Vault {
         mut on_change: impl FnMut(Vec<VaultPath>) + Send + 'static,
     ) -> Result<Watch, Error> {
         let (index, search) = (self.index.clone(), self.search.clone());
+        tracing::debug!("watching the vault for changes");
         Ok(self.fs.watch(Box::new(move |paths: Vec<VaultPath>| {
             let paths: Vec<VaultPath> = paths.into_iter().filter(|p| !in_tool_folder(p)).collect();
             if !paths.is_empty() {
+                tracing::trace!(changed = paths.len(), "the vault changed");
                 lock_index(&index).changed(paths.iter().cloned());
                 search.changed(paths.iter().cloned());
                 on_change(paths);
@@ -527,6 +572,7 @@ impl Vault {
             return Err(Error::NotANote(path.clone()));
         }
         let written = self.fs.write_if(path, text.as_bytes(), may_replace)?;
+        tracing::debug!(note = %self.log_path(path), written, "saved");
         // Its aliases may have changed.
         self.touched([path.clone()]);
         Ok(written)
@@ -599,7 +645,9 @@ impl Vault {
         if path.is_root() || in_tool_folder(path) {
             return Err(Error::InvalidName(path.to_string()));
         }
+        let shown = self.log_path(path);
         self.fs.trash(path)?;
+        tracing::debug!(entry = %shown, "deleted");
         self.touched([path.clone()]);
         Ok(())
     }
@@ -607,6 +655,7 @@ impl Vault {
     fn move_entry(&self, from: &VaultPath, to: VaultPath) -> Result<VaultPath, Error> {
         match self.fs.rename(from, &to) {
             Ok(()) => {
+                tracing::debug!(from = %self.log_path(from), to = %self.log_path(&to), "moved");
                 self.touched([from.clone(), to.clone()]);
                 Ok(to)
             }

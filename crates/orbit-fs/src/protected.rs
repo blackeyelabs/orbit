@@ -560,6 +560,15 @@ impl ProtectedFs {
         }
     }
 
+    /// Whether `path` is in (or is) a protected folder, unlocked or locked
+    /// since the vault opened: what logs mustn't name.
+    pub fn is_protected(&self, path: &VaultPath) -> bool {
+        self.mounts().iter().any(|m| path.is_within(&m.root))
+            || lock_list(&self.locked)
+                .iter()
+                .any(|l| path.is_within(&l.root))
+    }
+
     /// The unlocked protected folder `path` is in (or is), if any.
     pub fn protected_folder_of(&self, path: &VaultPath) -> Option<VaultPath> {
         self.mounts()

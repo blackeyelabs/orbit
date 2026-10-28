@@ -118,6 +118,8 @@ impl Vault {
     /// can take a while; searches meanwhile say they may be incomplete,
     /// and [`Self::search_progress`] says how far it's got.
     pub fn index_search(&self) {
+        let _span = tracing::debug_span!("search.index").entered();
+        let started = std::time::Instant::now();
         *lock(&self.search.progress) = Some(IndexingProgress { done: 0, total: 0 });
         loop {
             let emptied = self.search.emptied.load(Ordering::Acquire);
@@ -128,7 +130,12 @@ impl Vault {
             }
         }
         self.search.complete.store(true, Ordering::Release);
-        *lock(&self.search.progress) = None;
+        let progress = lock(&self.search.progress).take();
+        tracing::info!(
+            notes = progress.map_or(0, |p| p.total),
+            ms = started.elapsed().as_millis() as u64,
+            "search index up to date"
+        );
     }
 
     /// While the vault is being indexed: how far it's got.
@@ -189,7 +196,10 @@ impl Vault {
         self.search.index.get_or_init(|| {
             let cached = self.fs.cache_dir("search");
             SearchIndex::open(cached.as_deref())
-                .or_else(|_| SearchIndex::open(None))
+                .or_else(|e| {
+                    tracing::warn!(error = %e, "couldn't open the saved search index; indexing in memory");
+                    SearchIndex::open(None)
+                })
                 .expect("an index in memory opens")
         })
     }

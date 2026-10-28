@@ -191,6 +191,7 @@ impl Vault {
         let protected = self.fs.protect(folder, &keys.header, keys.master);
         drop(writing);
         protected?;
+        tracing::info!("a folder was protected");
         // What Orbit kept of the folder in plain text goes: the search
         // index (rebuilt without it) and the session.
         search::forget_everything(self);
@@ -267,10 +268,12 @@ impl Vault {
         &self,
         mut open: impl FnMut(&Header) -> Option<MasterKey>,
     ) -> Result<Vec<VaultPath>, UnlockError> {
+        let _span = tracing::debug_span!("protect.unlock").entered();
         let mut attempts = lock(&self.protection.attempts);
         if let Some(next) = attempts.next {
             let now = Instant::now();
             if now < next {
+                tracing::debug!("unlock attempt too soon after a wrong one");
                 return Err(UnlockError::TooSoon(next - now));
             }
         }
@@ -299,10 +302,16 @@ impl Vault {
                 .min(LONGEST_WAIT);
             attempts.wrong += 1;
             attempts.next = Some(Instant::now() + wait);
+            tracing::info!(
+                wrong = attempts.wrong,
+                wait_s = wait.as_secs(),
+                "an unlock attempt opened nothing"
+            );
             return Err(UnlockError::Wrong { retry_in: wait });
         }
         *attempts = Attempts::default();
         drop(attempts);
+        tracing::info!(folders = unlocked.len(), "protected folders unlocked");
         self.touched(unlocked.iter().cloned());
         Ok(unlocked)
     }
@@ -333,6 +342,11 @@ impl Vault {
                 lock(&self.protection.held).push(edit);
             }
         }
+        tracing::debug!(
+            held = unsaved.len(),
+            lost = lost.len(),
+            "edits saved as their folder locked"
+        );
         LockOutcome {
             folder: folder.clone(),
             unsaved,
@@ -343,7 +357,17 @@ impl Vault {
     /// Writes the held edits whose folders are locked; those that still
     /// can't be written stay held.
     fn write_held(&self) {
-        lock(&self.protection.held).retain(|edit| self.fs.write_sealed(edit).is_err());
+        let mut held = lock(&self.protection.held);
+        if held.is_empty() {
+            return;
+        }
+        let before = held.len();
+        held.retain(|edit| self.fs.write_sealed(edit).is_err());
+        tracing::info!(
+            written = before - held.len(),
+            still_held = held.len(),
+            "held edits written"
+        );
     }
 
     /// Gives the unlocked protected folder at `folder` a new passphrase:
@@ -366,6 +390,7 @@ impl Vault {
                 Ok((header, ()))
             })
             .map_err(not_unlocked)
+            .inspect(|()| tracing::info!("a protected folder's passphrase changed"))
     }
 
     /// Gives the unlocked protected folder at `folder` a new recovery key,
@@ -382,6 +407,7 @@ impl Vault {
                 Ok((header, recovery.reveal()))
             })
             .map_err(not_unlocked)
+            .inspect(|_| tracing::info!("a protected folder has a new recovery key"))
     }
 
     /// Makes the unlocked protected folder at `folder` a plain folder again,
@@ -397,6 +423,7 @@ impl Vault {
         search::forget_folder(self, folder);
         self.forget_copies_of(folder);
         self.touched([folder.clone()]);
+        tracing::info!("a folder's protection was removed");
         Ok(())
     }
 
@@ -449,6 +476,7 @@ impl Vault {
     pub fn lock(&self, folder: &VaultPath) -> bool {
         let locked = self.fs.unmount(folder);
         if locked {
+            tracing::info!("a protected folder locked");
             search::forget_folder(self, folder);
             self.forget_copies_of(folder);
             self.touched([folder.clone()]);

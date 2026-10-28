@@ -161,6 +161,13 @@ impl OrbitWindow {
             this.update(cx, |this, cx| {
                 let saved = this.save_all(cx);
                 this.save_session(cx);
+                match saved {
+                    true => tracing::info!(vault = this.vault.name(), "vault window closed"),
+                    false => tracing::warn!(
+                        vault = this.vault.name(),
+                        "a note couldn't be saved: the window stays open"
+                    ),
+                }
                 saved
             })
             .unwrap_or(true)
