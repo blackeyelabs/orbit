@@ -4,15 +4,15 @@
 
 The design doc requires three decisions before Phase 1 starts: the editor approach, the Mermaid renderer and the protected-folder format. All three are recorded below. **The gate is passed. Phase 1 (#1, MVP tickets #7–#26) may start.**
 
-## 1. Editor approach: Live Preview for Phase 2, with one condition
+## 1. Editor approach: Live Preview for Phase 2
 
 **Decision.** Live Preview, with markdown syntax hidden unless the caret or selection touches it, is feasible on GPUI Kit 0.8.0 for inline syntax. It's planned for Phase 2. The MVP ships the Split view regardless, as issue #1 already specifies.
 
-**Condition.** IME composition is unverified. Live Preview work must not start until [#27](https://github.com/blackeyelabs/orbit/issues/27) (fcitx5 or ibus, Japanese or Chinese) passes. If #27 fails in a way the conceal model can't fix, Phase 2 keeps the Split view, and Live Preview is revisited later.
+**Condition, met.** Live Preview work was not to start until IME composition was verified in [#27](https://github.com/blackeyelabs/orbit/issues/27). It passed on 2026-10-28 with fcitx5 and Mozc (Japanese) on Wayland: checklist items 8–10 all pass, so Phase 2 may start Live Preview.
 
 **Evidence:** Spike 1, #3; [details](../spikes/SPIKES.md#spike-1-live-preview-conceal-3).
 - The **conceal model** is a std-only `layout(source, selection)` that returns the display text, a source↔display offset map and style runs. It passes 20 tests, including a property test across 13 fixtures (CJK, adjacent spans, an empty alias) showing that no caret position ever lands inside hidden text. A mutation check showed that test can fail.
-- **Approach 1** is a GPUI prototype that shapes the display text and maps every caret, click, selection and IME position through the offset map. It passed hands-on checks 1–7 on Wayland: rendering, reveal on caret, click mapping, arrow keys through syntax, selection and drag, soft wrap, and typing at span boundaries. IME checks 8–10 weren't run, since there was no IME on the test machine.
+- **Approach 1** is a GPUI prototype that shapes the display text and maps every caret, click, selection and IME position through the offset map. It passed hands-on checks 1–10 on Wayland: rendering, reveal on caret, click mapping, arrow keys through syntax, selection and drag, soft wrap, typing at span boundaries, and IME composition (checks 8–10, run later in #27).
 - One Spike 1 criterion is only **partial**: the alternatives were evaluated from the GPUI Kit source, not prototyped.
   - Kit's Editor decorations and inline tokens are ruled out on API grounds. Decorations can't hide text, and tokens are atomic, so text inside a bold span couldn't be edited.
   - Kit 0.8.0's `editor_host` looks like the best route to block widgets, but it's **untested**.
@@ -70,5 +70,5 @@ The design doc requires three decisions before Phase 1 starts: the editor approa
 ## Phase 1 starts here
 
 - **Start at #7** (open a vault): every other MVP ticket builds on its headless Vault facade.
-- **Keep open:** #27, the IME check, which needs a person with an IME. It gates Phase 2 Live Preview, not Phase 1.
+- **Done since:** #27, the IME check, passed on 2026-10-28. It gated Phase 2 Live Preview, not Phase 1.
 - **Carry into Phase 1:** widen the guaranteed Mermaid set in #1 and #20, and re-check class-diagram markers when #20 lands.

@@ -21,7 +21,7 @@ Each spike answers one question for the Phase 0 gate (ticket #6). Record results
 | ≥10 tests including "no caret position lands inside hidden text" | **Pass** |
 | GPUI prototype: click, drag, arrow keys and soft wrap map through the offset map | **Pass**: checklist items 1–7 |
 | Kit Editor decorations / inline tokens and `editor_host` tried as alternatives | **Partial**: both evaluated against the gpui-base 0.8.0 source, not prototyped. Approach 2 fails on API grounds. `editor_host` is recommended for a Phase 2 prototype |
-| IME (fcitx5 or ibus, Japanese or Chinese) inside a revealed span and next to a concealed one | **Not tested**: no IME on the test machine. The callbacks are implemented, but nobody has used them |
+| IME (fcitx5 or ibus, Japanese or Chinese) inside a revealed span and next to a concealed one | **Pass**: checklist items 8–10 (#27), fcitx5 with Mozc on Wayland |
 | SPIKES.md records pass/fail and a recommendation | **Pass**: see Recommendation |
 
 ### Results so far
@@ -80,16 +80,16 @@ Run `cargo run -p spike1-gpui` on Wayland. The window shows a heading line and t
 | 5 | **Pass** (2026-10-26, user) | Dragging into a span: the highlight follows the text without jumping. Shift+arrows extend. Copy/paste carries the raw markdown |
 | 6 | **Pass** (2026-10-26, user) | Soft wrap: the paragraph wraps at the window width, and Up/Down move between visual lines |
 | 7 | **Pass** (2026-10-26, user) | Typing right after a closing `**` lands outside the bold, confirmed in the debug source |
-| 8 | **Not tested** | No IME set up on the test machine |
-| 9 | **Not tested** | No IME set up on the test machine |
-| 10 | **Not tested** | No IME set up on the test machine |
+| 8 | **Pass** (2026-10-28, user, #27) | fcitx5 5.1.23 with Mozc on niri (Wayland). Inside 太字: the candidate window sits at the caret, the preedit is underlined in place, and the commit lands inside the bold |
+| 9 | **Pass** (2026-10-28, user, #27) | One character after `[[リンク]]`: the preedit appears at the caret, not offset by the hidden brackets |
+| 10 | **Pass** (2026-10-28, user, #27) | Composing just before `**太字**`, then committing: nothing duplicated or lost, and the layout settles. No candidate window lagging a keystroke behind was seen |
 
 ### Recommendation
 
-**Live Preview is feasible for inline syntax on GPUI Kit 0.8.0, with IME still unverified.** Record **Live Preview for Phase 2** at the gate, with one condition: checklist items 8–10 must pass before Live Preview work starts.
+**Live Preview is feasible for inline syntax on GPUI Kit 0.8.0, IME included.** Record **Live Preview for Phase 2** at the gate. Its one condition, checklist items 8–10, passed on 2026-10-28 (#27), so Live Preview work may start in Phase 2.
 
-- **Evidence for:** the conceal model's caret property holds across all fixtures, and approach 1 passed every hands-on caret check (items 1–7). Those cover rendering, reveal on caret, click mapping, arrow keys through syntax, selection and drag, soft wrap, and typing at boundaries.
-- **Open risk:** IME composition is untested. The input-handler callbacks map through the same offset map that passed items 3 and 7, and the model guarantees the caret is never in hidden text. Still, the candidate-window position and preedit behaviour haven't been seen. If they fail in a way the model can't fix, fall back to Split view for Phase 2 as well.
+- **Evidence for:** the conceal model's caret property holds across all fixtures, and approach 1 passed every hands-on check (items 1–10). Those cover rendering, reveal on caret, click mapping, arrow keys through syntax, selection and drag, soft wrap, typing at boundaries, and IME composition inside, next to and into a span.
+- **IME, checked:** with fcitx5 and Mozc (Japanese) on Wayland, the candidate window sits at the caret and the preedit renders in place, inside a revealed span and next to a concealed one, and committing never duplicates or loses text. Not yet tried: ibus, Chinese input, and X11.
 - **Route for Phase 2:** keep this model and approach 1's input handler, and prototype rendering through `editor_host` so block widgets (tables, images, code, Mermaid) and per-block heading sizes come from Kit. The Editor decoration/token route is ruled out.
 - **Unchanged:** the MVP ships the Split view (issue #1), whatever this spike found.
 - **Fonts:** Orbit must bundle and name its fonts. The default `.SystemUIFont` on Linux won't switch to bold or italic faces (#8).
