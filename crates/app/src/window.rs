@@ -1574,11 +1574,7 @@ impl Render for OrbitWindow {
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus)
             .child(auto_lock::watch_pointer())
-            .map(|this| {
-                #[cfg(feature = "dev-profiler")]
-                let this = this.on_action(crate::dev_scenarios::cycle_overlay);
-                this
-            })
+            .when(cfg!(feature = "dev-profiler"), dev_profiler_actions)
             // Escape in the Switcher is the Switcher's.
             .when(self.drawer.is_some() && self.switcher.is_none(), |this| {
                 this.on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
@@ -1700,6 +1696,19 @@ struct PanelData {
     tags: Vec<TagCount>,
     /// The chosen tag's notes, with the tag.
     tagged: Option<(String, Vec<VaultPath>)>,
+}
+
+/// The measuring build's actions on the window's root: the frame-time
+/// overlay (see `dev_scenarios`).
+#[cfg(feature = "dev-profiler")]
+fn dev_profiler_actions(root: Div) -> Div {
+    root.on_action(crate::dev_scenarios::cycle_overlay)
+}
+
+/// Without the measuring build, nothing.
+#[cfg(not(feature = "dev-profiler"))]
+fn dev_profiler_actions<E>(root: E) -> E {
+    root
 }
 
 /// Whether the window is narrow enough for drawers and a tab list.

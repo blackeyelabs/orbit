@@ -50,8 +50,8 @@ def main() -> int:
     parser.add_argument("--notes", type=int, default=5000)
     args = parser.parse_args()
     root = args.folder
-    if os.path.exists(root) and os.listdir(root):
-        print(f"{root} isn't empty", file=sys.stderr)
+    if os.path.exists(root) and (not os.path.isdir(root) or os.listdir(root)):
+        print(f"{root} isn't an empty folder", file=sys.stderr)
         return 1
     os.makedirs(root, exist_ok=True)
     for i in range(args.notes):

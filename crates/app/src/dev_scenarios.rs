@@ -4,7 +4,9 @@
 //! picks one:
 //! - `idle`: nothing, with no note open;
 //! - `open:<note>`: opens the note, then nothing;
-//! - `type:<note>`: opens the note and types into it, ten keys a second.
+//! - `type:<note>`: opens the note and types into it, ten keys a second
+//!   for 3 s, then pauses 2 s (past the autosave delay), over and over:
+//!   saves happen as they would.
 //!
 //! Each logs "scenario started" at info. Ctrl+Alt+Shift+F cycles GPUI's
 //! frame-time overlay.
@@ -22,6 +24,10 @@ const SETTLE: Duration = Duration::from_millis(1500);
 const KEY_EVERY: Duration = Duration::from_millis(100);
 /// What's typed, over and over.
 const TYPED: &str = "the quick brown fox jumps over the lazy dog ";
+/// Keys typed before each pause.
+const BURST: usize = 30;
+/// The pause after each burst: longer than the autosave delay.
+const PAUSE: Duration = Duration::from_secs(2);
 
 actions!(
     orbit_dev,
@@ -64,11 +70,18 @@ pub fn start(window: &mut Window, cx: &mut Context<OrbitWindow>) {
             this.update_in(cx, |this, window, cx| this.open_note(note, window, cx))
                 .ok();
         }
-        if kind != "type" {
-            return;
+        match kind.as_str() {
+            "type" => {}
+            "idle" | "open" => return,
+            other => return tracing::warn!(scenario = other, "no such scenario"),
         }
-        for key in TYPED.chars().cycle() {
-            cx.background_executor().timer(KEY_EVERY).await;
+        for (typed, key) in TYPED.chars().cycle().enumerate() {
+            let pause = if typed > 0 && typed % BURST == 0 {
+                PAUSE
+            } else {
+                KEY_EVERY
+            };
+            cx.background_executor().timer(pause).await;
             let key = if key == ' ' {
                 "space".to_string()
             } else {

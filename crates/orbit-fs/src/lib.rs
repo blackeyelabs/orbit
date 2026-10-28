@@ -194,36 +194,54 @@ pub struct PlainFs {
     own_writes: OwnWrites,
 }
 
-/// Files Orbit wrote, each with its size and change time just after, and
-/// when.
+/// Files Orbit is writing, or wrote lately, by their real paths.
 type OwnWrites = std::sync::Arc<std::sync::Mutex<std::collections::HashMap<PathBuf, OwnWrite>>>;
 
 /// How long Orbit's own write is recognised when the watcher reports it.
 const OWN_WRITE_KEPT: Duration = Duration::from_secs(10);
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// Orbit's write of a file, as the watcher recognises it: since when, and
+/// what the file was just after (`None` while it's being written).
+#[derive(Clone, Copy)]
 struct OwnWrite {
+    since: std::time::Instant,
+    left: Option<FileState>,
+}
+
+/// What a file is, enough to tell another app's write from Orbit's: its
+/// size, change time and (on Unix) inode.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct FileState {
     len: u64,
     modified: Option<SystemTime>,
-    at: std::time::Instant,
+    inode: u64,
+}
+
+impl FileState {
+    /// The file at `path` as it is now, if it's there.
+    fn of(path: &Path) -> Option<FileState> {
+        let meta = fs::metadata(path).ok()?;
+        #[cfg(unix)]
+        let inode = std::os::unix::fs::MetadataExt::ino(&meta);
+        #[cfg(not(unix))]
+        let inode = 0;
+        Some(FileState {
+            len: meta.len(),
+            modified: meta.modified().ok(),
+            inode,
+        })
+    }
 }
 
 impl OwnWrite {
-    /// The file at `path` as it is now, if it's there.
-    fn of(path: &Path) -> Option<OwnWrite> {
-        let meta = fs::metadata(path).ok()?;
-        Some(OwnWrite {
-            len: meta.len(),
-            modified: meta.modified().ok(),
-            at: std::time::Instant::now(),
-        })
-    }
-
-    /// Whether the file at `path` is still as Orbit left it.
-    fn still(&self, path: &Path) -> bool {
-        self.at.elapsed() < OWN_WRITE_KEPT
-            && OwnWrite::of(path)
-                .is_some_and(|now| (now.len, now.modified) == (self.len, self.modified))
+    /// Whether what the watcher saw of `path` is this write: it's being
+    /// written, or the file is still as Orbit left it, lately.
+    fn covers(&self, path: &Path) -> bool {
+        self.since.elapsed() < OWN_WRITE_KEPT
+            && match self.left {
+                None => true,
+                Some(left) => FileState::of(path) == Some(left),
+            }
     }
 }
 
@@ -420,13 +438,32 @@ impl VaultFs for PlainFs {
         may_replace: &mut dyn FnMut(Option<&[u8]>) -> bool,
     ) -> io::Result<bool> {
         let target = self.resolve_for_write(file)?;
-        let written = write_atomic_if(&target, contents, may_replace)?;
-        if written && let Some(write) = OwnWrite::of(&target) {
-            let mut own = self.own_writes.lock().unwrap_or_else(|e| e.into_inner());
-            own.retain(|_, w| w.at.elapsed() < OWN_WRITE_KEPT);
-            own.insert(target, write);
+        let own = || self.own_writes.lock().unwrap_or_else(|e| e.into_inner());
+        // Marked before writing: the watcher may hear of the write before
+        // it returns.
+        {
+            let mut own = own();
+            own.retain(|_, w| w.since.elapsed() < OWN_WRITE_KEPT);
+            let since = std::time::Instant::now();
+            own.insert(target.clone(), OwnWrite { since, left: None });
         }
-        Ok(written)
+        let written = write_atomic_if(&target, contents, may_replace);
+        match (&written, FileState::of(&target)) {
+            (Ok(true), Some(left)) => {
+                let since = std::time::Instant::now();
+                own().insert(
+                    target,
+                    OwnWrite {
+                        since,
+                        left: Some(left),
+                    },
+                );
+            }
+            _ => {
+                own().remove(&target);
+            }
+        }
+        written
     }
 }
 
@@ -497,9 +534,10 @@ fn rename_no_replace(source: &Path, target: &Path) -> io::Result<()> {
 /// `WATCH_DEBOUNCE` has passed after the first of a batch. Reading a file
 /// isn't changing it: opening, reading and closing without writing are
 /// left out, or each read (indexing, opening a note) would be reported
-/// as a change and read again, without end. Nor is Orbit's own write,
-/// while the file is still as it left it (`own`). Events lost (a full
-/// inotify queue, say) are reported as the whole vault.
+/// as a change and read again, without end. Nor is Orbit's own write
+/// (`own`), told when the batch is sent: it may be marked done only after
+/// the watcher heard of it. Events lost (a full inotify queue, say) are
+/// reported as the whole vault.
 fn report_changes(
     root: &Path,
     own: &OwnWrites,
@@ -508,20 +546,12 @@ fn report_changes(
 ) {
     use std::sync::mpsc::RecvTimeoutError;
     while let Ok(first) = events.recv() {
-        let mut changed = std::collections::BTreeSet::new();
+        let mut heard = std::collections::BTreeSet::new();
         let mut lost = false;
         let mut take = |event: notify::Result<notify::Event>| match event {
             Ok(event) if is_change(&event.kind) => {
                 lost |= event.need_rescan();
-                let own = own.lock().unwrap_or_else(|e| e.into_inner());
-                changed.extend(
-                    event
-                        .paths
-                        .iter()
-                        .filter(|path| !own.get(*path).is_some_and(|w| w.still(path)))
-                        .filter_map(|path| vault_path(root, path))
-                        .filter(|path| !path.name().starts_with(SAVE_TEMP_PREFIX)),
-                );
+                heard.extend(event.paths);
             }
             Ok(_) => {}
             Err(_) => lost = true,
@@ -536,10 +566,21 @@ fn report_changes(
                 Err(RecvTimeoutError::Disconnected) => return,
             }
         }
+        let changed: Vec<VaultPath> = {
+            let own = own.lock().unwrap_or_else(|e| e.into_inner());
+            heard
+                .iter()
+                .filter(|path| !own.get(*path).is_some_and(|w| w.covers(path)))
+                .filter_map(|path| vault_path(root, path))
+                .filter(|path| !path.name().starts_with(SAVE_TEMP_PREFIX))
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect()
+        };
         if lost {
             on_change(vec![VaultPath::root()]);
         } else if !changed.is_empty() {
-            on_change(changed.into_iter().collect());
+            on_change(changed);
         }
     }
 }

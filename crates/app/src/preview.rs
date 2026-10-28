@@ -538,6 +538,7 @@ pub struct PreviewPane {
 }
 
 impl PreviewPane {
+    /// The preview of the note `id`: `text` rendered with `context`.
     pub fn new(id: SharedString, text: SharedString, context: PreviewContext) -> Self {
         PreviewPane { id, text, context }
     }

@@ -10,7 +10,19 @@ fn p(path: &str) -> VaultPath {
 }
 
 fn vault_with(files: &[(&str, &str)]) -> (tempfile::TempDir, Vault) {
-    let dir = tempfile::tempdir().unwrap();
+    vault_in(tempfile::tempdir().unwrap(), files)
+}
+
+/// A vault on the disk the build is on, not in a RAM-backed /tmp: saving
+/// there takes real time (the folder's fsync), as watching must allow for.
+fn vault_on_disk(files: &[(&str, &str)]) -> (tempfile::TempDir, Vault) {
+    vault_in(
+        tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap(),
+        files,
+    )
+}
+
+fn vault_in(dir: tempfile::TempDir, files: &[(&str, &str)]) -> (tempfile::TempDir, Vault) {
     for (path, text) in files {
         let file = dir.path().join(path);
         fs::create_dir_all(file.parent().unwrap()).unwrap();
@@ -220,7 +232,7 @@ fn the_watcher_reports_changes_outside_orbit_but_not_in_tool_folders() {
 
 #[test]
 fn the_watcher_doesnt_report_orbits_own_saves_back() {
-    let (dir, vault) = vault_with(&[("Inbox/a.md", "a")]);
+    let (dir, vault) = vault_on_disk(&[("Inbox/a.md", "a")]);
     let (tx, rx) = std::sync::mpsc::channel();
     let _watch = vault
         .watch(move |paths| {
@@ -243,7 +255,7 @@ fn the_watcher_doesnt_report_orbits_own_saves_back() {
 
 #[test]
 fn reading_a_note_isnt_reported_as_changing_it() {
-    let (dir, vault) = vault_with(&[("Inbox/a.md", "a")]);
+    let (dir, vault) = vault_on_disk(&[("Inbox/a.md", "a")]);
     let (tx, rx) = std::sync::mpsc::channel();
     let _watch = vault
         .watch(move |paths| {

@@ -23,7 +23,7 @@ mkdir -p "$work"/{config,state,cache,runtime}
 chmod 700 "$work/runtime"
 
 display=${WAYLAND_DISPLAY:-wayland-0}
-[[ $display == /* ]] || display="$XDG_RUNTIME_DIR/$display"
+[[ $display == /* ]] || display="${XDG_RUNTIME_DIR:?needed to find the compositor}/$display"
 
 XDG_RUNTIME_DIR="$work/runtime" WAYLAND_DISPLAY="$display" \
   XDG_CONFIG_HOME="$work/config" XDG_STATE_HOME="$work/state" \
@@ -33,8 +33,12 @@ XDG_RUNTIME_DIR="$work/runtime" WAYLAND_DISPLAY="$display" \
 pid=$!
 trap 'kill "$pid" 2>/dev/null || true' EXIT
 
-# CPU time so far, in clock ticks: utime + stime.
-ticks() { awk '{print $14 + $15}' "/proc/$pid/stat"; }
+# CPU time so far, in clock ticks: utime + stime. Orbit gone early is said,
+# with where its output is.
+ticks() {
+  [[ -r /proc/$pid/stat ]] || { echo "Orbit exited early: see $work/stderr.log" >&2; exit 1; }
+  awk '{print $14 + $15}' "/proc/$pid/stat"
+}
 hz=$(getconf CLK_TCK)
 
 sleep "$warmup"
@@ -53,8 +57,8 @@ peak=$(mb "$(kb VmHWM "$status")")
 threads=$(kb Threads "$status")
 
 # This run's lines only: a reused work dir's log holds earlier runs too.
-log=$(ls "$work"/state/orbit/logs/*.log | tail -1)
-run=$(awk -v pid="pid=$pid " 'index($0, pid) && /Orbit started/ {found = 1} found' "$log")
+run=$({ cat "$work"/state/orbit/logs/*.log 2>/dev/null || true; } |
+  awk -v pid="pid=$pid " 'index($0, pid) && /Orbit started/ {found = 1} found')
 indexing=$(grep -o 'search index up to date.*ms=[0-9]*' <<<"$run" | grep -o 'ms=[0-9]*' | head -1 | cut -d= -f2 || true)
 changed=$(grep -c 'window.changed_on_disk.*close' <<<"$run" || true)
 updates=$(grep -c 'search.update.*close' <<<"$run" || true)

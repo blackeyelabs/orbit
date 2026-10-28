@@ -269,8 +269,7 @@ impl NoteEditor {
             }
         });
         let shown: SharedString = preview.rewrite_links(&text).into();
-        let id: SharedString = format!("preview-{path}").into();
-        let pane = cx.new(|_| PreviewPane::new(id, shown.clone(), preview.clone()));
+        let pane = cx.new(|_| PreviewPane::new(preview_id(&path), shown.clone(), preview.clone()));
         NoteEditor {
             preview,
             pane,
@@ -379,18 +378,12 @@ impl NoteEditor {
     pub fn links_changed(&mut self, cx: &mut Context<Self>) {
         if self.mode == Mode::Split {
             self.shown = self.preview.rewrite_links(&self.text).into();
-            let (id, shown) = (self.preview_id(), self.shown.clone());
+            let (id, shown) = (preview_id(&self.path), self.shown.clone());
             let context = &self.preview;
             self.pane
                 .update(cx, |pane, cx| pane.show(id, shown, context, cx));
         }
         cx.notify();
-    }
-
-    /// The preview's element id: per note, so another note's preview
-    /// doesn't inherit its state.
-    fn preview_id(&self) -> SharedString {
-        format!("preview-{}", self.path).into()
     }
 
     /// Puts the caret on the heading a link named, if the note has it.
@@ -960,6 +953,12 @@ impl Render for NoteEditor {
             .children(self.render_large_banner(cx))
             .child(body)
     }
+}
+
+/// The preview's element id: per note, so another note's preview doesn't
+/// inherit its state.
+fn preview_id(path: &VaultPath) -> SharedString {
+    format!("preview-{path}").into()
 }
 
 /// "4.2 MB": a large note's size.
