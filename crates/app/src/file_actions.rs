@@ -137,37 +137,47 @@ pub fn ask_rename(
     };
     let input = cx.new(|cx| InputState::new(window, cx).default_value(stem));
     let view = cx.entity().downgrade();
-    let submit = {
-        let (input, view, path) = (input.clone(), view.clone(), path.clone());
-        move |window: &mut Window, cx: &mut App| {
+    // The new name, typed; renamed through `this` (the window).
+    let rename = {
+        let (input, path) = (input.clone(), path.clone());
+        move |this: &mut OrbitWindow, window: &mut Window, cx: &mut Context<OrbitWindow>| {
             let name = input.read(cx).value().trim().to_string();
-            let path = path.clone();
-            view.update(cx, |this, cx| this.rename_entry(path, &name, window, cx))
-                .ok();
+            this.rename_entry(path.clone(), &name, window, cx);
             window.close_dialog(cx);
         }
     };
-    let on_enter = submit.clone();
+    // The Rename button, outside the window's update.
+    let submit = {
+        let (view, rename) = (view.clone(), rename.clone());
+        move |window: &mut Window, cx: &mut App| {
+            view.update(cx, |this, cx| rename(this, window, cx)).ok();
+        }
+    };
+    // Enter, heard by the window itself: it's already being updated, so
+    // it renames directly rather than through `view`.
     cx.subscribe_in(
         &input,
         window,
-        move |_, _, event: &InputEvent, window, cx| {
+        move |this, _, event: &InputEvent, window, cx| {
             if let InputEvent::PressEnter { .. } = event {
-                on_enter(window, cx);
+                rename(this, window, cx);
             }
         },
     )
     .detach();
-    input.update(cx, |input, cx| {
-        input.select_all(window, cx);
-        input.focus(window, cx);
-    });
+    let field = input.clone();
     window.open_dialog(cx, move |dialog, _, _| {
         let submit = submit.clone();
         dialog
             .title(format!("Rename {name}"))
-            .child(Input::new(&input))
+            .child(Input::new(&field))
             .footer(footer("Rename", move |window, cx| submit(window, cx)))
+    });
+    // After the dialog opens, which takes focus: the name is ready to type
+    // over.
+    input.update(cx, |input, cx| {
+        input.select_all(window, cx);
+        input.focus(window, cx);
     });
 }
 
