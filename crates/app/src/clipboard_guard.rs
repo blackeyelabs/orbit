@@ -71,7 +71,8 @@ pub fn ask(
                 v_flex()
                     .gap_3()
                     .child(text(format!(
-                        "Other apps can read the clipboard. Orbit clears it {} after copying.",
+                        "Copied text is no longer protected. It will be cleared from the \
+                         clipboard after {}.",
                         after(seconds)
                     )))
                     .child(
