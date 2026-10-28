@@ -1433,12 +1433,7 @@ impl OrbitWindow {
             })
     }
 
-    fn render_centre(
-        &self,
-        narrow: bool,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn render_centre(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let body = match self.active() {
             Some(tab) => div()
                 .flex_1()
@@ -1452,8 +1447,9 @@ impl OrbitWindow {
             .flex_1()
             .min_w_0()
             .h_full()
-            // In a narrow window the tabs are listed behind the title.
-            .when(!narrow && !self.tabs.is_empty(), |this| {
+            // In a narrow window the strip scrolls sideways, and the tabs are
+            // listed behind the title too.
+            .when(!self.tabs.is_empty(), |this| {
                 this.child(
                     TabBar::new("tabs")
                         .selected_index(self.active_tab.unwrap_or(0))
@@ -1653,7 +1649,7 @@ impl Render for OrbitWindow {
                     .when(!narrow && self.left_panel_open, |this| {
                         this.child(self.render_sidebar(rems(SIDEBAR_WIDTH).into(), window, cx))
                     })
-                    .child(self.render_centre(narrow, window, cx))
+                    .child(self.render_centre(window, cx))
                     .when(!narrow && self.right_panel_open, |this| {
                         this.child(self.render_right_panel(rems(right_panel::WIDTH).into(), cx))
                     }),
