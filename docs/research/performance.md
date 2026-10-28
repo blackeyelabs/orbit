@@ -48,7 +48,7 @@
   - CPU ms per second, from `/proc/<pid>/stat` utime + stime;
   - RSS, with its anonymous and file-backed parts, peak RSS (`VmHWM`) and threads, all from `/proc/<pid>/status`. Orbit makes itself non-dumpable (`harden_process`, `crates/app/src/main.rs`), which puts `smaps` and `smaps_rollup` out of reach even of the same user [measured];
   - the indexing time, and how often `window.changed_on_disk` and `search.update` ran, from the log.
-- A work dir that already holds a cache gives a warm start.
+- The search index and the session live in the vault's own `.vault/` folder. So a freshly generated vault gives a cold start, and one Orbit has opened before gives a warm start, with the tabs it left open.
 - **Spans:** spans log their busy and idle time when they close (`with_span_events(FmtSpan::CLOSE)`, `crates/app/src/logging.rs`; [tracing-subscriber](https://docs.rs/tracing-subscriber/0.3.23/tracing_subscriber/fmt/struct.Layer.html#method.with_span_events)). The spans are:
   - `vault.open`;
   - `search.index`;
@@ -144,9 +144,16 @@ Notes on profiling:
 | 2 | Refresh the tabs' links only when notes are added, removed or renamed | `window.rs` `changed_on_disk` | set aside: `changed_on_disk` no longer runs while typing or idle; it matters only for outside changes (sync, git) |
 | 3 | Walk the tree once per refresh (`has_notes` from the same nodes) | `window.rs` `refresh_tree`, `orbit-core/src/lib.rs` | set aside, for the same reason |
 | 4 | Delay the preview, Outline and word count until typing pauses | `note_editor.rs` `catch_up_later` | **done**, with 6 |
-| 5 | Tantivy writer budget at the minimum (15 MB) | `orbit-index/src/lib.rs` | planned |
+| 5 | Tantivy writer budget at the minimum (15 MB) | `orbit-index/src/lib.rs` | dropped: on three cold starts each, peak RSS was 256/256/266 MB at 15 MB against 251/253/253 MB at 50 MB, and indexing 273–279 against 271–274 ms. The fixture's notes never fill even 15 MB before a commit |
 | 6 | The preview as a cached view of its own | `preview.rs` `PreviewPane`, `note_editor.rs` | **done**: typing into a 200 KB note, 1,150 → 380 ms/s |
-| 7 | Document `ZED_DEVICE_ID` for hybrid-GPU laptops | README | planned |
+| 7 | The GPU on hybrid laptops | README | **not needed**: GPUI prefers the GPU the compositor renders on, ahead of discrete over integrated (gpui-pre-wgpu `wgpu_context.rs:582-593`). Here it picks the Intel UHD over the RTX A2000 [measured, `ORBIT_LOG=info` shows "Selected GPU adapter"]. The README documents `ZED_DEVICE_ID` for overriding it. Still open: wgpu enumerates every adapter, so NVIDIA's Vulkan driver is loaded into the process, which is likely part of the roughly 125 MB of file-backed RSS |
+
+## What's left
+
+- **Very large notes:** `Big.md` (3 MB) takes RSS to about 1 GB in the Kit editor's soft-wrap layout. Notes over 2 MB already open as source only. Measure the editor with heaptrack before changing anything.
+- **Typing into a small note** costs about 220 ms/s, mostly the editor's own redraw on each key.
+- **Caret blinks:** with a note open and idle, the caret's blink costs about 15–22 ms/s. Caching the sidebar and right panel too could cut that further.
+- **Outside changes:** fixes 2 and 3 would help when many notes change outside Orbit at once (a sync, a git pull).
 
 ## Sources
 

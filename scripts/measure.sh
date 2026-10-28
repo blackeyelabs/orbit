@@ -6,9 +6,10 @@
 #   scripts/measure.sh <orbit binary> <vault> <scenario> [warm-up s] [measure s] [work dir]
 #
 # The scenario is an ORBIT_SCENARIO value (the binary needs the
-# dev-profiler feature): idle, open:<note> or type:<note>. A work dir that
-# already holds a cache (from an earlier run) measures a warm start; a new
-# one, a cold start. Memory comes from /proc/<pid>/status: Orbit makes
+# dev-profiler feature): idle, open:<note> or type:<note>. The search index
+# and the session live in the vault's own .vault/: a freshly made vault
+# measures a cold start, and one Orbit has opened before a warm start (with
+# the tabs it left open). Memory comes from /proc/<pid>/status: Orbit makes
 # itself non-dumpable, which keeps smaps out of reach even of its user.
 # Prints a Markdown table row:
 #   scenario | CPU ms/s | RSS MB | anonymous MB | file-backed MB |

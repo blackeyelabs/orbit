@@ -27,4 +27,4 @@ By default Orbit's own crates log at info and everything else only warnings and 
 ORBIT_LOG=warn,orbit=debug cargo run -p app   # `orbit` covers orbit_core and the rest too
 ```
 
-`ORBIT_LOG` takes `tracing` filter directives and wins over `RUST_LOG`. Logs never hold note text, secrets or any path in a protected folder ([ADR 0007](docs/adr/0007-logs-carry-no-vault-content.md)).
+`ORBIT_LOG` takes `tracing` filter directives and wins over `RUST_LOG`. With `ORBIT_LOG=info`, the log also says which GPU Orbit draws with: the one the compositor uses, if it can. To choose another, set `ZED_DEVICE_ID` to its PCI device ID (for example `ZED_DEVICE_ID=0x9a60`). Logs never hold note text, secrets or any path in a protected folder ([ADR 0007](docs/adr/0007-logs-carry-no-vault-content.md)).
