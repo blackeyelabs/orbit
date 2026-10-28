@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Orbit Linux Package Repositories</title>
+  <style>
+    :root {
+      --bg: #1c1917;
+      --card-bg: #292524;
+      --text: #f5f5f4;
+      --muted: #a8a29e;
+      --accent: #da9436;
+      --code-bg: #0c0a09;
+      --border: #44403c;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background-color: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      margin: 0;
+      padding: 2rem 1rem;
+    }
+    .container {
+      max-width: 800px;
+      margin: 0 auto;
+    }
+    header {
+      text-align: center;
+      margin-bottom: 3rem;
+    }
+    h1 {
+      color: var(--accent);
+      font-size: 2.5rem;
+      margin-bottom: 0.5rem;
+    }
+    p.lead {
+      font-size: 1.2rem;
+      color: var(--muted);
+    }
+    .card {
+      background-color: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1.5rem;
+      margin-bottom: 2rem;
+      box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3);
+    }
+    h2 {
+      margin-top: 0;
+      color: var(--text);
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 0.5rem;
+      font-size: 1.4rem;
+    }
+    pre {
+      background-color: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 1rem;
+      overflow-x: auto;
+      font-size: 0.95rem;
+      color: #e7e5e4;
+    }
+    code {
+      font-family: "JetBrains Mono", Menlo, Monaco, Consolas, monospace;
+    }
+    a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+    a:hover {
+      text-decoration: underline;
+    }
+    footer {
+      text-align: center;
+      margin-top: 3rem;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Orbit Linux Repository</h1>
+      <p class="lead">Official package repositories for Debian, Ubuntu, Fedora, openSUSE, and Arch Linux.</p>
+    </header>
+
+    <div class="card">
+      <h2>🚀 One-Line Quick Install</h2>
+      <p>Automatically detects your distribution and installs the native package:</p>
+      <pre><code>curl -fsSL https://raw.githubusercontent.com/blackeyelabs/orbit/main/install.sh | bash</code></pre>
+    </div>
+
+    <div class="card">
+      <h2>📦 Debian / Ubuntu</h2>
+      <p>Add the GPG signing key and APT repository:</p>
+      <pre><code># Import GPG keyring
+curl -fsSL https://blackeyelabs.github.io/orbit/keys/orbit.gpg.key | sudo gpg --dearmor -o /etc/apt/keyrings/orbit.gpg
+
+# Add repository source
+echo "deb [signed-by=/etc/apt/keyrings/orbit.gpg] https://blackeyelabs.github.io/orbit/apt stable main" | sudo tee /etc/apt/sources.list.d/orbit.list
+
+# Update and install
+sudo apt update
+sudo apt install orbit</code></pre>
+    </div>
+
+    <div class="card">
+      <h2>📦 Fedora / RHEL / CentOS</h2>
+      <p>Add the DNF repository configuration:</p>
+      <pre><code>sudo dnf config-manager --add-repo https://blackeyelabs.github.io/orbit/rpm/orbit.repo
+sudo dnf install orbit</code></pre>
+    </div>
+
+    <div class="card">
+      <h2>📦 Arch Linux</h2>
+      <p>Add the repository to <code>/etc/pacman.conf</code>:</p>
+      <pre><code>[orbit]
+SigLevel = Required DatabaseOptional
+Server = https://blackeyelabs.github.io/orbit/pacman/$arch</code></pre>
+      <p>Or install from the AUR:</p>
+      <pre><code>yay -S orbit-bin</code></pre>
+    </div>
+
+    <div class="card">
+      <h2>❄️ Nix / NixOS</h2>
+      <p>Run directly or install with Nix flakes:</p>
+      <pre><code>nix run github:blackeyelabs/orbit
+nix profile install github:blackeyelabs/orbit</code></pre>
+    </div>
+
+    <footer>
+      <p>Orbit is open source. View on <a href="https://github.com/blackeyelabs/orbit">GitHub</a>.</p>
+    </footer>
+  </div>
+</body>
+</html>

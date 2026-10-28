@@ -1,0 +1,43 @@
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA512
+
+Origin: Orbit
+Label: Orbit
+Suite: stable
+Codename: stable
+Version: 1.0
+Architectures: amd64
+Components: main
+Description: Official Orbit Linux package repository
+Date: Wed, 28 Oct 2026 18:03:37 +0000
+Date: Wed, 28 Oct 2026 18:03:37 +0000
+MD5Sum:
+ 6d9ad6183311c034d6867a45e55e893a              238 Release
+ bcf4f8370250da416011259109ef9274              997 main/binary-amd64/Packages
+ 1d37a02c0fabe53fd4c8e16c90af8fa5              647 main/binary-amd64/Packages.gz
+SHA1:
+ 406e01235a30112ba23be1021029127df478f677              238 Release
+ ca304c7bdf295478cd3ec66ee575a77c85431e12              997 main/binary-amd64/Packages
+ c14a6895bdc6fcda5c1a0a1f9461fcff02426c58              647 main/binary-amd64/Packages.gz
+SHA256:
+ 3ff573d2c3607397e490d677c0f387b495cd79098b372a178305a5110aaee5b7              238 Release
+ 6deed883a649f8dda955dcca79d9efde986d4aa377d6821082ecb1dccf6a401d              997 main/binary-amd64/Packages
+ 99383db55fd34811017431c4f073529c11629a1fb0c35c83ec2470395fe08464              647 main/binary-amd64/Packages.gz
+SHA512:
+ 7ac27c11ec0e0abbb523de6c89fb583d2caaee21b51700cff4bf697d15f9786a52f985d4e13ed660b224cefe908042941fac41e8f916ffceebfd925fdf73ba6d              238 Release
+ 1f467c4bbf05adac0e7468c35d3a34e5721cffdc72df0adec20816c65ab92786c1ca2cef0984576f153c82da1aa1d0d4ada114fedfb55a9b650894cfaee2a1e9              997 main/binary-amd64/Packages
+ 08d59fe7aac5526c1e9d7923085ab74d8b97ec31b7ae6e3c673b3abe08e106a977eec604c0de6c82206cf2b763ea4fd941f4021cd433ad8bcfa987db1dfb1e8d              647 main/binary-amd64/Packages.gz
+-----BEGIN PGP SIGNATURE-----
+
+iQGzBAEBCgAdFiEEjK4reEBL2PQ1LD8KR1FL1UEVWdwFAmriOPkACgkQR1FL1UEV
+WdwlJgwA0GEktphw7NrAAWxLOaWSg0He9Udu4ZXB6C9m6THWL7usxhEId2o6bX7t
+GLh/tAQRJBoON6zwnAgTlIRzqykksNsWxWjWPOJlM4F8RqbGoHnyS+rbFlNFIwIk
+v/urMoIl88g2DJnv2BecEsA7fxwfN815+Jyz+KMUhaiATrIVYt/vTtvlSButKIPL
+Wj/sWMs0y+ZW0oMseqwgC7ChCW9ZMIgyjMfje/cFCg33QbNogNWfXK4VG4z/fx6W
+PyehedmPcTGY+rbYBQgcF3LwfDqpc3wBdrcCDizciyu+zAofS+uz7deJ2nZYHrRj
+2mrTl7PTCaBAaVUUvunbIyUN5gYqBrR3yHAzpYkVsEByLcbJ1j/Q9AzbY1fQ+i6u
+7RlyhQLkJY18AYamK9+KPI5EULkQI4wu/odmT2Fi2EKP0UOoitBdfyIoUHHbtoxt
+yV72rEZLaOb4aSK0MuNvZSbQZ4BCVnJpam3i1Y2zbIwG6G0y9isRwZ0V36Q2TxXb
+rR8KQryJ
+=ogQh
+-----END PGP SIGNATURE-----

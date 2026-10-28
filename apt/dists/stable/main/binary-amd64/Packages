@@ -1,0 +1,19 @@
+Package: orbit
+Architecture: amd64
+Version: 0.1.0-1
+Priority: optional
+Section: editors
+Maintainer: Orbit Authors <dev@blackeyelabs.com>
+Installed-Size: 75098
+Depends: libc6 (>= 2.39), libfontconfig1, libfreetype6, libvulkan1, libwayland-client0, libxcb1, libxcb1 (>= 1.12), libxkbcommon-x11-0, libxkbcommon-x11-0 (>= 0.5.0), libxkbcommon0, libxkbcommon0 (>= 0.5.0)
+Filename: pool/main/o/orbit/orbit_0.1.0_amd64.deb
+Size: 20274668
+MD5sum: ee6c79abb7505accdbad8f6504d823b5
+SHA1: 1d46d686222b7578c71b4a265b790b7ed8e137ce
+SHA256: 6e04c1858c4817b4c28796d715574f01b5b12d57d0a250f938b165399a3d09e0
+SHA512: bc6e7b0fc6e0c9490b9b79c80ed3b4fa20be40abda1b37a03e60fc7645c46cc3c3e55b77c3af438e289c29a1509cf8b9ce974154c727de9bb58638697f67dbe2
+Description: Local-first, encrypted workspace for notes and diagrams
+ Orbit is a local-first, Obsidian-like workspace for markdown notes and Mermaid
+ diagrams, kept as plain files in a folder. Selected folders can be protected
+ with cryptographic encryption at rest.
+
