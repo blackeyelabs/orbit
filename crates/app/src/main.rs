@@ -6,6 +6,8 @@ mod appearance;
 mod auto_lock;
 mod clipboard_guard;
 mod commands;
+#[cfg(feature = "dev-profiler")]
+mod dev_scenarios;
 mod diagram_block;
 mod empty_states;
 mod file_actions;
@@ -51,6 +53,8 @@ fn main() {
             commands::init(cx);
             switcher::init(cx);
             vaults::init(cx);
+            #[cfg(feature = "dev-profiler")]
+            dev_scenarios::init(cx);
             #[cfg(unix)]
             instance::listen(cx);
             vaults::open_or_welcome(path, cx);

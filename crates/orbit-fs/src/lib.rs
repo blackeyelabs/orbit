@@ -14,7 +14,10 @@ mod protected;
 
 pub use protected::{ProtectedFs, Sealed};
 
-use notify_debouncer_mini::{DebounceEventResult, new_debouncer, notify::RecursiveMode};
+use notify::{
+    EventKind, RecursiveMode, Watcher as _,
+    event::{AccessKind, AccessMode},
+};
 
 /// Where protected folders keep their encrypted storage, at the vault root
 /// (docs/protected-folder-format.md).
@@ -186,6 +189,42 @@ pub trait VaultFs: Send + Sync {
 /// A vault folder on the local disk.
 pub struct PlainFs {
     root: PathBuf,
+    /// What Orbit wrote lately, shared with the watcher: its own saves
+    /// coming back aren't changes by another app.
+    own_writes: OwnWrites,
+}
+
+/// Files Orbit wrote, each with its size and change time just after, and
+/// when.
+type OwnWrites = std::sync::Arc<std::sync::Mutex<std::collections::HashMap<PathBuf, OwnWrite>>>;
+
+/// How long Orbit's own write is recognised when the watcher reports it.
+const OWN_WRITE_KEPT: Duration = Duration::from_secs(10);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct OwnWrite {
+    len: u64,
+    modified: Option<SystemTime>,
+    at: std::time::Instant,
+}
+
+impl OwnWrite {
+    /// The file at `path` as it is now, if it's there.
+    fn of(path: &Path) -> Option<OwnWrite> {
+        let meta = fs::metadata(path).ok()?;
+        Some(OwnWrite {
+            len: meta.len(),
+            modified: meta.modified().ok(),
+            at: std::time::Instant::now(),
+        })
+    }
+
+    /// Whether the file at `path` is still as Orbit left it.
+    fn still(&self, path: &Path) -> bool {
+        self.at.elapsed() < OWN_WRITE_KEPT
+            && OwnWrite::of(path)
+                .is_some_and(|now| (now.len, now.modified) == (self.len, self.modified))
+    }
 }
 
 impl PlainFs {
@@ -197,7 +236,10 @@ impl PlainFs {
                 "vault root is not a folder",
             ));
         }
-        Ok(PlainFs { root })
+        Ok(PlainFs {
+            root,
+            own_writes: OwnWrites::default(),
+        })
     }
 
     /// Makes a folder's entries survive a crash: those just made in it.
@@ -332,31 +374,18 @@ impl VaultFs for PlainFs {
 
     /// Debounced and recursive. Orbit's own temporary save files aren't
     /// reported; paths that aren't valid vault paths are skipped.
-    fn watch(&self, mut on_change: ChangeHandler) -> io::Result<Watch> {
-        let root = self.root.clone();
-        let mut debouncer = new_debouncer(WATCH_DEBOUNCE, move |events: DebounceEventResult| {
-            // Events were lost (a full inotify queue, say): anything may have
-            // changed.
-            let Ok(events) = events else {
-                return on_change(vec![VaultPath::root()]);
-            };
-            let mut paths: Vec<VaultPath> = events
-                .iter()
-                .filter_map(|event| vault_path(&root, &event.path))
-                .filter(|path| !path.name().starts_with(SAVE_TEMP_PREFIX))
-                .collect();
-            paths.sort();
-            paths.dedup();
-            if !paths.is_empty() {
-                on_change(paths);
-            }
-        })
-        .map_err(io::Error::other)?;
-        debouncer
-            .watcher()
+    fn watch(&self, on_change: ChangeHandler) -> io::Result<Watch> {
+        let (events, received) = std::sync::mpsc::channel();
+        let mut watcher = notify::recommended_watcher(events).map_err(io::Error::other)?;
+        watcher
             .watch(&self.root, RecursiveMode::Recursive)
             .map_err(io::Error::other)?;
-        Ok(Watch(Box::new(debouncer)))
+        let (root, own) = (self.root.clone(), self.own_writes.clone());
+        // Ends when the watcher, and so the channel, is dropped.
+        std::thread::Builder::new()
+            .name("orbit-watch".into())
+            .spawn(move || report_changes(&root, &own, &received, on_change))?;
+        Ok(Watch(Box::new(watcher)))
     }
 
     /// An advisory lock on `.vault/lock`, which the system releases if
@@ -390,7 +419,14 @@ impl VaultFs for PlainFs {
         contents: &[u8],
         may_replace: &mut dyn FnMut(Option<&[u8]>) -> bool,
     ) -> io::Result<bool> {
-        write_atomic_if(&self.resolve_for_write(file)?, contents, may_replace)
+        let target = self.resolve_for_write(file)?;
+        let written = write_atomic_if(&target, contents, may_replace)?;
+        if written && let Some(write) = OwnWrite::of(&target) {
+            let mut own = self.own_writes.lock().unwrap_or_else(|e| e.into_inner());
+            own.retain(|_, w| w.at.elapsed() < OWN_WRITE_KEPT);
+            own.insert(target, write);
+        }
+        Ok(written)
     }
 }
 
@@ -455,6 +491,67 @@ fn rename_no_replace(source: &Path, target: &Path) -> io::Result<()> {
         ));
     }
     fs::rename(source, target)
+}
+
+/// Passes the watcher's events on as batches of changed paths, once
+/// `WATCH_DEBOUNCE` has passed after the first of a batch. Reading a file
+/// isn't changing it: opening, reading and closing without writing are
+/// left out, or each read (indexing, opening a note) would be reported
+/// as a change and read again, without end. Nor is Orbit's own write,
+/// while the file is still as it left it (`own`). Events lost (a full
+/// inotify queue, say) are reported as the whole vault.
+fn report_changes(
+    root: &Path,
+    own: &OwnWrites,
+    events: &std::sync::mpsc::Receiver<notify::Result<notify::Event>>,
+    mut on_change: ChangeHandler,
+) {
+    use std::sync::mpsc::RecvTimeoutError;
+    while let Ok(first) = events.recv() {
+        let mut changed = std::collections::BTreeSet::new();
+        let mut lost = false;
+        let mut take = |event: notify::Result<notify::Event>| match event {
+            Ok(event) if is_change(&event.kind) => {
+                lost |= event.need_rescan();
+                let own = own.lock().unwrap_or_else(|e| e.into_inner());
+                changed.extend(
+                    event
+                        .paths
+                        .iter()
+                        .filter(|path| !own.get(*path).is_some_and(|w| w.still(path)))
+                        .filter_map(|path| vault_path(root, path))
+                        .filter(|path| !path.name().starts_with(SAVE_TEMP_PREFIX)),
+                );
+            }
+            Ok(_) => {}
+            Err(_) => lost = true,
+        };
+        take(first);
+        let until = std::time::Instant::now() + WATCH_DEBOUNCE;
+        loop {
+            let left = until.saturating_duration_since(std::time::Instant::now());
+            match events.recv_timeout(left) {
+                Ok(event) => take(event),
+                Err(RecvTimeoutError::Timeout) => break,
+                Err(RecvTimeoutError::Disconnected) => return,
+            }
+        }
+        if lost {
+            on_change(vec![VaultPath::root()]);
+        } else if !changed.is_empty() {
+            on_change(changed.into_iter().collect());
+        }
+    }
+}
+
+/// Whether an event changes what's on disk: anything but a file opened,
+/// read or closed without writing.
+fn is_change(kind: &EventKind) -> bool {
+    match kind {
+        EventKind::Access(AccessKind::Close(AccessMode::Write)) => true,
+        EventKind::Access(_) => false,
+        _ => true,
+    }
 }
 
 /// The vault path of a real path under `root`, if it is one.

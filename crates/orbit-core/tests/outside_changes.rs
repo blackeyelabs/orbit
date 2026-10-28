@@ -217,3 +217,47 @@ fn the_watcher_reports_changes_outside_orbit_but_not_in_tool_folders() {
         changes_until(&rx, &p("Inbox/a.md"));
     }
 }
+
+#[test]
+fn the_watcher_doesnt_report_orbits_own_saves_back() {
+    let (dir, vault) = vault_with(&[("Inbox/a.md", "a")]);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let _watch = vault
+        .watch(move |paths| {
+            tx.send(paths).ok();
+        })
+        .unwrap();
+
+    vault.save_note(&p("Inbox/a.md"), "saved by Orbit").unwrap();
+    // Another app's change after it: once that's seen, the save would have
+    // been too.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    fs::write(dir.path().join("Inbox/marker.md"), "outside").unwrap();
+    let seen = changes_until(&rx, &p("Inbox/marker.md"));
+    assert!(!seen.contains(&p("Inbox/a.md")), "{seen:?}");
+
+    // The same note changed by another app is reported.
+    fs::write(dir.path().join("Inbox/a.md"), "saved by another app").unwrap();
+    changes_until(&rx, &p("Inbox/a.md"));
+}
+
+#[test]
+fn reading_a_note_isnt_reported_as_changing_it() {
+    let (dir, vault) = vault_with(&[("Inbox/a.md", "a")]);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let _watch = vault
+        .watch(move |paths| {
+            tx.send(paths).ok();
+        })
+        .unwrap();
+
+    // Indexing and opening notes read them: neither is a change, or each
+    // read would be reported and read again, without end.
+    vault.read_note(&p("Inbox/a.md")).unwrap();
+    vault.open_note(&p("Inbox/a.md")).unwrap();
+    vault.index_search();
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    fs::write(dir.path().join("Inbox/marker.md"), "outside").unwrap();
+    let seen = changes_until(&rx, &p("Inbox/marker.md"));
+    assert!(!seen.contains(&p("Inbox/a.md")), "{seen:?}");
+}

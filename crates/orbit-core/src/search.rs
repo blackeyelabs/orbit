@@ -251,6 +251,10 @@ impl Vault {
     /// Indexes the paths changed since the indexes last caught up.
     fn catch_up(&self) {
         let changed = std::mem::take(&mut *lock(&self.search.pending));
+        if changed.is_empty() {
+            return;
+        }
+        let _span = tracing::debug_span!("search.update", changed = changed.len()).entered();
         for path in &changed {
             let entry = if path.is_root() {
                 None
@@ -268,10 +272,8 @@ impl Vault {
                 _ => self.reindex_within(path, false),
             }
         }
-        if !changed.is_empty() {
-            for index in self.all_indexes() {
-                commit(&index);
-            }
+        for index in self.all_indexes() {
+            commit(&index);
         }
     }
 

@@ -14,7 +14,11 @@ use std::{
 
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::{
-    EnvFilter, Registry, fmt, layer::SubscriberExt as _, reload, util::SubscriberInitExt as _,
+    EnvFilter, Registry,
+    fmt::{self, format::FmtSpan},
+    layer::SubscriberExt as _,
+    reload,
+    util::SubscriberInitExt as _,
 };
 
 /// How many daily log files are kept.
@@ -68,14 +72,21 @@ pub fn init(detailed: bool) {
     // crashes, the lines saying why are already in the file.
     let (file_layer, file_error) = match file {
         Some(Ok(appender)) => (
-            Some(fmt::layer().with_ansi(false).with_writer(appender)),
+            Some(
+                fmt::layer()
+                    .with_ansi(false)
+                    .with_span_events(FmtSpan::CLOSE)
+                    .with_writer(appender),
+            ),
             None,
         ),
         Some(Err(e)) => (None, Some(e)),
         None => (None, Some("there's no home folder".to_string())),
     };
+    // A span says how long it took when it closes.
     let stderr = fmt::layer()
         .with_ansi(std::io::stderr().is_terminal())
+        .with_span_events(FmtSpan::CLOSE)
         .with_writer(std::io::stderr);
     // Also bridges `log` (GPUI's and others') into tracing.
     let installed = tracing_subscriber::registry()

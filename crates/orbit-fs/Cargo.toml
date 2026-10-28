@@ -9,7 +9,7 @@ rand_core.workspace = true
 zeroize.workspace = true
 tempfile.workspace = true
 trash.workspace = true
-notify-debouncer-mini.workspace = true
+notify.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix.workspace = true

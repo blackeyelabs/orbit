@@ -30,8 +30,10 @@ unicode-segmentation = "=1.13.3"
 trash = "=5.2.6"
 # Hands the watcher's batches from its thread to the UI.
 async-channel = "=2.5.0"
-# Watching the vault for changes made outside Orbit.
-notify-debouncer-mini = { version = "=0.7.0", default-features = false }
+# Watching the vault for changes made outside Orbit. Used directly, not
+# through a debouncer that drops event kinds: reading a file must not count
+# as changing it (docs/research/performance.md).
+notify = { version = "=8.2.1", default-features = false }
 # renameat2(RENAME_NOREPLACE): a rename that can never replace a file.
 # Also: locking keys' memory against swap (mm) and refusing core dumps
 # (process).
@@ -61,3 +63,9 @@ opt-level = 3
 
 [profile.dev.package.blake2]
 opt-level = 3
+
+# For measuring (docs/research/performance.md): release, with line tables
+# so profilers can name functions and lines.
+[profile.profiling]
+inherits = "release"
+debug = "line-tables-only"

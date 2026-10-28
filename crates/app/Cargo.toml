@@ -7,6 +7,11 @@ edition.workspace = true
 name = "orbit"
 path = "src/main.rs"
 
+[features]
+# For measuring: GPUI's frame-time overlay (Ctrl+Alt+Shift+F) and scripted
+# scenarios (ORBIT_SCENARIO; see docs/research/performance.md).
+dev-profiler = ["gpui-kit/profiler"]
+
 [dependencies]
 gpui-kit.workspace = true
 editor.workspace = true

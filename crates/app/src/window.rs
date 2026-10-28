@@ -205,6 +205,8 @@ impl OrbitWindow {
         this.index_vault(cx);
         this.watch_vault(cx);
         this.restore_session(window, cx);
+        #[cfg(feature = "dev-profiler")]
+        crate::dev_scenarios::start(window, cx);
         this
     }
 
@@ -360,6 +362,7 @@ impl OrbitWindow {
     /// A batch of changed paths: the tree reloads, open notes at or inside
     /// them check what's on disk now, and links may resolve differently.
     fn changed_on_disk(&mut self, paths: &[VaultPath], cx: &mut Context<Self>) {
+        let _span = tracing::debug_span!("window.changed_on_disk", paths = paths.len()).entered();
         let expanded = self.expanded_folders(cx);
         self.refresh_tree(&expanded, cx);
         self.refresh_right_panel(cx);
@@ -1571,6 +1574,11 @@ impl Render for OrbitWindow {
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus)
             .child(auto_lock::watch_pointer())
+            .map(|this| {
+                #[cfg(feature = "dev-profiler")]
+                let this = this.on_action(crate::dev_scenarios::cycle_overlay);
+                this
+            })
             // Escape in the Switcher is the Switcher's.
             .when(self.drawer.is_some() && self.switcher.is_none(), |this| {
                 this.on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {

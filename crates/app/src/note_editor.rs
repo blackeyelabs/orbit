@@ -468,6 +468,7 @@ impl NoteEditor {
     }
 
     fn edited(&mut self, cx: &mut Context<Self>) {
+        let _span = tracing::trace_span!("editor.edited").entered();
         self.set_text(self.source.read(cx).value(), cx);
         let caret = self.source.read(cx).cursor();
         if let Some(link) = self.links.accepted_create(&self.text, caret) {
