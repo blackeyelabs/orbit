@@ -10,16 +10,20 @@ use std::{
     time::Duration,
 };
 
+use gpui_kit::assets::IconName;
 use gpui_kit::base::input::{Copy as CopyText, Cut};
 use gpui_kit::base::{TextSelection, h_flex, v_flex};
 use gpui_kit::component::ActiveTheme as _;
+use gpui_kit::component::Icon;
 use gpui_kit::component::Sizable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Editor, EditorState, InputEvent, Position};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use md_engine::{Format, Heading, TextEdit, format_edit, headings, word_count};
-use orbit_core::{DiskCheck, OpenNote, Trouble, Vault, VaultPath, Zeroizing, is_plain_text_note};
+use orbit_core::{
+    DiskCheck, OpenNote, Trouble, Vault, VaultPath, Zeroizing, is_large_note, is_plain_text_note,
+};
 
 use crate::clipboard_guard::{self, Copying};
 use crate::link_completion::LinkCompletions;
@@ -57,16 +61,26 @@ pub fn init(cx: &mut App) {
 enum Mode {
     /// Markdown source beside the rendered preview.
     Split,
-    /// Source only: `.txt` notes.
+    /// Source only: `.txt` notes, and very large notes until the preview
+    /// is asked for.
     Source,
 }
 
 impl Mode {
-    fn of(path: &VaultPath) -> Self {
-        if is_plain_text_note(path) {
+    /// The mode of the note at `path`, `large` or not.
+    fn of(path: &VaultPath, large: bool) -> Self {
+        if large || is_plain_text_note(path) {
             Mode::Source
         } else {
             Mode::Split
+        }
+    }
+
+    /// The language the editor highlights in this mode.
+    fn language(self) -> &'static str {
+        match self {
+            Mode::Split => "markdown",
+            Mode::Source => "plaintext",
         }
     }
 
@@ -188,6 +202,8 @@ pub struct NoteEditor {
     autosave: Option<Task<()>>,
     /// The scroll restored from the session, until the editor is laid out.
     restored_scroll: Option<f32>,
+    /// The note's size, while it's opened as source for being very large.
+    large: Option<usize>,
     /// While a Copy or Cut agreed to in a protected note runs: it goes
     /// ahead.
     copy_agreed: bool,
@@ -207,14 +223,12 @@ impl NoteEditor {
         cx: &mut Context<Self>,
     ) -> Self {
         let path = note.path().clone();
-        let mode = Mode::of(&path);
+        let large = is_large_note(&text).then_some(text.len());
+        let mode = Mode::of(&path, large.is_some());
         let links = Rc::new(LinkCompletions::new(vault.clone(), path.clone()));
         let source = cx.new(|cx| {
             let mut source = EditorState::new(window, cx)
-                .language(match mode {
-                    Mode::Split => "markdown",
-                    Mode::Source => "plaintext",
-                })
+                .language(mode.language())
                 .line_number(false)
                 .soft_wrap(true)
                 .default_value(text.clone());
@@ -261,6 +275,7 @@ impl NoteEditor {
             saved_elsewhere: None,
             autosave: None,
             restored_scroll: None,
+            large,
             copy_agreed: false,
             focus,
             _focus_out: focus_out,
@@ -329,9 +344,19 @@ impl NoteEditor {
     fn follow_path(&mut self, path: VaultPath, cx: &mut Context<Self>) {
         self.links.set_note(path.clone());
         self.preview = PreviewContext::new(self.vault.clone(), path.clone(), self.follow.clone());
-        self.mode = Mode::of(&path);
-        self.outline = outline_of(self.mode, &self.text);
         self.path = path;
+        self.set_mode(Mode::of(&self.path, self.large.is_some()), cx);
+    }
+
+    /// Shows the note in `mode`: the editor's highlighting, the Outline and
+    /// the preview follow.
+    fn set_mode(&mut self, mode: Mode, cx: &mut Context<Self>) {
+        if mode != self.mode {
+            self.source
+                .update(cx, |source, cx| source.set_highlighter(mode.language(), cx));
+        }
+        self.mode = mode;
+        self.outline = outline_of(self.mode, &self.text);
         self.links_changed(cx);
     }
 
@@ -517,6 +542,11 @@ impl NoteEditor {
     /// Shows text that's what's on disk, with nothing unsaved. The editor
     /// takes it on the next frame, which has the window it needs.
     fn show_saved_text(&mut self, text: String, cx: &mut Context<Self>) {
+        // Grown very large meanwhile (in another app, say): source only.
+        if self.large.is_none() && self.mode == Mode::Split && is_large_note(&text) {
+            self.large = Some(text.len());
+            self.set_mode(Mode::Source, cx);
+        }
         self.reload = Some(text.clone());
         self.set_text(text.into(), cx);
         self.autosave = None;
@@ -757,6 +787,55 @@ impl NoteEditor {
         )
     }
 
+    /// A very large note, opened as source: says so, with the preview a
+    /// click away.
+    fn render_large_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let bytes = self.large?;
+        let warning = cx.theme().warning;
+        // The canvas's: 12 × 18 px padding, a 1.5 px rule.
+        Some(
+            h_flex()
+                .flex_none()
+                .gap_3()
+                .px(rems(1.125))
+                .py(rems(0.75))
+                .border_b(px(1.5))
+                .border_color(warning)
+                .bg(warning.opacity(0.22))
+                .child(Icon::new(IconName::Info).text_color(warning))
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::BOLD)
+                                .child(format!("Large note · {}", megabytes(bytes))),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("Opened as source to keep typing fast."),
+                        ),
+                )
+                .child(
+                    Button::new("use-live-preview")
+                        .outline()
+                        .small()
+                        .label("Use live preview")
+                        .on_click(cx.listener(|this, _, _, cx| this.use_live_preview(cx))),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// Shows a very large note's preview after all.
+    fn use_live_preview(&mut self, cx: &mut Context<Self>) {
+        self.large = None;
+        self.set_mode(Mode::of(&self.path, false), cx);
+    }
+
     fn apply_format(&mut self, kind: Format, window: &mut Window, cx: &mut Context<Self>) {
         self.source.update(cx, |source, cx| {
             let text = source.value();
@@ -835,8 +914,14 @@ impl Render for NoteEditor {
                 }))
             })
             .children(banner)
+            .children(self.render_large_banner(cx))
             .child(body)
     }
+}
+
+/// "4.2 MB": a large note's size.
+fn megabytes(bytes: usize) -> String {
+    format!("{:.1} MB", bytes as f64 / 1_000_000.)
 }
 
 /// A note's Outline: its headings, unless it's plain text.

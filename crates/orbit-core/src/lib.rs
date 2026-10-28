@@ -257,6 +257,19 @@ impl Vault {
         self.children_of(&VaultPath::root(), 0)
     }
 
+    /// Whether the vault has notes, for its empty state: a note or canvas
+    /// anywhere in the tree, or a locked protected folder (which holds
+    /// some, unseen). Attachments alone don't count.
+    pub fn has_notes(&self) -> bool {
+        fn any_searchable(nodes: &[TreeNode]) -> bool {
+            nodes
+                .iter()
+                .any(|n| n.kind.is_searchable() || any_searchable(&n.children))
+        }
+        any_searchable(&self.tree().unwrap_or_default())
+            || !self.fs.locked().unwrap_or_default().is_empty()
+    }
+
     /// A note's text, exactly as on disk.
     pub fn read_note(&self, path: &VaultPath) -> Result<String, Error> {
         check_note(path)?;
@@ -736,6 +749,15 @@ fn without_md(path: &str) -> &str {
 /// Whether a path is shown as Source mode only: `.txt` notes are plain text.
 pub fn is_plain_text_note(path: &VaultPath) -> bool {
     path.name().to_ascii_lowercase().ends_with(".txt")
+}
+
+/// Notes this large (2 MB) or larger open as source only, to keep typing
+/// fast; the preview is one choice away.
+pub const LARGE_NOTE_BYTES: usize = 2_000_000;
+
+/// Whether a note's text is large enough to open as source only.
+pub fn is_large_note(text: &str) -> bool {
+    text.len() >= LARGE_NOTE_BYTES
 }
 
 /// Whether a path is a tool folder or inside one.

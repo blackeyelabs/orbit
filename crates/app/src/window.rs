@@ -16,6 +16,7 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::list::{ListEvent, ListItem, ListState};
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::tree::{TreeItem, TreeState, tree};
@@ -34,6 +35,7 @@ use crate::commands::{
     OpenSettings, ProtectFolder, QuickSwitcher, RenameNote, SearchVault, ToggleRightPanel,
     ToggleSidebar, Unlock,
 };
+use crate::empty_states;
 use crate::file_actions::Protection;
 use crate::file_actions::{self, NewNote};
 use crate::note_editor::{NoteEditor, NoteEditorEvent};
@@ -50,6 +52,9 @@ use crate::vaults;
 const TITLE_BAR_HEIGHT: f32 = 2.5;
 const SIDEBAR_WIDTH: f32 = 17.5;
 const STATUS_BAR_HEIGHT: f32 = 1.75;
+/// Below this window width, in pixels, the sidebar and right panel are
+/// drawers over the note, and the tabs a list behind the title.
+const NARROW_WIDTH: f32 = 900.;
 
 /// Notes a search lists at most.
 const SEARCH_LIMIT: usize = 50;
@@ -64,6 +69,31 @@ pub const KEY_CONTEXT: &str = "OrbitWindow";
 struct TreeEntryInfo {
     path: VaultPath,
     kind: EntryKind,
+}
+
+/// A side panel slid over the note, in a narrow window.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Drawer {
+    Sidebar,
+    Panel,
+}
+
+impl Drawer {
+    /// How wide it is, in pixels (the canvas's).
+    fn width(self) -> f32 {
+        match self {
+            Drawer::Sidebar => 300.,
+            Drawer::Panel => 320.,
+        }
+    }
+
+    /// Its header's title.
+    fn title(self) -> &'static str {
+        match self {
+            Drawer::Sidebar => "Notes",
+            Drawer::Panel => "Outline",
+        }
+    }
 }
 
 /// A note open in a tab.
@@ -89,6 +119,12 @@ pub struct OrbitWindow {
     active_tab: Option<usize>,
     left_panel_open: bool,
     right_panel_open: bool,
+    /// The drawer open in a narrow window; the panels above are the wide
+    /// window's, kept for when it's wide again.
+    drawer: Option<Drawer>,
+    /// Whether the vault has notes, as of the tree's last refresh: else
+    /// the centre shows the empty vault.
+    has_notes: bool,
     /// What the right panel shows from the vault, while it's open.
     panel_data: PanelData,
     /// The tag chosen in the right panel, to list its notes.
@@ -138,6 +174,8 @@ impl OrbitWindow {
             active_tab: None,
             left_panel_open: true,
             right_panel_open: false,
+            drawer: None,
+            has_notes: false,
             panel_data: PanelData::default(),
             chosen_tag: None,
             refreshing_panel: None,
@@ -280,7 +318,10 @@ impl OrbitWindow {
 
     /// To the search field, the sidebar shown.
     fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.left_panel_open = true;
+        match is_narrow(window) {
+            true => self.drawer = Some(Drawer::Sidebar),
+            false => self.left_panel_open = true,
+        }
         self.search_input
             .update(cx, |input, cx| input.focus(window, cx));
         cx.notify();
@@ -399,7 +440,7 @@ impl OrbitWindow {
     /// open: the active note's backlinks, the tags and the chosen tag's
     /// notes. Meanwhile it shows what was last found.
     fn refresh_right_panel(&mut self, cx: &mut Context<Self>) {
-        if !self.right_panel_open {
+        if !self.right_panel_open && self.drawer != Some(Drawer::Panel) {
             self.panel_data = PanelData::default();
             self.refreshing_panel = None;
             return;
@@ -487,6 +528,7 @@ impl OrbitWindow {
             }
         };
         self.entries = Rc::new(entries);
+        self.has_notes = self.vault.has_notes();
         self.tree.update(cx, |tree, cx| tree.set_items(items, cx));
         cx.notify();
     }
@@ -665,13 +707,15 @@ impl OrbitWindow {
             == 0
     }
 
-    /// Opens a note in a tab, or focuses its tab if it's already open.
+    /// Opens a note in a tab, or focuses its tab if it's already open. A
+    /// drawer it was chosen in closes.
     pub(crate) fn open_note(
         &mut self,
         path: VaultPath,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.drawer = None;
         if let Some(ix) = self.tab_of(&path, cx) {
             self.active_tab = Some(ix);
         } else {
@@ -755,14 +799,61 @@ impl OrbitWindow {
         failures == 0
     }
 
-    fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
-        self.left_panel_open = !self.left_panel_open;
+    /// Shows or hides the sidebar or right panel: in a narrow window, as a
+    /// drawer, which takes focus from the note under it.
+    fn toggle_side(&mut self, side: Drawer, window: &mut Window, cx: &mut Context<Self>) {
+        if is_narrow(window) {
+            self.toggle_drawer(side, cx);
+            if self.drawer.is_some() {
+                self.focus.focus(window, cx);
+            }
+        } else {
+            self.drawer = None;
+            let open = match side {
+                Drawer::Sidebar => &mut self.left_panel_open,
+                Drawer::Panel => &mut self.right_panel_open,
+            };
+            *open = !*open;
+        }
+        self.refresh_right_panel(cx);
         cx.notify();
     }
 
-    fn toggle_right_panel(&mut self, cx: &mut Context<Self>) {
-        self.right_panel_open = !self.right_panel_open;
-        self.refresh_right_panel(cx);
+    /// A title-bar button that shows or hides the sidebar or right panel:
+    /// in a narrow window, its drawer.
+    fn side_toggle(&self, side: Drawer, narrow: bool, cx: &mut Context<Self>) -> Button {
+        let open = match (narrow, side) {
+            (true, _) => self.drawer == Some(side),
+            (false, Drawer::Sidebar) => self.left_panel_open,
+            (false, Drawer::Panel) => self.right_panel_open,
+        };
+        let (id, tooltip, close_icon, open_icon) = match side {
+            Drawer::Sidebar => (
+                "toggle-left-panel",
+                "Toggle sidebar",
+                IconName::PanelLeftClose,
+                IconName::PanelLeft,
+            ),
+            Drawer::Panel => (
+                "toggle-right-panel",
+                "Toggle right panel",
+                IconName::PanelRightClose,
+                IconName::PanelRight,
+            ),
+        };
+        Button::new(id)
+            .ghost()
+            .icon(if open { close_icon } else { open_icon })
+            .tooltip(tooltip)
+            .on_click(cx.listener(move |this, _, window, cx| this.toggle_side(side, window, cx)))
+    }
+
+    /// Opens `drawer`, or closes it if it's open.
+    fn toggle_drawer(&mut self, drawer: Drawer, cx: &mut Context<Self>) {
+        self.drawer = match self.drawer {
+            Some(open) if open == drawer => None,
+            _ => Some(drawer),
+        };
         cx.notify();
     }
 
@@ -1022,20 +1113,17 @@ impl OrbitWindow {
         cx.notify();
     }
 
-    fn render_title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_title_bar(&self, narrow: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let title = match self.active() {
             Some(tab) => format!("{} · {}", tab.title(cx), self.vault.name()),
             None => self.vault.name().to_string(),
         };
+        if narrow {
+            return self.render_narrow_title_bar(title, cx).into_any_element();
+        }
         TitleBar::new()
             .h(rems(TITLE_BAR_HEIGHT))
-            .child(panel_toggle(
-                "toggle-left-panel",
-                "Toggle sidebar",
-                self.left_panel_open,
-                (IconName::PanelLeftClose, IconName::PanelLeft),
-                cx.listener(|this, _, _, cx| this.toggle_sidebar(cx)),
-            ))
+            .child(self.side_toggle(Drawer::Sidebar, false, cx))
             .child(div().flex_1().text_center().text_sm().child(title))
             .child(
                 Button::new("open-settings")
@@ -1044,16 +1132,152 @@ impl OrbitWindow {
                     .tooltip("Settings")
                     .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx))),
             )
-            .child(panel_toggle(
-                "toggle-right-panel",
-                "Toggle right panel",
-                self.right_panel_open,
-                (IconName::PanelRightClose, IconName::PanelRight),
-                cx.listener(|this, _, _, cx| this.toggle_right_panel(cx)),
-            ))
+            .child(self.side_toggle(Drawer::Panel, false, cx))
+            .into_any_element()
     }
 
-    fn render_sidebar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The narrow window's title bar, as on the canvas: the sidebar, the
+    /// title (the open tabs listed behind it), search and the right panel.
+    fn render_narrow_title_bar(&self, title: String, cx: &mut Context<Self>) -> impl IntoElement {
+        let view = cx.entity().downgrade();
+        let tabs: Vec<(usize, SharedString)> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(ix, tab)| (ix, tab.title(cx)))
+            .collect();
+        let active = self.active_tab;
+        // The tabs, listed behind the title.
+        let title = match tabs.is_empty() {
+            true => div().text_sm().truncate().child(title).into_any_element(),
+            false => Button::new("tab-list")
+                .ghost()
+                .small()
+                .label(title)
+                .icon(IconName::ChevronDown)
+                .tooltip("Open tabs")
+                .dropdown_menu(move |menu, _, _| {
+                    tabs.iter().fold(menu, |menu, (ix, title)| {
+                        let (view, ix) = (view.clone(), *ix);
+                        menu.item(
+                            PopupMenuItem::new(title.clone())
+                                .checked(active == Some(ix))
+                                .on_click(move |_, window, cx| {
+                                    view.update(cx, |this, cx| this.show_tab(ix, window, cx))
+                                        .ok();
+                                }),
+                        )
+                    })
+                })
+                .into_any_element(),
+        };
+        TitleBar::new()
+            .h(rems(TITLE_BAR_HEIGHT))
+            .child(self.side_toggle(Drawer::Sidebar, true, cx))
+            .child(h_flex().flex_1().min_w_0().justify_center().child(title))
+            .child(
+                Button::new("narrow-search")
+                    .ghost()
+                    .icon(IconName::Search)
+                    .tooltip("Search")
+                    .on_click(cx.listener(|this, _, window, cx| this.focus_search(window, cx))),
+            )
+            .child(self.side_toggle(Drawer::Panel, true, cx))
+    }
+
+    /// The open drawer over the whole window, with a scrim that closes it,
+    /// as on the canvas: a header (with a close button) atop the panel.
+    fn render_drawer(&self, drawer: Drawer, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let width = px(drawer.width()).into();
+        let panel = match drawer {
+            Drawer::Sidebar => self.render_sidebar(width, window, cx).into_any_element(),
+            Drawer::Panel => self.render_right_panel(width, cx).into_any_element(),
+        };
+        let close = Button::new("close-drawer")
+            .ghost()
+            .small()
+            .icon(IconName::Close)
+            .tooltip("Close")
+            .on_click(cx.listener(|this, _, _, cx| this.close_drawer(cx)));
+        let header = h_flex()
+            .flex_none()
+            .h(rems(TITLE_BAR_HEIGHT))
+            .pl_4()
+            .pr_3()
+            .gap_2()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(
+                div()
+                    .flex_1()
+                    .font_weight(FontWeight::BOLD)
+                    .child(drawer.title()),
+            )
+            .when(drawer == Drawer::Sidebar, |this| {
+                this.child(
+                    Button::new("drawer-new-note")
+                        .ghost()
+                        .small()
+                        .icon(IconName::FilePlus)
+                        .tooltip("New note")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.new_note(VaultPath::root(), window, cx)
+                        })),
+                )
+            })
+            .child(close);
+        // Cast away from the note, as the canvas's 8 px shadow is.
+        let side = match drawer {
+            Drawer::Sidebar => 8.,
+            Drawer::Panel => -8.,
+        };
+        let shadow = BoxShadow {
+            color: hsla(0., 0., 0., 0.25),
+            offset: point(px(side), px(0.)),
+            blur_radius: px(30.),
+            spread_radius: px(0.),
+            inset: false,
+        };
+        let drawn = v_flex()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .w(width)
+            .bg(cx.theme().sidebar)
+            .shadow(vec![shadow])
+            .child(header)
+            .child(div().flex_1().min_h_0().child(panel));
+        let drawn = match drawer {
+            Drawer::Sidebar => drawn.left_0(),
+            Drawer::Panel => drawn.right_0(),
+        };
+        div()
+            .absolute()
+            .inset_0()
+            .child(
+                div()
+                    .id("drawer-scrim")
+                    .absolute()
+                    .inset_0()
+                    .bg(cx.theme().overlay)
+                    .on_click(cx.listener(|this, _, _, cx| this.close_drawer(cx))),
+            )
+            .child(drawn)
+            .into_any_element()
+    }
+
+    fn close_drawer(&mut self, cx: &mut Context<Self>) {
+        self.drawer = None;
+        cx.notify();
+    }
+
+    /// The sidebar, `width` wide: a side panel, or a drawer's.
+    fn render_sidebar(
+        &self,
+        width: Length,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let view = cx.entity().downgrade();
         let entries = self.entries.clone();
         let (menu_view, menu_entries, folders) =
@@ -1069,7 +1293,7 @@ impl OrbitWindow {
                 .collect(),
         );
         v_flex()
-            .w(rems(SIDEBAR_WIDTH))
+            .w(width)
             .flex_none()
             .h_full()
             .border_r_1()
@@ -1209,27 +1433,27 @@ impl OrbitWindow {
             })
     }
 
-    fn render_centre(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_centre(
+        &self,
+        narrow: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let body = match self.active() {
             Some(tab) => div()
                 .flex_1()
                 .min_h_0()
                 .child(tab.editor.clone())
                 .into_any_element(),
-            None => div()
-                .flex_1()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_color(cx.theme().muted_foreground)
-                .child("Open a note from the sidebar")
-                .into_any_element(),
+            None if self.has_notes => empty_states::nothing_open(window, cx),
+            None => empty_states::empty_vault(window, cx),
         };
         v_flex()
             .flex_1()
             .min_w_0()
             .h_full()
-            .when(!self.tabs.is_empty(), |this| {
+            // In a narrow window the tabs are listed behind the title.
+            .when(!narrow && !self.tabs.is_empty(), |this| {
                 this.child(
                     TabBar::new("tabs")
                         .selected_index(self.active_tab.unwrap_or(0))
@@ -1259,7 +1483,8 @@ impl OrbitWindow {
             .child(body)
     }
 
-    fn render_right_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The right panel, `width` wide: a side panel, or a drawer's.
+    fn render_right_panel(&self, width: Length, cx: &mut Context<Self>) -> impl IntoElement {
         let outline = self.active().map(|tab| tab.editor.read(cx).outline());
         // Until what's current is found, nothing rather than another note's
         // backlinks or another tag's notes.
@@ -1280,7 +1505,7 @@ impl OrbitWindow {
             tags: &self.panel_data.tags,
             tagged,
         };
-        right_panel::render(contents, cx)
+        right_panel::render(contents, width, cx)
     }
 
     fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1329,6 +1554,7 @@ impl OrbitWindow {
 impl Render for OrbitWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let grain = AppSettings::get(cx).paper_grain;
+        let narrow = is_narrow(window);
         // With nothing focused (the last tab closed), the window's shortcuts
         // would reach nothing: the window takes focus.
         if window.focused(cx).is_none() {
@@ -1338,6 +1564,16 @@ impl Render for OrbitWindow {
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus)
             .child(auto_lock::watch_pointer())
+            // Escape in the Switcher is the Switcher's.
+            .when(self.drawer.is_some() && self.switcher.is_none(), |this| {
+                this.on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                    if event.keystroke.key == "escape" {
+                        this.drawer = None;
+                        cx.stop_propagation();
+                        cx.notify();
+                    }
+                }))
+            })
             .on_action(cx.listener(|this, _: &NewNote, window, cx| {
                 this.new_note(VaultPath::root(), window, cx)
             }))
@@ -1393,8 +1629,12 @@ impl Render for OrbitWindow {
                     this.close_tab(ix, cx);
                 }
             }))
-            .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
-            .on_action(cx.listener(|this, _: &ToggleRightPanel, _, cx| this.toggle_right_panel(cx)))
+            .on_action(cx.listener(|this, _: &ToggleSidebar, window, cx| {
+                this.toggle_side(Drawer::Sidebar, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ToggleRightPanel, window, cx| {
+                this.toggle_side(Drawer::Panel, window, cx)
+            }))
             .on_action(
                 cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)),
             )
@@ -1405,20 +1645,23 @@ impl Render for OrbitWindow {
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .child(self.render_title_bar(cx))
+            .child(self.render_title_bar(narrow, cx))
             .child(
                 h_flex()
                     .flex_1()
                     .min_h_0()
-                    .when(self.left_panel_open, |this| {
-                        this.child(self.render_sidebar(window, cx))
+                    .when(!narrow && self.left_panel_open, |this| {
+                        this.child(self.render_sidebar(rems(SIDEBAR_WIDTH).into(), window, cx))
                     })
-                    .child(self.render_centre(cx))
-                    .when(self.right_panel_open, |this| {
-                        this.child(self.render_right_panel(cx))
+                    .child(self.render_centre(narrow, window, cx))
+                    .when(!narrow && self.right_panel_open, |this| {
+                        this.child(self.render_right_panel(rems(right_panel::WIDTH).into(), cx))
                     }),
             )
             .child(self.render_status_bar(cx))
+            .when_some(self.drawer.filter(|_| narrow), |this, drawer| {
+                this.child(self.render_drawer(drawer, window, cx))
+            })
             .when(grain, |this| this.child(appearance::grain(window, cx)))
             .when_some(self.switcher.as_ref(), |this, (state, _)| {
                 let view = cx.entity().downgrade();
@@ -1444,19 +1687,9 @@ struct PanelData {
     tagged: Option<(String, Vec<VaultPath>)>,
 }
 
-/// A title-bar button that shows or hides a side panel.
-fn panel_toggle(
-    id: &'static str,
-    tooltip: &'static str,
-    open: bool,
-    (close_icon, open_icon): (IconName, IconName),
-    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-) -> Button {
-    Button::new(id)
-        .ghost()
-        .icon(if open { close_icon } else { open_icon })
-        .tooltip(tooltip)
-        .on_click(on_click)
+/// Whether the window is narrow enough for drawers and a tab list.
+fn is_narrow(window: &Window) -> bool {
+    window.viewport_size().width < px(NARROW_WIDTH)
 }
 
 /// Builds tree items (id = vault path) and records what each one is.

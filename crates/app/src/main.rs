@@ -7,6 +7,7 @@ mod auto_lock;
 mod clipboard_guard;
 mod commands;
 mod diagram_block;
+mod empty_states;
 mod file_actions;
 #[cfg(unix)]
 mod instance;

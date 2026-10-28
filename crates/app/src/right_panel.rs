@@ -14,7 +14,7 @@ use orbit_core::{Backlink, Mention, TagCount, VaultPath, note_title, same_tag};
 use crate::window::OrbitWindow;
 
 // Canvas sizes at 100% (300, 18, 16, 26 and 14 px), in rems.
-const WIDTH: f32 = 18.75;
+pub const WIDTH: f32 = 18.75;
 const PADDING_Y: f32 = 1.125;
 const PADDING_X: f32 = 1.;
 const SECTION_GAP: f32 = 1.625;
@@ -34,10 +34,10 @@ pub struct Contents<'a> {
 }
 
 /// The panel: the open note's sections, or a hint when none is, then Tags.
-pub fn render(contents: Contents, cx: &mut Context<OrbitWindow>) -> AnyElement {
+pub fn render(contents: Contents, width: Length, cx: &mut Context<OrbitWindow>) -> AnyElement {
     let panel = v_flex()
         .id("right-panel")
-        .w(rems(WIDTH))
+        .w(width)
         .flex_none()
         .h_full()
         .overflow_y_scroll()
