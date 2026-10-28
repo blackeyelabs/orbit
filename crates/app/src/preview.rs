@@ -527,3 +527,53 @@ impl MarkdownPlugin for BlockMathPlugin {
         }
     }
 }
+
+/// A note's preview as a view of its own, which the editor embeds cached: a
+/// keystroke or caret blink in the editor doesn't lay a long note's
+/// preview out again, only new text does (docs/research/performance.md).
+pub struct PreviewPane {
+    id: SharedString,
+    text: SharedString,
+    context: PreviewContext,
+}
+
+impl PreviewPane {
+    pub fn new(id: SharedString, text: SharedString, context: PreviewContext) -> Self {
+        PreviewPane { id, text, context }
+    }
+
+    /// Shows `text`, the preview of the note `id` with `context`: drawn
+    /// again only if either changed.
+    pub fn show(
+        &mut self,
+        id: SharedString,
+        text: SharedString,
+        context: &PreviewContext,
+        cx: &mut Context<Self>,
+    ) {
+        if id != self.id || text != self.text {
+            self.id = id;
+            self.text = text;
+            self.context = context.clone();
+            cx.notify();
+        }
+    }
+}
+
+impl Render for PreviewPane {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("preview")
+            .size_full()
+            .overflow_y_scroll()
+            .px_6()
+            .py_4()
+            .child(preview(
+                self.id.clone(),
+                self.text.clone(),
+                &self.context,
+                window,
+                cx,
+            ))
+    }
+}

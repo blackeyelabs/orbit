@@ -27,7 +27,7 @@ use orbit_core::{
 
 use crate::clipboard_guard::{self, Copying};
 use crate::link_completion::LinkCompletions;
-use crate::preview::{FollowLink, PreviewContext, preview};
+use crate::preview::{FollowLink, PreviewContext, PreviewPane};
 
 actions!(
     note_editor,
@@ -47,6 +47,12 @@ pub const KEY_CONTEXT: &str = "NoteEditor";
 
 /// How long typing must pause before the note saves itself.
 const AUTOSAVE_DELAY: Duration = Duration::from_millis(1500);
+/// The pause in typing after which the preview, Outline and word count
+/// catch up: redrawing the preview of a long note on every key is what
+/// typing spent its time on (docs/research/performance.md).
+const DERIVED_PAUSE: Duration = Duration::from_millis(150);
+/// While typing goes on, they still catch up at least this often.
+const DERIVED_AT_LEAST: Duration = Duration::from_secs(1);
 
 pub fn init(cx: &mut App) {
     cx.bind_keys([
@@ -183,6 +189,8 @@ pub struct NoteEditor {
     mode: Mode,
     source: Entity<EditorState>,
     preview: PreviewContext,
+    /// The preview beside the source, drawn only when its text changes.
+    pane: Entity<PreviewPane>,
     /// Tells the window a link was clicked; kept for a new path's preview.
     follow: FollowLink,
     /// Wikilink autocomplete, which links from this note.
@@ -200,6 +208,9 @@ pub struct NoteEditor {
     /// Shown with a failed save: where Save elsewhere put a copy.
     saved_elsewhere: Option<SharedString>,
     autosave: Option<Task<()>>,
+    /// The preview, Outline and word count catching up with typing, and
+    /// since when they've been behind.
+    catching_up: Option<(Task<()>, std::time::Instant)>,
     /// The scroll restored from the session, until the editor is laid out.
     restored_scroll: Option<f32>,
     /// The note's size, while it's opened as source for being very large.
@@ -257,9 +268,12 @@ impl NoteEditor {
                 TextSelection::clear(window, cx);
             }
         });
-        let shown = preview.rewrite_links(&text).into();
+        let shown: SharedString = preview.rewrite_links(&text).into();
+        let id: SharedString = format!("preview-{path}").into();
+        let pane = cx.new(|_| PreviewPane::new(id, shown.clone(), preview.clone()));
         NoteEditor {
             preview,
+            pane,
             follow,
             links,
             shown,
@@ -274,6 +288,7 @@ impl NoteEditor {
             reload: None,
             saved_elsewhere: None,
             autosave: None,
+            catching_up: None,
             restored_scroll: None,
             large,
             copy_agreed: false,
@@ -364,8 +379,18 @@ impl NoteEditor {
     pub fn links_changed(&mut self, cx: &mut Context<Self>) {
         if self.mode == Mode::Split {
             self.shown = self.preview.rewrite_links(&self.text).into();
+            let (id, shown) = (self.preview_id(), self.shown.clone());
+            let context = &self.preview;
+            self.pane
+                .update(cx, |pane, cx| pane.show(id, shown, context, cx));
         }
         cx.notify();
+    }
+
+    /// The preview's element id: per note, so another note's preview
+    /// doesn't inherit its state.
+    fn preview_id(&self) -> SharedString {
+        format!("preview-{}", self.path).into()
     }
 
     /// Puts the caret on the heading a link named, if the note has it.
@@ -469,7 +494,8 @@ impl NoteEditor {
 
     fn edited(&mut self, cx: &mut Context<Self>) {
         let _span = tracing::trace_span!("editor.edited").entered();
-        self.set_text(self.source.read(cx).value(), cx);
+        self.text = self.source.read(cx).value();
+        self.catch_up_later(cx);
         let caret = self.source.read(cx).cursor();
         if let Some(link) = self.links.accepted_create(&self.text, caret) {
             cx.emit(NoteEditorEvent::CreateLinkedNote(link));
@@ -482,12 +508,34 @@ impl NoteEditor {
         cx.notify();
     }
 
-    /// The source as of now, and everything derived from it.
+    /// The source as of now, and everything derived from it, at once.
     fn set_text(&mut self, text: SharedString, cx: &mut Context<Self>) {
-        self.words = word_count(&text);
-        self.outline = outline_of(self.mode, &text);
         self.text = text;
+        self.catch_up(cx);
+    }
+
+    /// The preview, Outline and word count, brought up to date with the
+    /// source.
+    fn catch_up(&mut self, cx: &mut Context<Self>) {
+        self.catching_up = None;
+        self.words = word_count(&self.text);
+        self.outline = outline_of(self.mode, &self.text);
         self.links_changed(cx);
+    }
+
+    /// Brings the preview, Outline and word count up to date once typing
+    /// pauses, or after a second of it at most.
+    fn catch_up_later(&mut self, cx: &mut Context<Self>) {
+        let since = self
+            .catching_up
+            .as_ref()
+            .map_or_else(std::time::Instant::now, |(_, since)| *since);
+        let wait = DERIVED_PAUSE.min(DERIVED_AT_LEAST.saturating_sub(since.elapsed()));
+        let task = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(wait).await;
+            this.update(cx, |this, cx| this.catch_up(cx)).ok();
+        });
+        self.catching_up = Some((task, since));
     }
 
     /// The watcher saw the note's path change: the note reloads if it has no
@@ -883,22 +931,16 @@ impl Render for NoteEditor {
             .when(self.mode == Mode::Split, |this| {
                 this.child(
                     div()
-                        .id("preview")
                         .flex_1()
                         .min_w_0()
                         .h_full()
-                        .overflow_y_scroll()
                         .border_l_1()
                         .border_color(border)
-                        .px_6()
-                        .py_4()
-                        .child(preview(
-                            SharedString::from(format!("preview-{}", self.path)),
-                            self.shown.clone(),
-                            &self.preview,
-                            window,
-                            cx,
-                        )),
+                        .child(
+                            self.pane
+                                .clone()
+                                .cached(StyleRefinement::default().size_full()),
+                        ),
                 )
             });
         let protected = self.is_protected();

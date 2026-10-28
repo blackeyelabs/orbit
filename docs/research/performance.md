@@ -89,6 +89,13 @@ The fixture vault, at the window's default size, with paper grain on. Each row i
 | Watcher fix | type into a 2 KB note | 134 | 220 | 97 | 123 | 220 | 46 | 40 | 0 | 0 |
 | Watcher fix | type into `Long.md` (200 KB) | 1150 | 518 | 394 | 123 | 518 | 46 | 43 | 0 | 0 |
 | Watcher fix | open `Big.md` (3 MB) | 175 | 1035 | 912 | 123 | 1090 | 47 | 46 | 0 | 0 |
+| Catch-up delay alone | idle, cold start | 0.0 | 256 | 128 | 125 | 256 | 50 | 275 | 0 | 0 |
+| Catch-up delay alone | type into a 2 KB note | 219 | 202 | 78 | 124 | 202 | 46 | 38 | 0 | 0 |
+| Catch-up delay alone | type into `Long.md` (200 KB) | 1022 | 472 | 347 | 124 | 472 | 46 | 40 | 0 | 0 |
+| Catch-up delay + cached preview | idle, cold start | 0.0 | 242 | 114 | 125 | 242 | 49 | 270 | 0 | 0 |
+| Catch-up delay + cached preview | `Long.md` open, idle | 15 | 287 | 163 | 124 | 287 | 47 | 40 | 0 | 0 |
+| Catch-up delay + cached preview | type into a 2 KB note | 222 | 300 | 177 | 123 | 300 | 47 | 42 | 0 | 0 |
+| Catch-up delay + cached preview | type into `Long.md` (200 KB) | 380 | 491 | 367 | 123 | 491 | 47 | 40 | 0 | 0 |
 
 Notes:
 - The scenarios ran in one work dir, in this order: two idle runs, then the others. Each run restores the tabs the last one left open, so `open Big.md` also has the 2 KB note and `Long.md` open.
@@ -111,17 +118,34 @@ This is the main cause of the CPU use you saw: about 11 cores at idle on the fix
   - `crates/orbit-core/tests/outside_changes.rs`: `reading_a_note_isnt_reported_as_changing_it` and `the_watcher_doesnt_report_orbits_own_saves_back`;
   - both fail on the old watcher.
 
+### Found by profiling: typing into a long note re-laid out its whole preview [measured]
+
+Profiling typing into `Long.md` (`perf record -e task-clock --call-graph dwarf,65528 --user-callchains`, with Orbit launched under perf) showed where the time went:
+- **Layout:** about 26% in taffy flexbox and block layout.
+- **Text shaping:** about 25% in harfrust and cosmic-text.
+
+The cause:
+- Every keystroke, and every caret blink, notifies the editor's view.
+- The preview was part of that view, so its thousands of markdown block nodes were laid out again on each one.
+- Delaying the preview's text until typing pauses (150 ms, or 1 s at most) cut only 11% on its own, since the preview was still laid out every frame.
+
+The fix moves the preview into a view of its own, `PreviewPane` (`crates/app/src/preview.rs`), which the editor embeds with `Entity::cached` (gpui-pre `view.rs:241-252`). It's laid out again only when its text changes, and the delay means that's at most a few times a second while typing. Together the two changes cut typing into `Long.md` from 1,022 to 380 ms/s.
+
+Notes on profiling:
+- `perf` can't attach to a running Orbit: it makes itself non-dumpable. Launch Orbit under perf instead.
+- At `perf_event_paranoid = 2`, call graphs need `--user-callchains`.
+
 ## Optimizations, ranked by impact against effort
 
 | # | Change | Where | Status |
 |---|---|---|---|
 | 0 | Reading a file isn't a change (the watcher loop above) | `orbit-fs/src/lib.rs` | **done**: idle CPU 10,800 → 1 ms/s, RSS 400 → 170 MB |
 | 1 | Ignore Orbit's own saves coming back through the watcher | `orbit-fs/src/lib.rs` (in the watcher, not the window) | **done**: `changed_on_disk` while typing, 4–5 per run → 0 |
-| 2 | Refresh the tabs' links only when notes are added, removed or renamed | `window.rs` `changed_on_disk` | planned |
-| 3 | Walk the tree once per refresh (`has_notes` from the same nodes) | `window.rs` `refresh_tree`, `orbit-core/src/lib.rs` | planned |
-| 4 | Debounce word count, outline and link rewriting while typing | `note_editor.rs` `edited` | planned |
+| 2 | Refresh the tabs' links only when notes are added, removed or renamed | `window.rs` `changed_on_disk` | set aside: `changed_on_disk` no longer runs while typing or idle; it matters only for outside changes (sync, git) |
+| 3 | Walk the tree once per refresh (`has_notes` from the same nodes) | `window.rs` `refresh_tree`, `orbit-core/src/lib.rs` | set aside, for the same reason |
+| 4 | Delay the preview, Outline and word count until typing pauses | `note_editor.rs` `catch_up_later` | **done**, with 6 |
 | 5 | Tantivy writer budget at the minimum (15 MB) | `orbit-index/src/lib.rs` | planned |
-| 6 | Cache views, so caret blinks don't rebuild the window | `window.rs` render | only if still needed |
+| 6 | The preview as a cached view of its own | `preview.rs` `PreviewPane`, `note_editor.rs` | **done**: typing into a 200 KB note, 1,150 → 380 ms/s |
 | 7 | Document `ZED_DEVICE_ID` for hybrid-GPU laptops | README | planned |
 
 ## Sources
