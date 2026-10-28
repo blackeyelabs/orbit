@@ -154,6 +154,38 @@ impl Render for AppearancePane {
     }
 }
 
+/// Settings › Logs: what's recorded for bug reports, and where.
+pub struct LogsPane;
+
+impl Render for LogsPane {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let detailed = AppSettings::get(cx).detailed_logging;
+        v_flex()
+            .child(row(
+                "Detailed logging",
+                "Records more for bug reports. Notes' text and protected folders are never \
+                 logged.",
+                Switch::new("detailed-logging")
+                    .checked(detailed)
+                    .on_click(cx.listener(|_, checked: &bool, window, cx| {
+                        let checked = *checked;
+                        change(window, cx, |s| s.detailed_logging = checked);
+                    })),
+                cx,
+            ))
+            .child(row(
+                "Log files",
+                "A file a day, kept a week.",
+                Button::new("open-log-folder")
+                    .label("Open log folder")
+                    .small()
+                    .outline()
+                    .on_click(|_, _, cx| crate::logging::open_folder(cx)),
+                cx,
+            ))
+    }
+}
+
 /// Settings › Security, for one vault window: auto-lock, and the unlocked
 /// protected folders, each with what can be done to it.
 pub struct SecurityPane {

@@ -218,6 +218,7 @@ impl Vault {
     /// is [`Error::AlreadyOpen`]. A vault Orbit can't write to opens without
     /// that guard.
     pub fn open(root: &Path) -> Result<Vault, Error> {
+        let _span = tracing::debug_span!("vault.open").entered();
         let plain = PlainFs::new(root).map_err(|e| match e.kind() {
             io::ErrorKind::NotFound | io::ErrorKind::NotADirectory => Error::NotFound,
             _ => Error::Io(e),
@@ -653,9 +654,11 @@ impl Vault {
     }
 
     fn move_entry(&self, from: &VaultPath, to: VaultPath) -> Result<VaultPath, Error> {
+        // Before the move: a protected folder moved is no longer at `from`.
+        let shown_from = self.log_path(from);
         match self.fs.rename(from, &to) {
             Ok(()) => {
-                tracing::debug!(from = %self.log_path(from), to = %self.log_path(&to), "moved");
+                tracing::debug!(from = %shown_from, to = %self.log_path(&to), "moved");
                 self.touched([from.clone(), to.clone()]);
                 Ok(to)
             }

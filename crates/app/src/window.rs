@@ -43,7 +43,7 @@ use crate::protection;
 use crate::protection_manage;
 use crate::right_panel;
 use crate::search_panel;
-use crate::settings_view::{AppearancePane, SecurityPane};
+use crate::settings_view::{AppearancePane, LogsPane, SecurityPane};
 use crate::switcher::{self, Chosen, Switcher};
 use crate::vaults;
 
@@ -249,7 +249,11 @@ impl OrbitWindow {
             active: self.active_tab,
         };
         if let Err(e) = self.vault.save_session(&session) {
-            tracing::warn!(vault = self.vault.name(), error = %e, "couldn't save the session");
+            tracing::warn!(
+                vault = self.vault.name(),
+                error = e.kind_name(),
+                "couldn't save the session"
+            );
         }
     }
 
@@ -1075,6 +1079,7 @@ impl OrbitWindow {
         let appearance = cx.new(|_| AppearancePane);
         let (view, vault) = (cx.entity().downgrade(), self.vault.clone());
         let security = cx.new(|cx| SecurityPane::new(view, vault, cx));
+        let logs = cx.new(|_| LogsPane);
         window.open_dialog(cx, move |dialog, window, _| {
             let heading = |title: &'static str| {
                 div()
@@ -1092,7 +1097,9 @@ impl OrbitWindow {
                     .child(heading("Appearance"))
                     .child(appearance.clone())
                     .child(heading("Security"))
-                    .child(security.clone()),
+                    .child(security.clone())
+                    .child(heading("Logs"))
+                    .child(logs.clone()),
             )
         });
     }

@@ -16,3 +16,15 @@ scripts/ci.sh             # everything CI runs: fmt, clippy, tests, core-deps gu
 ```
 
 The core crates (`md-engine`, `orbit-core`, `orbit-index`, `orbit-crypto`, `orbit-fs`, `diagrams`) must never depend on GPUI. `scripts/check-core-deps.sh` enforces this in CI.
+
+## Logs
+
+Orbit logs to stderr and to a file a day under `~/.local/state/orbit/logs` (`$XDG_STATE_HOME/orbit/logs`), kept a week. **Open log folder**, in Settings › Logs or the Command palette, shows them.
+
+By default Orbit's own crates log at info and everything else only warnings and errors. Turn on **Detailed logging** in Settings to record debug lines for a bug report, or set the filter when starting Orbit:
+
+```sh
+ORBIT_LOG=warn,orbit=debug cargo run -p app   # `orbit` covers orbit_core and the rest too
+```
+
+`ORBIT_LOG` takes `tracing` filter directives and wins over `RUST_LOG`. Logs never hold note text, secrets or any path in a protected folder ([ADR 0007](docs/adr/0007-logs-carry-no-vault-content.md)).

@@ -218,7 +218,8 @@ impl OpenNote {
             }
             // Someone else's change came first: show it instead.
             Ok(false) => {
-                tracing::info!(note = %vault.log_path(&self.path), "another app changed the note first");
+                tracing::info!("another app changed a note before Orbit's save");
+                tracing::debug!(note = %vault.log_path(&self.path), "the note another app changed");
                 self.check_disk(vault, true);
                 match self.trouble {
                     Some(Trouble::Deleted) => Err(Error::DeletedOnDisk(self.path.clone())),
@@ -226,11 +227,8 @@ impl OpenNote {
                 }
             }
             Err(e) => {
-                tracing::warn!(
-                    note = %vault.log_path(&self.path),
-                    error = e.kind_name(),
-                    "couldn't save a note"
-                );
+                tracing::warn!(error = e.kind_name(), "couldn't save a note");
+                tracing::debug!(note = %vault.log_path(&self.path), "the note that couldn't be saved");
                 self.trouble = Some(Trouble::SaveFailed(e.to_string()));
                 Err(e)
             }

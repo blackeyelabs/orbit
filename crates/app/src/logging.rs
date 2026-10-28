@@ -20,16 +20,9 @@ use tracing_subscriber::{
 /// How many daily log files are kept.
 const KEEP_DAYS: usize = 7;
 
-/// Orbit's own crates, by the target their events carry.
-const ORBIT_TARGETS: [&str; 7] = [
-    "orbit",
-    "orbit_core",
-    "orbit_fs",
-    "orbit_index",
-    "md_engine",
-    "diagrams",
-    "editor",
-];
+/// Orbit's own crates, by the start of the targets their events carry:
+/// `orbit` covers the app and orbit-core, orbit-fs and orbit-index too.
+const ORBIT_TARGETS: [&str; 4] = ["orbit", "md_engine", "diagrams", "editor"];
 
 /// The filter: `env` (from `ORBIT_LOG` or `RUST_LOG`) when set, else
 /// warnings and errors from everything and info from Orbit's crates, or
@@ -56,14 +49,19 @@ static RELOAD: OnceLock<reload::Handle<EnvFilter, Registry>> = OnceLock::new();
 /// `log` bridge and the panic hook. A log file that can't be opened leaves
 /// stderr alone, said once; Orbit starts regardless.
 pub fn init(detailed: bool) {
-    let env = std::env::var("ORBIT_LOG")
-        .ok()
-        .or_else(|| std::env::var("RUST_LOG").ok())
-        .filter(|env| !env.trim().is_empty());
-    let directives = filter_directives(env.as_deref(), detailed);
-    let filter = EnvFilter::try_new(&directives)
-        .unwrap_or_else(|_| EnvFilter::new(filter_directives(None, detailed)));
-    let (filter, handle) = reload::Layer::new(filter);
+    let set = |var: &str| std::env::var(var).ok().filter(|v| !v.trim().is_empty());
+    let mut env = set("ORBIT_LOG").or_else(|| set("RUST_LOG"));
+    let mut directives = filter_directives(env.as_deref(), detailed);
+    // A filter that doesn't parse is said, and the default used instead.
+    let rejected = match EnvFilter::try_new(&directives) {
+        Ok(_) => None,
+        Err(e) => {
+            env = None;
+            directives = filter_directives(None, detailed);
+            Some(e.to_string())
+        }
+    };
+    let (filter, handle) = reload::Layer::new(EnvFilter::new(&directives));
     let dir = log_dir();
     let file = dir.as_deref().map(open_file);
     // Written as each event happens, not from a queue: when Orbit
@@ -101,10 +99,13 @@ pub fn init(detailed: bool) {
         version = env!("CARGO_PKG_VERSION"),
         pid = std::process::id(),
         session,
-        log_dir = ?dir,
+        log_dir = %dir.as_deref().map_or("none".into(), |d| d.display().to_string()),
         filter = %directives,
         "Orbit started"
     );
+    if let Some(e) = rejected {
+        tracing::warn!(error = %e, "ORBIT_LOG or RUST_LOG isn't a filter Orbit understands; using the default");
+    }
     if let Some(e) = file_error {
         tracing::warn!(error = %e, "couldn't open the log file; logging to stderr only");
     }
@@ -127,9 +128,24 @@ pub fn log_dir() -> Option<PathBuf> {
     orbit_core::default_state_dir().map(|dir| dir.join("logs"))
 }
 
-/// Today's log file in `dir`, made private to the user, rotating daily.
+/// Shows the log folder in the file manager, for attaching a log to a bug
+/// report.
+pub fn open_folder(cx: &gpui_kit::App) {
+    let Some(dir) = log_dir() else {
+        return tracing::warn!("there's no log folder: no home folder");
+    };
+    if let Err(e) = create_private_dir(&dir) {
+        return tracing::warn!(error = %e, "couldn't make the log folder");
+    }
+    cx.open_with_system(&dir);
+}
+
+/// Today's log file in `dir`, made private to the user, rotating daily
+/// (by UTC dates). Files beyond a week are deleted now: the appender only
+/// prunes when a day rolls over while Orbit runs.
 fn open_file(dir: &Path) -> Result<RollingFileAppender, String> {
     create_private_dir(dir).map_err(|e| e.to_string())?;
+    prune(dir);
     RollingFileAppender::builder()
         .rotation(Rotation::DAILY)
         .filename_prefix("orbit")
@@ -139,7 +155,31 @@ fn open_file(dir: &Path) -> Result<RollingFileAppender, String> {
         .map_err(|e| e.to_string())
 }
 
-/// `dir`, and its parents, readable by the user only.
+/// Deletes all but the newest week of log files in `dir`: by name, which
+/// carries the date.
+fn prune(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut logs: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("orbit.") && n.ends_with(".log"))
+        })
+        .collect();
+    logs.sort();
+    // Today's is made after: a week is today's and the six before it.
+    let keep = KEEP_DAYS.saturating_sub(1);
+    let old = logs.len().saturating_sub(keep);
+    for log in &logs[..old] {
+        std::fs::remove_file(log).ok();
+    }
+}
+
+/// `dir`, made with its parents; `dir` itself readable by the user only.
 fn create_private_dir(dir: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     #[cfg(unix)]
@@ -151,16 +191,12 @@ fn create_private_dir(dir: &Path) -> std::io::Result<()> {
 }
 
 /// Logs a panic, where and with a backtrace, before the usual report on
-/// stderr: a crash leaves its cause in the file.
+/// stderr: a crash leaves its cause in the file. Not its message, which
+/// can quote note text or a path (a slicing panic does): that's on stderr
+/// only (ADR 0007).
 fn install_panic_hook() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let payload = info.payload();
-        let message = payload
-            .downcast_ref::<&str>()
-            .map(|s| s.to_string())
-            .or_else(|| payload.downcast_ref::<String>().cloned())
-            .unwrap_or_default();
         let location = info
             .location()
             .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
@@ -169,7 +205,7 @@ fn install_panic_hook() {
             target: "panic",
             %location,
             backtrace = %std::backtrace::Backtrace::force_capture(),
-            "{message}"
+            "Orbit panicked"
         );
         previous(info);
     }));
@@ -177,14 +213,41 @@ fn install_panic_hook() {
 
 #[cfg(test)]
 mod tests {
-    use super::filter_directives;
+    use super::{KEEP_DAYS, filter_directives, prune};
+
+    #[test]
+    fn a_week_of_logs_is_kept_and_other_files_are_left_alone() {
+        let dir = std::env::temp_dir().join(format!("orbit-prune-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for day in 1..=10 {
+            std::fs::write(dir.join(format!("orbit.2026-10-{day:02}.log")), "").unwrap();
+        }
+        std::fs::write(dir.join("notes.txt"), "").unwrap();
+        prune(&dir);
+        let mut left: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        std::fs::remove_dir_all(&dir).ok();
+        let kept: Vec<String> = std::iter::once("notes.txt".to_string())
+            .chain((5..=10).map(|day| format!("orbit.2026-10-{day:02}.log")))
+            .collect();
+        assert_eq!(
+            left,
+            kept,
+            "the newest {} days, with today's still to come",
+            KEEP_DAYS - 1
+        );
+    }
 
     #[test]
     fn by_default_orbit_says_what_it_does_and_others_only_what_goes_wrong() {
         let filter = filter_directives(None, false);
         assert!(filter.starts_with("warn,"));
-        assert!(filter.contains("orbit=info"));
-        assert!(filter.contains("orbit_core=info"));
+        assert!(filter.contains("orbit=info"), "orbit_core and the rest too");
+        assert!(filter.contains("editor=info"));
         assert!(!filter.contains("debug"));
     }
 
@@ -193,7 +256,7 @@ mod tests {
         let filter = filter_directives(None, true);
         assert!(filter.starts_with("warn,"), "dependencies stay at warn");
         assert!(filter.contains("orbit=debug"));
-        assert!(filter.contains("orbit_index=debug"));
+        assert!(filter.contains("diagrams=debug"));
     }
 
     #[test]

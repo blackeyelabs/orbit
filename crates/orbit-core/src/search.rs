@@ -120,6 +120,7 @@ impl Vault {
     pub fn index_search(&self) {
         let _span = tracing::debug_span!("search.index").entered();
         let started = std::time::Instant::now();
+        tracing::debug!("bringing the search index up to date");
         *lock(&self.search.progress) = Some(IndexingProgress { done: 0, total: 0 });
         loop {
             let emptied = self.search.emptied.load(Ordering::Acquire);
@@ -132,7 +133,7 @@ impl Vault {
         self.search.complete.store(true, Ordering::Release);
         let progress = lock(&self.search.progress).take();
         tracing::info!(
-            notes = progress.map_or(0, |p| p.total),
+            notes_read = progress.map_or(0, |p| p.total),
             ms = started.elapsed().as_millis() as u64,
             "search index up to date"
         );

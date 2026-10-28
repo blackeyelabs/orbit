@@ -37,7 +37,9 @@ actions!(
         /// Lock every unlocked protected folder.
         LockAll,
         /// The protect flow, for the open note's folder.
-        ProtectFolder
+        ProtectFolder,
+        /// The folder Orbit's logs are in, in the file manager.
+        OpenLogFolder
     ]
 );
 
@@ -53,6 +55,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-,", OpenSettings, window),
         KeyBinding::new("ctrl-shift-l", LockAll, window),
     ]);
+    cx.on_action(|_: &OpenLogFolder, cx| crate::logging::open_folder(cx));
 }
 
 /// A command in the palette.
@@ -108,6 +111,7 @@ pub fn all() -> &'static [Command] {
         command!("Unlock…", Unlock, WINDOW),
         command!("Lock all protected folders", LockAll, WINDOW),
         command!("Protect a folder…", ProtectFolder, WINDOW),
+        command!("Open log folder", OpenLogFolder, WINDOW),
     ];
     COMMANDS
 }

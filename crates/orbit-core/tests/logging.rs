@@ -107,6 +107,9 @@ fn nothing_a_protected_folder_holds_is_ever_logged() {
         .rename(&p("Zanzibar Diary/Kestrel Plans.md"), "Kestrel Plans 2")
         .unwrap();
     vault.move_to(&p("Public.md"), &folder).unwrap();
+    // The protected folder itself renamed, and back: neither name logged.
+    let renamed = vault.rename(&folder, "Zanzibar Diary Two").unwrap();
+    vault.rename(&renamed, "Zanzibar Diary").unwrap();
     vault
         .change_passphrase(&folder, "brand new meadow kettle")
         .unwrap();

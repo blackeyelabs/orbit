@@ -235,7 +235,9 @@ mod system {
                 .ok()
         };
         let mut inhibitor = inhibit();
-        for signal in manager.receive_signal("PrepareForSleep")? {
+        let signals = manager.receive_signal("PrepareForSleep")?;
+        tracing::info!("locking on suspend: listening to logind");
+        for signal in signals {
             let Ok(going) = signal.body().deserialize::<bool>() else {
                 continue;
             };
@@ -270,7 +272,9 @@ mod system {
             session,
             "org.freedesktop.login1.Session",
         )?;
-        for _ in session.receive_signal("Lock")? {
+        let signals = session.receive_signal("Lock")?;
+        tracing::info!("locking on session lock: listening to logind");
+        for _ in signals {
             let event = Event {
                 reason: Reason::ScreenLock,
                 done: None,
@@ -290,7 +294,12 @@ mod system {
     ) -> zbus::Result<()> {
         let bus = Connection::session()?;
         let screensaver = Proxy::new(&bus, name, path, name)?;
-        for signal in screensaver.receive_signal("ActiveChanged")? {
+        let signals = screensaver.receive_signal("ActiveChanged")?;
+        tracing::info!(
+            service = name,
+            "locking on screen lock: listening to the screensaver"
+        );
+        for signal in signals {
             if signal.body().deserialize::<bool>() != Ok(true) {
                 continue;
             }

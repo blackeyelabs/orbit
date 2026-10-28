@@ -151,6 +151,7 @@ pub fn show_welcome(cx: &mut App, welcome: impl FnOnce(&mut Welcome) + 'static) 
     );
     match (opened, view) {
         (Ok(window), Some(view)) => {
+            tracing::info!("Welcome window shown");
             cx.global_mut::<Windows>().welcome = Some((window.into(), view));
         }
         (Err(e), _) => tracing::error!(error = %e, "couldn't open the Welcome window"),
