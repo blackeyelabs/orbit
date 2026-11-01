@@ -66,6 +66,18 @@ _Avoid_: raw mode, plain mode, code view
 A temporary source-plus-preview layout that exists only until Live Preview ships.
 _Avoid_: preview pane, reading view
 
+**Inline title**:
+A note's file name, shown as a heading above its text. Editing it renames the note.
+_Avoid_: header, note heading (a `#` heading in the text is a different thing)
+
+**Property**:
+One key and its value in a note's front matter, such as `created` or `tags`. Each property has a type: text, list, number, checkbox, date or date-time.
+_Avoid_: field, attribute, metadata (for a single key)
+
+**Properties panel**:
+The editor for a note's properties, under the inline title in Live Preview.
+_Avoid_: front matter editor, metadata panel
+
 ### Navigation
 
 **Switcher**:
