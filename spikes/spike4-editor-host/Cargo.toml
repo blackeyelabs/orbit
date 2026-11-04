@@ -1,0 +1,16 @@
+[package]
+name = "spike4-editor-host"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+gpui-kit.workspace = true
+spike1-conceal = { path = "../spike1-conceal" }
+unicode-segmentation.workspace = true
+# Reads Orbit Paper (fonts named there) for the window.
+serde_json.workspace = true
+
+[dev-dependencies]
+# Headless windows for the geometry checks.
+gpui = { workspace = true, features = ["test-support"] }

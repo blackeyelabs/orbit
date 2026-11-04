@@ -214,3 +214,73 @@ Watch items:
 - The guaranteed set (#1) can widen to everything merman draws, since the user already relies on timeline, quadrant, swimlane, requirement, XY and block diagrams.
 
 **Fallback:** mmdr, behind the same `DiagramRenderer` trait, only if merman stalls. It's much weaker on the user's diagrams.
+
+## Spike 4: Live Preview on `editor_host` (#36)
+
+**Question:** can Live Preview render through Kit 0.8.0's `editor_host`, with Orbit keeping the document, the caret and input? If not, Live Preview grows a custom element from Spike 1 instead. The decision rule (#36): if every check except dimming works (blocks, the caret across blocks, selection, typing, IME, 200 KB speed), use `editor_host`.
+
+### What's here
+
+| Part | What it is | Run |
+|---|---|---|
+| `src/model.rs` | std only: a note split into blocks (paragraph, heading, list, code, table, empty line) and *leaves*, the source ranges Kit renders as keyed text leaves (a paragraph, a list item's text, a cell). Caret stops step through a leaf, then jump to the next one. Prose leaves go through Spike 1's conceal model | `cargo test -p spike4-editor-host --test model` (10 tests) |
+| `src/host.rs` | GPUI: builds Kit `BlockNode`s with a leaf key per leaf, renders them in GPUI's virtualized `list` (long lists split into runs of 20 items), prepaints them inside `collect_leaf_geometry`, and maps caret, click, drag, Up/Down and IME through each leaf's `LeafGeometry` and offset map. Spike 1's input handler, adapted | `cargo test -p spike4-editor-host --test host` (12 headless tests) |
+| `src/main.rs` | the window: a sample note, or the file given as the argument, in Orbit Paper with Orbit's fonts. `SPIKE4_TIMINGS=1` logs frame timings and the process's CPU; `SPIKE4_TYPE=1` types into the middle of the note | `cargo run -p spike4-editor-host [note.md]` |
+
+### Results
+
+| Check (#36) | Status |
+|---|---|
+| 1. Paragraphs, headings at real sizes, a list, a code block and a table render, inline syntax hidden | **Pass (headless)**: every leaf reports geometry, a heading's line is taller than body text, a row's cells share a line. Needs a look: checklist item 1 |
+| 2. Arrow keys cross block boundaries; a click places the caret in any block | **Pass (headless)**: Down visits heading, paragraph, both list items, code, then cell *a* and the cell *below* it (not beside it), and Up comes back the same way. Right at a heading's end enters the next paragraph, and Right moves cell to cell and on to the next row. Down steps through every wrapped line of a long paragraph, and walks past the bottom of the window, scrolling the caret into view. Clicks land in a paragraph, a list item, code, three cells (one empty) and the heading |
+| 3. Drag selects across two blocks, the highlight following the text | **Pass (headless)**: a drag from a paragraph into the second list item selects from inside the paragraph to inside that item, and the highlight handed to `editor_host` covers exactly the paragraph and both items. How it looks: checklist item 3 |
+| 4. Typing in a paragraph and in a table cell | **Pass (headless)** for plain text: platform text input into an empty cell edits that cell's source, and into a paragraph's start. Enter in a cell inserts a raw line break, and a typed `\|` splits the row: a real table editor must handle both |
+| IME: pop-up at the caret, preedit in place (also in a cell), commit in the right place | **Pass (headless) for the geometry**, in a paragraph (next to concealed bold) and in a table cell: the preedit's rectangle starts at the caret, and committing replaces the preedit there. **Not yet tried with a real IME** (fcitx5 and Mozc): checklist items 4–5 |
+| 5. Dim revealed markers | **Workaround only**: `TextMark` has no foreground colour, so revealed syntax gets a faint grey highlight behind it instead. Real dimming needs an upstream `TextMark` colour |
+| 6. A 200 KB note lays out at an acceptable speed | **Pass, with virtualization**: see below |
+
+**Measured (check 6).** The fixture vault's `Long.md` (200 KB, one list of 2,500 items) on the profiling build, typing ten keys a second into the middle without pauses. A frame is timed from the editor's render to the end of its paint, so layout is included; CPU is the whole process's user plus system time, as `scripts/measure.sh` counts it.
+
+| Version | Frame (mean) | Slowest frame | Process CPU |
+|---|---|---|---|
+| Every block rendered and laid out every frame | 70 ms | 93 ms | 780 ms/s |
+| Blocks in GPUI's virtualized `list` (the whole list is still one block) | 58 ms | 95 ms | 690–925 ms/s |
+| Long lists split into runs of 20 items, each its own row | **5.7 ms** | 10 ms | **150–175 ms/s** |
+
+Building the 2,500 items' block nodes is now most of each frame (about 2.7 ms), and Kit's prepaint about 1.8 ms. Today's Split view, typing into the same note, measured 294 ms/s (`docs/research/performance.md`, row C), but with a different typing pattern (bursts of 30 keys, then a 2 s pause), so that's a guide, not a like-for-like comparison.
+
+### Findings for Phase 2
+
+- **Virtualize by rows, not blocks.** One block can be huge (`Long.md` is one list). Kit's `FlowPosition::first`/`last` are made for this: each run of a long list renders as a list of its own, with no gaps between runs. Rows the list hasn't laid out have no geometry, so Up/Down at the edge of the laid-out rows moves by the model to the next leaf and scrolls it into view. When syntax is revealed or hidden, its row is remeasured, and an edit splices only the rows that changed.
+- **No caret affinity at soft wraps.** At a wrap, the end of one line and the start of the next are the same index, and `LeafGeometry::position_for_index` always draws it at the end of the upper line. Without help, Down never leaves a wrapped paragraph's first line. The host remembers which line the caret belongs to (from the click or the Up/Down target) and draws it at the lower line's start. An upstream affinity parameter would be cleaner.
+- **No foreground colour on `TextMark`** (check 5). Also no font size: heading sizes come from Kit's heading block, which is enough.
+- **Link marks are live links.** Kit follows a `LinkMark` on click, so the spike underlines links instead. Orbit will want link marks with its own `on_link_click`, plus a check that clicks beside a link still place the caret (#41).
+- **Leaves fit the model.** One keyed leaf per paragraph, item or cell, with Spike 1's offset map per leaf, needed nothing from Kit's private source map. Text outside leaves (markers, fences, pipes, the blank line between blocks) is never under the caret; a caret there snaps to the nearest leaf.
+- **Not tried here:** revealing list markers and fences (#45, #47), widgets showing their source (#49–#51), incremental reparsing (#55: the whole note is reparsed per keystroke, and every row's block node is rebuilt per frame).
+- **Testing:** Kit's `test-support` feature doesn't resolve with Orbit's lockfile (`unicode-properties` versions clash through `gpui-fast-web`), so the tests enable gpui-pre's `test-support` directly (a workspace dependency now, pinned beside Kit). The test window ignores `resize`, so wrapping is tested with a longer paragraph.
+
+### Hands-on checklist (needs a person at the keyboard)
+
+Run `cargo run -p spike4-editor-host`.
+
+1. **Rendering.** The heading is large, bold/italic/strike/code are styled with their syntax hidden, the list has bullets and two checkboxes (one ticked), the code block is highlighted, the table has a header row and cells.
+2. **Caret across blocks.** Up/Down and Left/Right move through every block and every table cell, and the caret is drawn where you expect, including at the start of a wrapped line.
+3. **Selection.** Drag from the paragraph into the list. The highlight follows the text across both blocks.
+4. **IME in a paragraph** (fcitx5 with Mozc). Compose in the last paragraph. The candidate window sits at the caret, the preedit is underlined in place, and committing inserts it where you typed.
+5. **IME in a table cell.** The same, in the `日本語` row's second cell.
+6. **Revealed markers.** Moving into `**bold**` shows its markers with a faint grey highlight. Say whether that's acceptable until Kit has a text colour.
+7. **A long note.** Run `cargo run -p spike4-editor-host <fixture vault>/Long.md` (make the vault with `scripts/make-fixture-vault.py`). Scrolling, Down past the window and typing feel smooth.
+
+| # | Pass/fail | Notes |
+|---|---|---|
+| 1 | | |
+| 2 | | |
+| 3 | | |
+| 4 | | |
+| 5 | | |
+| 6 | | |
+| 7 | | |
+
+### Recommendation
+
+**Render Live Preview through `editor_host`** (ADR 0011), provisionally. Every deciding check passes headless except the real IME, which only a person can try: items 4–5. The custom-element route isn't needed unless they fail; if one does, record it here and revisit the ADR.
