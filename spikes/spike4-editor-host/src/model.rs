@@ -228,11 +228,19 @@ impl Doc {
         while i < lines.len() {
             let line = &lines[i];
             if is_blank(line.text) {
-                if !after_block {
+                // After a block, a run of blank lines keeps its *last* one
+                // as the separator before the next block, and every other
+                // is an empty line to stand on. So Enter at a block's end
+                // puts the caret on the very next line.
+                let run = (i..lines.len())
+                    .take_while(|&j| is_blank(lines[j].text))
+                    .count();
+                let separators = usize::from(after_block);
+                for line in &lines[i..i + run - separators.min(run)] {
                     doc.push(Kind::Empty, [Leaf::prose(line.start..line.start)]);
                 }
                 after_block = false;
-                i += 1;
+                i += run;
                 continue;
             }
             after_block = true;
@@ -256,7 +264,11 @@ impl Doc {
                 doc.push(Kind::Rule, []);
                 i += 1;
             } else if is_table_row(line.text)
-                && lines.get(i + 1).is_some_and(|l| is_delimiter_row(l.text))
+                && lines.get(i + 1).is_some_and(|l| {
+                    // As in GFM: the delimiter row has a cell per header cell,
+                    // so a half-typed `|-` doesn't make a table yet.
+                    is_delimiter_row(l.text) && cells(l).len() == cells(line).len()
+                })
             {
                 let end = (i..lines.len())
                     .find(|&j| !is_table_row(lines[j].text))
@@ -362,6 +374,46 @@ impl Doc {
         (before, after)
     }
 
+    /// For a list item's leaf: what Enter at its end does. An empty item
+    /// ends the list: the range to clear (its marker) and what replaces it.
+    /// Otherwise, the marker the next item starts with (same indent and
+    /// bullet, the next number, an unticked box for a task).
+    pub fn list_enter(&self, source: &str, leaf: usize) -> Option<ListEnter> {
+        let block = self.blocks.iter().find(|b| b.leaves.contains(&leaf))?;
+        let Kind::List { .. } = block.kind else {
+            return None;
+        };
+        let range = &self.leaves[leaf].source;
+        let line_start = source[..range.start].rfind('\n').map_or(0, |i| i + 1);
+        let line = &source[line_start..range.end];
+        let marker = list_marker(line)?;
+        if range.is_empty() {
+            return Some(ListEnter::End(line_start..range.end));
+        }
+        let indent = &line[..line.len() - line.trim_start().len()];
+        let rest = &line[indent.len()..];
+        let bullet = if marker.ordered {
+            let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+            format!("{}. ", digits.parse::<u64>().unwrap_or(0) + 1)
+        } else {
+            rest[..2].to_string()
+        };
+        let task = if marker.checked.is_some() { "[ ] " } else { "" };
+        Some(ListEnter::Continue(format!("\n{indent}{bullet}{task}")))
+    }
+
+    /// For a task item's leaf: the offset of the character in its box
+    /// (` ` or `x`).
+    pub fn task_tick(&self, leaf: usize) -> Option<usize> {
+        let block = self.blocks.iter().find(|b| b.leaves.contains(&leaf))?;
+        let Kind::List { checked, .. } = &block.kind else {
+            return None;
+        };
+        checked[leaf - block.leaves.start]?;
+        // The leaf starts after "[ ] ", so the tick is three bytes back.
+        Some(self.leaves[leaf].source.start - 3)
+    }
+
     /// The leaf the caret at `offset` is in: the first whose range holds it
     /// (ends included).
     pub fn leaf_at(&self, offset: usize) -> Option<usize> {
@@ -440,6 +492,15 @@ impl Doc {
             })
             .collect()
     }
+}
+
+/// What Enter at the end of a list item does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ListEnter {
+    /// Start the next item with this text (a line break and the marker).
+    Continue(String),
+    /// The item is empty: clear this range (its marker), leaving the list.
+    End(Range<usize>),
 }
 
 /// What one leaf shows: its text with syntax concealed, or verbatim (code).

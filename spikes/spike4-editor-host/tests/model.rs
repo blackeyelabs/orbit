@@ -70,7 +70,8 @@ fn extra_blank_lines_are_empty_blocks_the_caret_can_stand_on() {
     let doc = Doc::parse(source);
     let kinds: Vec<_> = doc.blocks.iter().map(|b| b.kind.clone()).collect();
     assert_eq!(kinds, vec![Kind::Paragraph, Kind::Empty, Kind::Paragraph]);
-    assert_eq!(doc.leaves[1].source, 5..5);
+    // The first blank line, right under "one"; the last one separates.
+    assert_eq!(doc.leaves[1].source, 4..4);
 }
 
 #[test]

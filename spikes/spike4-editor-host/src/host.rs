@@ -22,7 +22,7 @@ use gpui_kit::base::text::editor_host::{
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::*;
 
-use crate::model::{Doc, Kind, Selection, Style, View};
+use crate::model::{Doc, Kind, ListEnter, Selection, Style, View};
 
 actions!(
     spike4,
@@ -203,6 +203,9 @@ fn row_text<'a>(doc: &Doc, source: &'a str, row: &Row) -> &'a str {
         _ => "",
     }
 }
+
+/// How far left of a task's text its checkbox reaches, as Kit draws it.
+const CHECKBOX_REACH: Pixels = px(28.);
 
 /// A leaf's key in Kit: its index plus one.
 fn leaf_key(leaf: usize) -> u64 {
@@ -542,8 +545,29 @@ impl Editor {
         self.replace_text_in_range(None, "", window, cx)
     }
 
+    /// Enter: a line break, or in a list the next item's marker too. On
+    /// an empty item it ends the list: the marker goes, and the caret moves
+    /// to the line after a blank one.
     fn newline(&mut self, _: &Newline, window: &mut Window, cx: &mut Context<Self>) {
-        self.replace_text_in_range(None, "\n", window, cx)
+        let caret = self.cursor_offset();
+        let in_list = self
+            .selected_range
+            .is_empty()
+            .then(|| self.doc.leaf_at(caret))
+            .flatten()
+            .and_then(|leaf| self.doc.list_enter(&self.source, leaf));
+        match in_list {
+            Some(ListEnter::Continue(marker)) => {
+                self.replace_text_in_range(None, &marker, window, cx)
+            }
+            Some(ListEnter::End(marker)) => {
+                let at = marker.start;
+                self.edit(marker, "\n");
+                let caret = self.doc.snap(at + 1, false);
+                self.move_to(caret, cx);
+            }
+            None => self.replace_text_in_range(None, "\n", window, cx),
+        }
     }
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
@@ -567,6 +591,10 @@ impl Editor {
         cx: &mut Context<Self>,
     ) {
         window.focus(&self.focus_handle, cx);
+        if let Some(tick) = self.checkbox_at(event.position) {
+            self.toggle_task(tick, cx);
+            return;
+        }
         let Some((ix, next_line)) = self.source_for_point(event.position, |_| true) else {
             return;
         };
@@ -673,6 +701,50 @@ impl Editor {
             .count();
         self.list
             .splice(prefix..n_old - suffix, n_new - prefix - suffix);
+    }
+
+    /// The task whose checkbox is under `at`: the offset of its tick. Kit
+    /// draws the box in the space just left of the item's text, on its
+    /// first line.
+    pub fn checkbox_at(&self, at: Point<Pixels>) -> Option<usize> {
+        let geometry = self.geometry.borrow();
+        (0..self.doc.leaves.len()).find_map(|leaf| {
+            let tick = self.doc.task_tick(leaf)?;
+            let g = geometry.get(&leaf_key(leaf))?;
+            let b = g.bounds();
+            let line = g.line_height();
+            let inside = at.x >= b.left() - CHECKBOX_REACH
+                && at.x < b.left()
+                && at.y >= b.top()
+                && at.y < b.top() + line;
+            inside.then_some(tick)
+        })
+    }
+
+    /// Where the checkboxes of the laid-out tasks are, for the pointer
+    /// cursor.
+    fn checkbox_bounds(&self) -> Vec<Bounds<Pixels>> {
+        let geometry = self.geometry.borrow();
+        (0..self.doc.leaves.len())
+            .filter(|&leaf| self.doc.task_tick(leaf).is_some())
+            .filter_map(|leaf| {
+                let g = geometry.get(&leaf_key(leaf))?;
+                let b = g.bounds();
+                Some(Bounds::new(
+                    point(b.left() - CHECKBOX_REACH, b.top()),
+                    size(CHECKBOX_REACH, g.line_height()),
+                ))
+            })
+            .collect()
+    }
+
+    /// Ticks or unticks the task whose tick is at `tick`, leaving the caret
+    /// where it was.
+    fn toggle_task(&mut self, tick: usize, cx: &mut Context<Self>) {
+        let ticked = self.source[tick..].starts_with(['x', 'X']);
+        let caret = self.cursor_offset();
+        self.edit(tick..tick + 1, if ticked { " " } else { "x" });
+        self.move_to(caret, cx);
     }
 
     /// Where to draw the caret, when there's no selection.
@@ -995,7 +1067,8 @@ impl IntoElement for HostElement {
 
 impl Element for HostElement {
     type RequestLayoutState = AnyElement;
-    type PrepaintState = ();
+    /// The checkboxes' hitboxes, for the pointer cursor.
+    type PrepaintState = Vec<Hitbox>;
 
     fn id(&self) -> Option<ElementId> {
         None
@@ -1029,16 +1102,22 @@ impl Element for HostElement {
         child: &mut AnyElement,
         window: &mut Window,
         cx: &mut App,
-    ) {
+    ) -> Vec<Hitbox> {
         let started = Instant::now();
         let decorations = std::mem::take(&mut self.decorations);
         let (_, geometry) = collect_leaf_geometry(decorations, || child.prepaint(window, cx));
         let editor = self.editor.read(cx);
         *editor.geometry.borrow_mut() = geometry;
+        let boxes = editor
+            .checkbox_bounds()
+            .into_iter()
+            .map(|b| window.insert_hitbox(b, HitboxBehavior::Normal))
+            .collect();
         let took = started.elapsed();
         let mut t = editor.timings.borrow_mut();
         t.prepaint += took;
         t.slowest_prepaint = t.slowest_prepaint.max(took);
+        boxes
     }
 
     fn paint(
@@ -1047,11 +1126,14 @@ impl Element for HostElement {
         _: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         child: &mut AnyElement,
-        _: &mut (),
+        boxes: &mut Vec<Hitbox>,
         window: &mut Window,
         cx: &mut App,
     ) {
         child.paint(window, cx);
+        for hitbox in boxes.iter() {
+            window.set_cursor_style(CursorStyle::PointingHand, hitbox);
+        }
         let editor = self.editor.read(cx);
         let focus_handle = editor.focus_handle.clone();
         window.handle_input(

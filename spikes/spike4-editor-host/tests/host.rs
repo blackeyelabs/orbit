@@ -426,3 +426,109 @@ fn typing_after_an_opening_fence_goes_into_the_code_not_the_language(cx: &mut Te
     settle(cx);
     editor.read_with(cx, |e, _| assert_eq!(e.source(), "Intro\n\n```\nx"));
 }
+
+// Second review round: lists, tasks and Enter.
+
+/// Opens `source` with the caret at its end.
+fn open_at_end<'a>(
+    cx: &'a mut TestAppContext,
+    source: &str,
+) -> (Entity<Editor>, &'a mut VisualTestContext) {
+    let (editor, cx) = open(cx, source);
+    editor.update(cx, |e, cx| e.set_caret(e.source().len(), cx));
+    settle(cx);
+    (editor, cx)
+}
+
+#[gpui::test]
+fn enter_at_a_lines_end_puts_the_caret_on_the_very_next_line(cx: &mut TestAppContext) {
+    let (editor, cx) = open(cx, "abc\n\nnext");
+    editor.update(cx, |e, cx| e.set_caret(3, cx));
+    settle(cx);
+    press(cx, "enter");
+    cx.simulate_input("x");
+    settle(cx);
+    editor.read_with(cx, |e, _| assert_eq!(e.source(), "abc\nx\n\nnext"));
+}
+
+#[gpui::test]
+fn typing_a_header_and_delimiter_row_makes_a_table(cx: &mut TestAppContext) {
+    let (editor, cx) = open(cx, "Intro\n\n| a | b |\n\nafter");
+    let header_end = "Intro\n\n| a | b |".len();
+    editor.update(cx, |e, cx| e.set_caret(header_end, cx));
+    settle(cx);
+    press(cx, "enter");
+    cx.simulate_input("|---|---|");
+    settle(cx);
+    editor.read_with(cx, |e, _| {
+        assert_eq!(e.source(), "Intro\n\n| a | b |\n|---|---|\n\nafter");
+        assert!(
+            e.doc()
+                .blocks
+                .iter()
+                .any(|b| matches!(b.kind, spike4_editor_host::model::Kind::Table { .. }))
+        );
+    });
+}
+
+#[gpui::test]
+fn enter_continues_a_list(cx: &mut TestAppContext) {
+    for (note, typed) in [
+        ("- one", "- one\n- two"),
+        ("* one", "* one\n* two"),
+        ("1. one", "1. one\n2. two"),
+        ("- [ ] one", "- [ ] one\n- [ ] two"),
+        ("- [x] one", "- [x] one\n- [ ] two"),
+        ("  - one", "  - one\n  - two"),
+    ] {
+        let mut cx = cx.clone();
+        let (editor, cx) = open_at_end(&mut cx, note);
+        press(cx, "enter");
+        cx.simulate_input("two");
+        settle(cx);
+        editor.read_with(cx, |e, _| assert_eq!(e.source(), typed, "from {note:?}"));
+    }
+}
+
+#[gpui::test]
+fn enter_on_an_empty_last_item_ends_the_list(cx: &mut TestAppContext) {
+    let (editor, cx) = open_at_end(cx, "- one");
+    press(cx, "enter");
+    press(cx, "enter");
+    cx.simulate_input("after");
+    settle(cx);
+    editor.read_with(cx, |e, _| {
+        assert_eq!(e.source(), "- one\n\nafter");
+        assert_eq!(
+            e.doc().blocks[1].kind,
+            spike4_editor_host::model::Kind::Paragraph
+        );
+    });
+}
+
+#[gpui::test]
+fn clicking_a_checkbox_ticks_and_unticks_it(cx: &mut TestAppContext) {
+    let (editor, cx) = open(cx, "- [ ] task\n- [x] done\n");
+    let boxes = editor.read_with(cx, |e, _| {
+        [0, 1].map(|leaf| {
+            let g = e.leaf_geometry(leaf).unwrap();
+            let b = g.bounds();
+            // The checkbox Kit draws sits just left of the item's text.
+            point(b.left() - px(10.), b.top() + g.line_height() / 2.)
+        })
+    });
+    cx.simulate_click(boxes[0], Modifiers::none());
+    settle(cx);
+    editor.read_with(cx, |e, _| {
+        assert_eq!(e.source(), "- [x] task\n- [x] done\n")
+    });
+    cx.simulate_click(boxes[1], Modifiers::none());
+    settle(cx);
+    editor.read_with(cx, |e, _| {
+        assert_eq!(e.source(), "- [x] task\n- [ ] done\n")
+    });
+    assert!(
+        editor.read_with(cx, |e, _| e.checkbox_at(boxes[0]).is_some()),
+        "a pointer cursor shows over the box"
+    );
+}

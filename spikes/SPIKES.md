@@ -293,11 +293,21 @@ Bugs found and fixed in the spike, each with a test that reproduced it first:
 | Down can't leave a code block at the end of the note | Nowhere for the caret after the closing fence | The note's end is always an empty last line the caret can reach |
 | Typing right after ` ``` ` edits the language | The new code block's empty text sat at the end of the fence line | Text typed into an empty code block or empty line goes on its own line |
 
+Second round (the same day), found with a trace of a hands-on session:
+
+| Found | Cause | Fix |
+|---|---|---|
+| A typed table never became one | Enter at a line's end moved the caret two lines down: the blank line after a paragraph only separated blocks, so the caret couldn't stand on it, and a blank line ended up between the header and delimiter rows | Of a run of blank lines after a block, only the last separates; the others are lines to stand on, so Enter lands on the very next line |
+| A table formed mid-typing and took the caret | `\|-` already counted as a delimiter row | As in GFM, the delimiter row needs a cell per header cell |
+| Enter didn't continue a list or checklist; a checkbox couldn't be clicked | Not built in the spike (#45, #46) | Built here to try them: Enter continues bullets, numbers and tasks (unticked) at the same indent, and on an empty item ends the list. Clicking a box ticks or unticks it, with a pointer cursor over it |
+
+Adding rows or columns to a table has no command yet (table handles are a later Phase 2 ticket).
+
 To make a table, type the header row, then a delimiter row under it: `| Name | Notes |`, then `|---|---|`. There's no insert-table command in the spike.
 
 Asked for, and planned as tickets rather than spike fixes:
-- Enter continues an unordered, numbered or task list; Enter on an empty last item removes it and leaves the list (#46).
-- Ticking a task by clicking its checkbox, with a pointer cursor over it (#45).
+- Enter continues an unordered, numbered or task list; Enter on an empty last item removes it and leaves the list (#46; tried in the spike in the second round).
+- Ticking a task by clicking its checkbox, with a pointer cursor over it (#45; likewise).
 - Code blocks: Enter after ` ``` ` opens the block with `txt` as its language, picked from a searchable list of about 100 languages at the block's top left, or typed (up to 20 characters) (#47, to be added there).
 
 ### Recommendation
