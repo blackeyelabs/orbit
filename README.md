@@ -1,9 +1,5 @@
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/logo/OrbitDarkNobg.png">
-    <source media="(prefers-color-scheme: light)" srcset="assets/logo/OrbitLightNobg.png">
-    <img alt="Orbit Logo" src="assets/logo/OrbitLightNobg.png" width="180">
-  </picture>
+  <img alt="Orbit Logo" src="assets/logo/Orbit_865x800.png" width="180">
 </p>
 
 <h1 align="center">Orbit</h1>

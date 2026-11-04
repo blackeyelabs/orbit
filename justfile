@@ -205,7 +205,7 @@ install-system:
 # Assets, Validation & Maintenance
 # -----------------------------------------------------------------------------
 
-# Regenerate PNG icon sizes from master SVG icon
+# Regenerate the PNG icon sizes from the logos in assets/logo
 icons:
     packaging/linux/generate-icons.sh
 
