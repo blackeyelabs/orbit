@@ -23,6 +23,7 @@ mod right_panel;
 mod search_panel;
 mod settings_view;
 mod switcher;
+mod text_editor;
 mod vaults;
 mod welcome;
 mod window;

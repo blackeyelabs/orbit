@@ -14,8 +14,8 @@ license = "MIT"
 # syntect: highlighting for the source editor and preview code blocks.
 gpui-kit = { version = "=0.8.0", features = ["syntect"] }
 # The gpui-pre that gpui-kit 0.8.0 pins, named directly only for its
-# test-support feature (headless windows in spike 4's tests): Kit's own
-# test-support doesn't resolve with this lockfile.
+# test-support feature (headless windows in tests: the app's, spike 4's):
+# Kit's own test-support doesn't resolve with this lockfile.
 gpui = { package = "gpui-pre", version = "=0.3.9" }
 
 md-engine = { path = "crates/md-engine" }

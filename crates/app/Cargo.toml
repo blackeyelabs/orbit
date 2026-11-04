@@ -27,6 +27,12 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-appender.workspace = true
 
+[dev-dependencies]
+# Headless windows for the text editor's tests.
+gpui = { workspace = true, features = ["test-support"] }
+# A vault for the tests to open.
+tempfile.workspace = true
+
 [target.'cfg(target_os = "linux")'.dependencies]
 # Turning off core dumps.
 rustix.workspace = true

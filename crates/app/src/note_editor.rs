@@ -1,5 +1,6 @@
-//! One open note: the Split view (Kit's Editor beside the rendered preview,
-//! or just the Editor in Source mode for `.txt`), with autosave.
+//! One open note: the Split view (the text editor beside the rendered
+//! preview, or just the text editor in Source mode for `.txt`), with
+//! autosave. The text editor is reached through `text_editor`.
 
 use std::{
     rc::Rc,
@@ -17,10 +18,9 @@ use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::Icon;
 use gpui_kit::component::Sizable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::{Editor, EditorState, InputEvent, Position};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use md_engine::{Format, Heading, TextEdit, format_edit, headings, word_count};
+use md_engine::{Format, Heading, format_edit, headings, word_count};
 use orbit_core::{
     DiskCheck, OpenNote, Trouble, Vault, VaultPath, Zeroizing, is_large_note, is_plain_text_note,
 };
@@ -28,6 +28,7 @@ use orbit_core::{
 use crate::clipboard_guard::{self, Copying};
 use crate::link_completion::LinkCompletions;
 use crate::preview::{FollowLink, PreviewContext, PreviewPane};
+use crate::text_editor::TextEditor;
 
 actions!(
     note_editor,
@@ -187,7 +188,7 @@ pub struct NoteEditor {
     vault: Arc<Vault>,
     path: VaultPath,
     mode: Mode,
-    source: Entity<EditorState>,
+    source: TextEditor,
     preview: PreviewContext,
     /// The preview beside the source, drawn only when its text changes.
     pane: Entity<PreviewPane>,
@@ -237,23 +238,8 @@ impl NoteEditor {
         let large = is_large_note(&text).then_some(text.len());
         let mode = Mode::of(&path, large.is_some());
         let links = Rc::new(LinkCompletions::new(vault.clone(), path.clone()));
-        let source = cx.new(|cx| {
-            let mut source = EditorState::new(window, cx)
-                .language(mode.language())
-                .line_number(false)
-                .soft_wrap(true)
-                .default_value(text.clone());
-            source.lsp_mut().completion_provider = Some(links.clone());
-            source
-                .lsp_mut()
-                .set_completion_highlighter(LinkCompletions::highlighter());
-            source
-        });
-        let subscription = cx.subscribe(&source, |this, _, event: &InputEvent, cx| {
-            if let InputEvent::Change = event {
-                this.edited(cx);
-            }
-        });
+        let source = TextEditor::new(&text, mode.language(), links.clone(), window, cx);
+        let subscription = source.on_edit(cx, |this, cx| this.edited(cx));
         let this = cx.entity().downgrade();
         let follow: FollowLink = Arc::new(move |target, _, cx| {
             this.update(cx, |_, cx| {
@@ -307,13 +293,13 @@ impl NoteEditor {
         if self.copy_agreed {
             return;
         }
-        let editor = self.source.read(cx).focus_handle(cx);
-        if editor.contains_focused(window, cx) {
+        if self.source.focus_handle(cx).contains_focused(window, cx) {
             cx.stop_propagation();
             let this = cx.entity().downgrade();
+            let source = self.source.clone();
             let copy = move |window: &mut Window, cx: &mut App| {
                 this.update(cx, |this, _| this.copy_agreed = true).ok()?;
-                editor.dispatch_action(copying.action().as_ref(), window, cx);
+                source.copy(copying, window, cx);
                 this.update(cx, |this, _| this.copy_agreed = false).ok()?;
                 clipboard_guard::clipboard_text(cx)
             };
@@ -366,8 +352,7 @@ impl NoteEditor {
     /// the preview follow.
     fn set_mode(&mut self, mode: Mode, cx: &mut Context<Self>) {
         if mode != self.mode {
-            self.source
-                .update(cx, |source, cx| source.set_highlighter(mode.language(), cx));
+            self.source.set_language(mode.language(), cx);
         }
         self.mode = mode;
         self.outline = outline_of(self.mode, &self.text);
@@ -401,9 +386,7 @@ impl NoteEditor {
             .iter()
             .filter(|&&b| b == b'\n')
             .count() as u32;
-        self.source.update(cx, |source, cx| {
-            source.set_cursor_position(Position { line, character: 0 }, window, cx)
-        });
+        self.source.go_to_line(line, window, cx);
         NoteEditor::focus(&cx.entity(), window, cx);
     }
 
@@ -447,13 +430,13 @@ impl NoteEditor {
 
     /// The status bar's right side: word count, caret and mode.
     pub fn summary_text(&self, cx: &App) -> SharedString {
-        let caret = self.source.read(cx).cursor_position();
+        let (line, column) = self.source.caret_line_column(cx);
         let words = self.words;
         format!(
             "{words} word{} · Ln {}, Col {} · {}",
             if words == 1 { "" } else { "s" },
-            caret.line + 1,
-            caret.character + 1,
+            line + 1,
+            column + 1,
             self.mode.label()
         )
         .into()
@@ -461,35 +444,31 @@ impl NoteEditor {
 
     /// How far the source is scrolled, in pixels from the top.
     pub fn scroll(&self, cx: &App) -> f32 {
-        let source = self.source.read(cx);
         // Before its first layout (a restored tab never shown), the editor
         // hasn't taken the scroll it was given yet.
-        match (source.line_height(), self.restored_scroll) {
-            (None, Some(scroll)) => scroll,
-            // Offsets grow negative downwards; `+ 0.` turns -0 into 0.
-            _ => f32::max(0., -f32::from(source.scroll_offset().y)) + 0.,
-        }
+        self.source
+            .scroll(cx)
+            .or(self.restored_scroll)
+            .unwrap_or(0.)
     }
 
     /// Scrolls the source, from the next layout on.
     pub fn set_scroll(&mut self, scroll: f32, cx: &mut Context<Self>) {
         self.restored_scroll = Some(scroll);
-        self.source.update(cx, |source, cx| {
-            source.set_scroll_offset(point(px(0.), px(-scroll)), cx)
-        });
+        self.source.set_scroll(scroll, cx);
     }
 
     /// Moves keyboard focus to the source pane.
     pub fn focus(entity: &Entity<Self>, window: &mut Window, cx: &mut App) {
-        let handle = entity.read(cx).source.read(cx).focus_handle(cx);
+        let handle = entity.read(cx).source.focus_handle(cx);
         handle.focus(window, cx);
     }
 
     fn edited(&mut self, cx: &mut Context<Self>) {
         let _span = tracing::trace_span!("editor.edited").entered();
-        self.text = self.source.read(cx).value();
+        self.text = self.source.text(cx);
         self.catch_up_later(cx);
-        let caret = self.source.read(cx).cursor();
+        let caret = self.source.caret(cx);
         if let Some(link) = self.links.accepted_create(&self.text, caret) {
             cx.emit(NoteEditorEvent::CreateLinkedNote(link));
         }
@@ -659,7 +638,7 @@ impl NoteEditor {
     fn writer(&self, cx: &App) -> impl FnOnce() -> (u64, bool, Option<Trouble>) + Send + 'static {
         let (vault, disk) = (self.vault.clone(), self.saves.disk.clone());
         let forgotten = self.saves.forgotten.clone();
-        let (text, revision) = (self.source.read(cx).value(), self.saves.revision);
+        let (text, revision) = (self.source.text(cx), self.saves.revision);
         move || {
             let mut disk = disk.lock().unwrap_or_else(|e| e.into_inner());
             disk.forget_if(&forgotten);
@@ -687,7 +666,7 @@ impl NoteEditor {
         cx: &mut Context<Self>,
         choice: impl FnOnce(&mut OpenNote, &Vault, &str) -> Option<VaultPath>,
     ) {
-        let text = self.source.read(cx).value();
+        let text = self.source.text(cx);
         let (moved, trouble) = {
             let mut disk = self.saves.disk();
             let Some(note) = disk.note.as_mut() else {
@@ -731,7 +710,7 @@ impl NoteEditor {
     fn save_elsewhere(&mut self, cx: &mut Context<Self>) {
         let directory = std::env::home_dir().unwrap_or_default();
         let chosen = cx.prompt_for_new_path(&directory, Some(self.path.name()));
-        let text = self.source.read(cx).value();
+        let text = self.source.text(cx);
         cx.spawn(async move |this, cx| {
             let Ok(Ok(Some(file))) = chosen.await else {
                 return;
@@ -879,17 +858,8 @@ impl NoteEditor {
     }
 
     fn apply_format(&mut self, kind: Format, window: &mut Window, cx: &mut Context<Self>) {
-        self.source.update(cx, |source, cx| {
-            let text = source.value();
-            let TextEdit {
-                range,
-                text: replacement,
-                selection,
-            } = format_edit(&text, source.selected_range(), kind);
-            source.set_selected_range(range, cx);
-            source.replace(replacement, window, cx);
-            source.set_selected_range(selection, cx);
-        });
+        let edit = format_edit(&self.source.text(cx), self.source.selection(cx), kind);
+        self.source.apply(edit, window, cx);
     }
 }
 
@@ -897,15 +867,14 @@ impl Render for NoteEditor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(text) = self.reload.take() {
             // `set_value` emits no change event, so this isn't an edit.
-            self.source
-                .update(cx, |source, cx| source.set_value(text, window, cx));
+            self.source.load(text, window, cx);
         }
         let border = cx.theme().border;
         let editor = div()
             .flex_1()
             .min_w_0()
             .h_full()
-            .child(Editor::new(&self.source).h_full().bordered(false));
+            .child(self.source.element());
         let banner = self.render_banner(cx);
         let body = h_flex()
             .flex_1()
