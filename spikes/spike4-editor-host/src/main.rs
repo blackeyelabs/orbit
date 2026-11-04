@@ -34,6 +34,8 @@ fn main() {
 }
 ```
 
+---
+
 ## A table
 
 | Name | Notes |

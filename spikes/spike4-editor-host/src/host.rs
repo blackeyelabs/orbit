@@ -676,15 +676,18 @@ impl Editor {
     }
 
     /// Where to draw the caret, when there's no selection.
-    fn caret_bounds(&self) -> Option<Bounds<Pixels>> {
+    pub fn caret_bounds(&self) -> Option<Bounds<Pixels>> {
         if !self.selected_range.is_empty() {
             return None;
         }
         let caret = self.cursor_offset();
         let at = self.point_for_source(caret)?;
         let (leaf, _) = self.locate(caret)?;
-        let height = self.leaf_geometry(leaf)?.caret_height();
-        Some(Bounds::new(at, size(px(2.), height)))
+        let g = self.leaf_geometry(leaf)?;
+        let height = g.caret_height();
+        // Centred in the line box, whose leading Kit's position leaves out.
+        let top = at.y + (g.line_height() - height) / 2.;
+        Some(Bounds::new(point(at.x, top), size(px(2.), height)))
     }
 
     /// After the caret moved, scrolls so it's in view. Says whether it
@@ -754,6 +757,7 @@ impl Editor {
                 let first = block.leaves.start;
                 match &block.kind {
                     Kind::Paragraph | Kind::Empty => BlockNode::Paragraph(paragraph(first)),
+                    Kind::Rule => BlockNode::HorizontalRule { span: None },
                     Kind::Heading(level) => BlockNode::Heading {
                         level: *level,
                         children: paragraph(first),
@@ -893,8 +897,15 @@ impl EntityInputHandler for Editor {
         cx: &mut Context<Self>,
     ) {
         let range = self.edit_range(range_utf16.as_ref());
-        self.edit(range.clone(), new_text);
-        let caret = self.doc.snap(range.start + new_text.len(), false);
+        let (before, after) = if range.is_empty() && !new_text.is_empty() {
+            self.doc.line_breaks_for_insert(&self.source, range.start)
+        } else {
+            ("", "")
+        };
+        self.edit(range.clone(), &format!("{before}{new_text}{after}"));
+        let caret = self
+            .doc
+            .snap(range.start + before.len() + new_text.len(), false);
         self.marked_range = None;
         self.move_to(caret, cx);
     }

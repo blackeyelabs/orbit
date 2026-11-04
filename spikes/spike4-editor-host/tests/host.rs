@@ -30,6 +30,8 @@ const B: usize = 6;
 const C: usize = 7;
 /// The empty cell below "b".
 const EMPTY_CELL: usize = 8;
+/// The empty last line after the table.
+const END: usize = 9;
 
 /// Opens `source` in a focused editor in a headless window, drawn once.
 fn open<'a>(
@@ -117,8 +119,9 @@ fn down_visits_every_block_in_order_and_up_comes_back(cx: &mut TestAppContext) {
             visited.push(leaf);
         }
     }
-    // Down from cell "a" goes to "c" below it, not to "b" beside it.
-    assert_eq!(visited, vec![HEADING, PARAGRAPH, ONE, TWO, CODE, A, C]);
+    // Down from cell "a" goes to "c" below it, not to "b" beside it, then
+    // past the table to the note's empty last line.
+    assert_eq!(visited, vec![HEADING, PARAGRAPH, ONE, TWO, CODE, A, C, END]);
     let mut back = vec![leaf_of(&editor, cx)];
     for _ in 0..12 {
         press(cx, "up");
@@ -127,7 +130,7 @@ fn down_visits_every_block_in_order_and_up_comes_back(cx: &mut TestAppContext) {
             back.push(leaf);
         }
     }
-    assert_eq!(back, vec![C, A, CODE, TWO, ONE, PARAGRAPH, HEADING]);
+    assert_eq!(back, vec![END, C, A, CODE, TWO, ONE, PARAGRAPH, HEADING]);
 }
 
 #[gpui::test]
@@ -358,4 +361,68 @@ fn a_long_list_is_laid_out_only_where_it_is_in_view(cx: &mut TestAppContext) {
     }
     assert_eq!(leaf_of(&editor, cx), 300);
     editor.read_with(cx, |e, _| assert!(e.caret_point().is_some()));
+}
+
+// Review of the spike (2026-11-04): each test reproduces one reported bug.
+
+#[gpui::test]
+fn typing_a_space_in_a_cell_keeps_the_caret_in_that_cell(cx: &mut TestAppContext) {
+    let (editor, cx) = open(cx, NOTE);
+    let at = inside(&editor, cx, A, 1.0);
+    cx.simulate_click(at, Modifiers::none());
+    settle(cx);
+    cx.simulate_input(" b");
+    settle(cx);
+    editor.read_with(cx, |e, _| {
+        assert!(e.source().contains("| a b | b |"), "{}", e.source());
+        assert_eq!(e.doc().leaf_at(e.cursor_offset()), Some(A));
+    });
+}
+
+#[gpui::test]
+fn the_caret_is_centred_on_its_line(cx: &mut TestAppContext) {
+    let (editor, cx) = open(cx, NOTE);
+    editor.update(cx, |e, cx| {
+        let start = e.doc().leaves[PARAGRAPH].source.start;
+        e.set_caret(start, cx);
+    });
+    settle(cx);
+    editor.read_with(cx, |e, _| {
+        let caret = e.caret_bounds().expect("a caret");
+        let g = e.leaf_geometry(PARAGRAPH).unwrap();
+        let line_top = g.bounds().top();
+        let line_mid = line_top + g.line_height() / 2.;
+        let caret_mid = caret.top() + caret.size.height / 2.;
+        assert!(
+            (caret_mid - line_mid).abs() < px(1.),
+            "caret {caret:?} line top {line_top:?} height {:?}",
+            g.line_height()
+        );
+    });
+}
+
+#[gpui::test]
+fn down_leaves_a_code_block_that_ends_the_note(cx: &mut TestAppContext) {
+    let (editor, cx) = open(cx, "Intro\n\n```\ncode\n```");
+    press(cx, "down");
+    assert_eq!(leaf_of(&editor, cx), 1, "in the code");
+    press(cx, "down");
+    assert_ne!(leaf_of(&editor, cx), 1, "Down goes past the code block");
+    cx.simulate_input("after");
+    settle(cx);
+    editor.read_with(cx, |e, _| {
+        assert_eq!(e.source(), "Intro\n\n```\ncode\n```\nafter")
+    });
+}
+
+#[gpui::test]
+fn typing_after_an_opening_fence_goes_into_the_code_not_the_language(cx: &mut TestAppContext) {
+    let (editor, cx) = open(cx, "Intro\n\n");
+    editor.update(cx, |e, cx| e.set_caret(e.source().len(), cx));
+    settle(cx);
+    cx.simulate_input("```");
+    settle(cx);
+    cx.simulate_input("x");
+    settle(cx);
+    editor.read_with(cx, |e, _| assert_eq!(e.source(), "Intro\n\n```\nx"));
 }

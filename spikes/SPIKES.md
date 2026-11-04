@@ -281,6 +281,25 @@ Run `cargo run -p spike4-editor-host`.
 | 6 | | |
 | 7 | | |
 
+### Review (2026-11-04, hands-on)
+
+Bugs found and fixed in the spike, each with a test that reproduced it first:
+
+| Found | Cause | Fix |
+|---|---|---|
+| Table cell editing jumps to a different cell | A cell's text was trimmed, so a space typed at a cell's end fell outside the cell and the caret snapped into the next one | A cell is its text inside one padding space each side, so a typed space stays in the cell |
+| `---` didn't make a horizontal line, but a line starting with `\|` drew one | No thematic-break rule; any line starting with `\|` was read as a table (with no columns) | `---`, `***` and `___` are rules. A table needs a header row and then a delimiter row (`\|---\|---\|`), as in GFM and Obsidian |
+| The caret sits slightly high | It was drawn at the top of the line box, with the font's height, not centred in the line | Centred in the line box |
+| Down can't leave a code block at the end of the note | Nowhere for the caret after the closing fence | The note's end is always an empty last line the caret can reach |
+| Typing right after ` ``` ` edits the language | The new code block's empty text sat at the end of the fence line | Text typed into an empty code block or empty line goes on its own line |
+
+To make a table, type the header row, then a delimiter row under it: `| Name | Notes |`, then `|---|---|`. There's no insert-table command in the spike.
+
+Asked for, and planned as tickets rather than spike fixes:
+- Enter continues an unordered, numbered or task list; Enter on an empty last item removes it and leaves the list (#46).
+- Ticking a task by clicking its checkbox, with a pointer cursor over it (#45).
+- Code blocks: Enter after ` ``` ` opens the block with `txt` as its language, picked from a searchable list of about 100 languages at the block's top left, or typed (up to 20 characters) (#47, to be added there).
+
 ### Recommendation
 
 **Render Live Preview through `editor_host`** (ADR 0011), provisionally. Every deciding check passes headless except the real IME, which only a person can try: items 4–5. The custom-element route isn't needed unless they fail; if one does, record it here and revisit the ADR.

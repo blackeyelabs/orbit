@@ -44,6 +44,8 @@ pub enum Kind {
     },
     /// A blank line the caret can stand on: an empty paragraph.
     Empty,
+    /// A thematic break (`---`): no leaf, the caret passes over it.
+    Rule,
 }
 
 /// One block and the leaves it owns (indices into [`Doc::leaves`]).
@@ -181,14 +183,23 @@ fn list_marker(text: &str) -> Option<Marker> {
 
 /// A line that ends a paragraph by starting another block.
 fn starts_block(text: &str) -> bool {
-    heading_level(text).is_some()
-        || is_fence(text)
-        || is_table_row(text)
-        || list_marker(text).is_some()
+    heading_level(text).is_some() || is_fence(text) || is_rule(text) || list_marker(text).is_some()
 }
 
-/// The cells of a table row: each cell's text, trimmed. An empty cell is an
-/// empty range just inside its pipes, so the caret can still stand in it.
+/// A thematic break: three or more `-`, `*` or `_`, spaces allowed between.
+/// (Right under a paragraph line, `---` would make it a setext heading in
+/// CommonMark; the spike reads it as a rule.)
+fn is_rule(text: &str) -> bool {
+    let marks: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    marks.len() >= 3
+        && ['-', '*', '_']
+            .iter()
+            .any(|&m| marks.chars().all(|c| c == m))
+}
+
+/// The cells of a table row: each cell's text, inside one padding space on
+/// each side. An empty cell is an empty range just inside its padding, so
+/// the caret can still stand in it.
 fn cells(line: &Line) -> Vec<Range<usize>> {
     let text = line.text;
     let pipes: Vec<usize> = text.match_indices('|').map(|(i, _)| i).collect();
@@ -196,17 +207,12 @@ fn cells(line: &Line) -> Vec<Range<usize>> {
         .windows(2)
         .map(|w| {
             let inner = &text[w[0] + 1..w[1]];
-            let lead = inner.len() - inner.trim_start().len();
-            let trimmed = inner.trim();
-            let start = line.start
-                + w[0]
-                + 1
-                + if trimmed.is_empty() {
-                    inner.len().min(1)
-                } else {
-                    lead
-                };
-            start..start + trimmed.len()
+            // One padding space each side belongs to the pipes; the rest,
+            // a space just typed at a cell's end included, is the cell's.
+            let lead = usize::from(inner.starts_with(' '));
+            let trail = usize::from(inner.len() > lead && inner.ends_with(' '));
+            let start = line.start + w[0] + 1 + lead;
+            start..start + inner.len() - lead - trail
         })
         .collect()
 }
@@ -246,15 +252,20 @@ impl Doc {
                 };
                 doc.push(Kind::Code { lang }, [Leaf::code(code)]);
                 i = close.map_or(lines.len(), |c| c + 1);
-            } else if is_table_row(line.text) {
+            } else if is_rule(line.text) {
+                doc.push(Kind::Rule, []);
+                i += 1;
+            } else if is_table_row(line.text)
+                && lines.get(i + 1).is_some_and(|l| is_delimiter_row(l.text))
+            {
                 let end = (i..lines.len())
                     .find(|&j| !is_table_row(lines[j].text))
                     .unwrap_or(lines.len());
-                // The second row is skipped only if it's a delimiter row.
+                // A table is a header row, then a delimiter row, then rows.
                 let rows: Vec<&Line> = lines[i..end]
                     .iter()
                     .enumerate()
-                    .filter(|(n, l)| *n != 1 || !is_delimiter_row(l.text))
+                    .filter(|(n, _)| *n != 1)
                     .map(|(_, l)| l)
                     .collect();
                 let columns = cells(rows[0]).len();
@@ -301,6 +312,11 @@ impl Doc {
                 i = end;
             }
         }
+        // The note's end is always somewhere to stand, so the caret can get
+        // past a code block or table that ends it (an empty last line).
+        if doc.leaf_at(source.len()).is_none() {
+            doc.push(Kind::Empty, [Leaf::prose(source.len()..source.len())]);
+        }
         doc
     }
 
@@ -312,6 +328,38 @@ impl Doc {
             kind,
             leaves: first..self.leaves.len(),
         });
+    }
+
+    /// Text typed at `offset` into an empty code block or an empty line goes
+    /// on a line of its own: after a fence typed just before it (or the end
+    /// of a block that ends the note), and before a closing fence right
+    /// after it. Returns the line breaks to add before and after.
+    pub fn line_breaks_for_insert(
+        &self,
+        source: &str,
+        offset: usize,
+    ) -> (&'static str, &'static str) {
+        let Some(leaf) = self
+            .leaf_at(offset)
+            .filter(|&l| self.leaves[l].source.is_empty())
+        else {
+            return ("", "");
+        };
+        let block = self.blocks.iter().find(|b| b.leaves.contains(&leaf));
+        if !block.is_some_and(|b| matches!(b.kind, Kind::Code { .. } | Kind::Empty)) {
+            return ("", "");
+        }
+        let before = if offset > 0 && !source[..offset].ends_with('\n') {
+            "\n"
+        } else {
+            ""
+        };
+        let after = if source[offset..].starts_with("```") {
+            "\n"
+        } else {
+            ""
+        };
+        (before, after)
     }
 
     /// The leaf the caret at `offset` is in: the first whose range holds it

@@ -34,6 +34,8 @@ fn a_note_splits_into_blocks_and_leaves() {
                 columns: 2,
                 rows: vec![2, 2]
             },
+            // The note's end: an empty last line after the table.
+            Kind::Empty,
         ]
     );
     assert_eq!(
@@ -47,6 +49,7 @@ fn a_note_splits_into_blocks_and_leaves() {
             "a",
             "b",
             "c",
+            "",
             "",
         ]
     );
@@ -156,8 +159,18 @@ fn a_short_table_row_has_only_the_cells_it_has() {
 }
 
 #[test]
-fn a_second_row_that_isnt_a_delimiter_is_kept() {
-    let source = "| a |\n| b |";
-    let doc = Doc::parse(source);
-    assert_eq!(texts(&doc, source), vec!["a", "b"]);
+fn three_dashes_are_a_horizontal_rule() {
+    let doc = Doc::parse("above\n\n---\n\nbelow");
+    let kinds: Vec<_> = doc.blocks.iter().map(|b| b.kind.clone()).collect();
+    assert_eq!(kinds, vec![Kind::Paragraph, Kind::Rule, Kind::Paragraph]);
+}
+
+#[test]
+fn a_line_starting_with_a_pipe_is_a_table_only_with_a_delimiter_row() {
+    let doc = Doc::parse("| just text");
+    assert_eq!(doc.blocks[0].kind, Kind::Paragraph);
+    let doc = Doc::parse("| a |\n| b |");
+    assert_eq!(doc.blocks[0].kind, Kind::Paragraph);
+    let doc = Doc::parse("| a |\n|---|\n| b |");
+    assert!(matches!(doc.blocks[0].kind, Kind::Table { .. }));
 }
