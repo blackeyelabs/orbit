@@ -308,7 +308,7 @@ To make a table, type the header row, then a delimiter row under it: `| Name | N
 Asked for, and planned as tickets rather than spike fixes:
 - Enter continues an unordered, numbered or task list; Enter on an empty last item removes it and leaves the list (#46; tried in the spike in the second round).
 - Ticking a task by clicking its checkbox, with a pointer cursor over it (#45; likewise).
-- Code blocks: Enter after ` ``` ` opens the block with `txt` as its language, picked from a searchable list of about 100 languages at the block's top left, or typed (up to 20 characters) (#47, to be added there).
+- Code blocks: Enter after ` ``` ` opens the block with `txt` as its language, picked from a searchable list of about 100 languages at the block's top left, or typed (up to 20 characters) (#47, added there on 2026-11-05).
 
 ### Recommendation
 

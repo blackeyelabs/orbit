@@ -125,7 +125,7 @@ Three layers with one-way dependencies: the UI calls the headless core, and the 
 - Keep display offsets as close to source offsets as possible: hidden ranges collapse to zero width, so mapping is a simple subtract-the-hidden-length function.
 - Render variable-height blocks through a virtualized list so a 50,000-line note stays smooth.
 - Reparse only dirty top-level blocks and cache results by content hash.
-- Fallback for the MVP: Kit's stock `Editor` beside `TextView` in a split source and preview view. It is already a usable notes app, and Live Preview replaces it in Phase 2.
+- Fallback for the MVP: Kit's stock `Editor` beside `TextView` in a split source and preview view. It is already a usable notes app, and Live Preview replaces it before Phase 1 closes (moved from Phase 2 on 2026-11-05).
 
 **Spike 1 result (model half, tested):** `spike1-conceal` implements parsing of headings, bold, italic, strikethrough, code, links and wikilinks, plus the reveal rule and an offset map. Its 10 tests pass, including one proving that no caret position ever touches hidden text. That means the display-to-source ambiguity inside collapsed ranges never affects typing, deleting or IME at the caret. Known limits: no nested spans, escapes, lists, quotes or setext headings.
 
@@ -236,18 +236,18 @@ Estimates assume part-time solo work while learning Rust and GPUI, so treat them
 
 **Phase 1: MVP (8 to 10 weeks)**
 
-- [ ] Split source and preview using Kit's `Editor` and `TextView`
-- [ ] Vault open, file watcher, quick switcher, command palette
-- [ ] Full-text search, tags, wikilinks, backlinks panel
-- [ ] Protected folders: create, unlock, lock, edit, auto-lock
-- [ ] Mermaid blocks in the preview
-- [ ] **Gate:** daily-usable notes app; protected folders pass the leak checklist
+- [x] Split source and preview using Kit's `Editor` and `TextView` (MVP tickets #7–#26, spec #1)
+- [x] Vault open, file watcher, quick switcher, command palette
+- [x] Full-text search, tags, wikilinks, backlinks panel
+- [x] Protected folders: create, unlock, lock, edit, auto-lock
+- [x] Mermaid blocks in the preview
+- [ ] Live Preview editor replaces the split view as the default: concealed inline syntax first, then block widgets (images, callouts, math, tables, Mermaid), with the inline title and properties panel (spec #35, tickets #36–#56; moved here from Phase 2 on 2026-11-05)
+- [ ] **Gate:** daily-usable notes app with Live Preview as the default editor; protected folders pass the leak checklist (the Phase 1 close ticket)
 
 **Phase 2: Core features (10 to 14 weeks)**
 
-- [ ] Live Preview editor replaces the split view: concealed inline syntax first, then block widgets (images, callouts, math, tables, Mermaid)
 - [ ] Vault-level protection and recovery-key flow
-- [ ] Rename-refactor, attachments, properties panel
+- [ ] Rename-refactor, attachments
 - [ ] Inline HTML subset, alerts, emoji shortcodes
 - [ ] **Gate:** all confirmed markdown features render and edit correctly
 
