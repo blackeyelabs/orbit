@@ -10,7 +10,7 @@ Each spike answers one question for the Phase 0 gate (ticket #6). Record results
 
 | Crate | What it is | Run |
 |---|---|---|
-| `spike1-conceal` | std-only conceal model: `layout(source, selection)` returns the display text, a source↔display offset map and styled runs | `cargo test -p spike1-conceal` |
+| `spike1-conceal` | std-only conceal model: `layout(source, selection)` returns the display text, a source↔display offset map and styled runs. **Moved** into `crates/live-preview` (`conceal`) for #39; the spikes below use it from there | `cargo test -p live-preview --test conceal` |
 | `spike1-gpui` | a small editable note (a heading line plus soft-wrapped paragraphs) drawn through the model with GPUI's text system (approach 1), adapted from gpui-pre's `examples/input.rs` | `cargo run -p spike1-gpui` |
 
 ### Status per acceptance criterion

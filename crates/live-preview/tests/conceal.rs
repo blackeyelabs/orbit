@@ -1,4 +1,6 @@
-use spike1_conceal::{Run, Selection, Style, layout};
+//! The conceal model's tests, moved from Spike 1 with it.
+
+use live_preview::conceal::{Run, Selection, Style, layout};
 
 #[test]
 fn plain_text_is_shown_as_is() {
@@ -142,6 +144,7 @@ fn a_hash_without_a_space_is_not_a_heading() {
     assert_eq!(l.display_text(), "#planning is a tag");
 }
 
+/// Notes with every kind of span, touching, unclosed and in other scripts.
 const FIXTURES: &[&str] = &[
     "Orbit keeps notes as plain files",
     "Ship **first** now",

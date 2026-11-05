@@ -47,6 +47,7 @@ fn main() {
         .run(move |cx| {
             gpui_kit::init(cx);
             appearance::init(cx);
+            editor::init(cx);
             note_editor::init(cx);
             auto_lock::init(cx);
             diagram_block::init(cx);

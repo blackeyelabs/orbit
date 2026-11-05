@@ -1,6 +1,7 @@
 //! One open note: the Split view (the text editor beside the rendered
-//! preview, or just the text editor in Source mode for `.txt`), with
-//! autosave. The text editor is reached through `text_editor`.
+//! preview), Source mode (just the text editor, always for `.txt`), or,
+//! with the development setting on, Live Preview; with autosave. The text
+//! editor is reached through `text_editor`.
 
 use std::{
     rc::Rc,
@@ -25,10 +26,11 @@ use orbit_core::{
     DiskCheck, OpenNote, Trouble, Vault, VaultPath, Zeroizing, is_large_note, is_plain_text_note,
 };
 
+use crate::appearance::AppSettings;
 use crate::clipboard_guard::{self, Copying};
 use crate::link_completion::LinkCompletions;
 use crate::preview::{FollowLink, PreviewContext, PreviewPane};
-use crate::text_editor::TextEditor;
+use crate::text_editor::{Shown, TextEditor};
 
 actions!(
     note_editor,
@@ -40,7 +42,10 @@ actions!(
         /// Ctrl+I.
         ToggleItalic,
         /// Ctrl+K.
-        InsertLink
+        InsertLink,
+        /// Ctrl+E: Live Preview or Source mode, with the development
+        /// setting on.
+        ToggleLivePreview
     ]
 );
 
@@ -61,6 +66,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-b", ToggleBold, Some(KEY_CONTEXT)),
         KeyBinding::new("ctrl-i", ToggleItalic, Some(KEY_CONTEXT)),
         KeyBinding::new("ctrl-k", InsertLink, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-e", ToggleLivePreview, Some(KEY_CONTEXT)),
     ]);
 }
 
@@ -68,35 +74,45 @@ pub fn init(cx: &mut App) {
 enum Mode {
     /// Markdown source beside the rendered preview.
     Split,
-    /// Source only: `.txt` notes, and very large notes until the preview
-    /// is asked for.
+    /// The note formatted, its syntax showing where the caret is (#35).
+    LivePreview,
+    /// Source only: always for `.txt` notes, and very large notes until
+    /// the preview is asked for.
     Source,
 }
 
 impl Mode {
-    /// The mode of the note at `path`, `large` or not.
-    fn of(path: &VaultPath, large: bool) -> Self {
-        if large || is_plain_text_note(path) {
+    /// The mode a note opens in: Source when it's plain text or too large
+    /// for anything else.
+    fn of(source_only: bool) -> Self {
+        if source_only {
             Mode::Source
         } else {
             Mode::Split
         }
     }
 
-    /// The language the editor highlights in this mode.
-    fn language(self) -> &'static str {
+    /// The editor that shows the text in this mode.
+    fn shown(self) -> Shown {
         match self {
-            Mode::Split => "markdown",
-            Mode::Source => "plaintext",
+            Mode::LivePreview => Shown::LivePreview,
+            Mode::Split | Mode::Source => Shown::Source,
         }
     }
 
     fn label(self) -> &'static str {
         match self {
             Mode::Split => "Split view",
+            Mode::LivePreview => "Live Preview",
             Mode::Source => "Source mode",
         }
     }
+}
+
+/// The language the source editor highlights: none for a note shown only
+/// as source.
+fn language(source_only: bool) -> &'static str {
+    if source_only { "plaintext" } else { "markdown" }
 }
 
 /// Where the note's edits stand against the disk.
@@ -236,9 +252,10 @@ impl NoteEditor {
     ) -> Self {
         let path = note.path().clone();
         let large = is_large_note(&text).then_some(text.len());
-        let mode = Mode::of(&path, large.is_some());
+        let source_only = large.is_some() || is_plain_text_note(&path);
+        let mode = Mode::of(source_only);
         let links = Rc::new(LinkCompletions::new(vault.clone(), path.clone()));
-        let source = TextEditor::new(&text, mode.language(), links.clone(), window, cx);
+        let source = TextEditor::new(&text, language(source_only), links.clone(), window, cx);
         let subscription = source.on_edit(cx, |this, cx| this.edited(cx));
         let this = cx.entity().downgrade();
         let follow: FollowLink = Arc::new(move |target, _, cx| {
@@ -268,7 +285,7 @@ impl NoteEditor {
             mode,
             source,
             words: word_count(&text),
-            outline: outline_of(mode, &text),
+            outline: outline_of(source_only, &text),
             text: text.into(),
             reload: None,
             saved_elsewhere: None,
@@ -342,21 +359,48 @@ impl NoteEditor {
     }
 
     fn follow_path(&mut self, path: VaultPath, cx: &mut Context<Self>) {
+        let was_source_only = self.is_source_only();
         self.links.set_note(path.clone());
         self.preview = PreviewContext::new(self.vault.clone(), path.clone(), self.follow.clone());
         self.path = path;
-        self.set_mode(Mode::of(&self.path, self.large.is_some()), cx);
+        // A new extension can make it source only, or no longer.
+        let mode = if was_source_only != self.is_source_only() {
+            Mode::of(self.is_source_only())
+        } else {
+            self.mode
+        };
+        self.set_mode(mode, cx);
+    }
+
+    /// Whether the note shows only as source: plain text, or opened as
+    /// source for being very large.
+    fn is_source_only(&self) -> bool {
+        self.large.is_some() || is_plain_text_note(&self.path)
     }
 
     /// Shows the note in `mode`: the editor's highlighting, the Outline and
-    /// the preview follow.
+    /// the preview follow, and the editor shown does on the next frame.
     fn set_mode(&mut self, mode: Mode, cx: &mut Context<Self>) {
-        if mode != self.mode {
-            self.source.set_language(mode.language(), cx);
-        }
+        self.source
+            .set_language(language(self.is_source_only()), cx);
         self.mode = mode;
-        self.outline = outline_of(self.mode, &self.text);
+        self.outline = outline_of(self.is_source_only(), &self.text);
         self.links_changed(cx);
+    }
+
+    /// Ctrl+E, with the development setting on: Live Preview, or back to
+    /// Source mode. A note shown only as source stays so.
+    fn toggle_live_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !AppSettings::get(cx).live_preview_in_development || self.is_source_only() {
+            return;
+        }
+        let mode = match self.mode {
+            Mode::LivePreview => Mode::Source,
+            Mode::Split | Mode::Source => Mode::LivePreview,
+        };
+        self.set_mode(mode, cx);
+        self.source.show(mode.shown(), window, cx);
+        self.source.focus_handle(cx).focus(window, cx);
     }
 
     /// Notes were added, removed or renamed: links may resolve differently.
@@ -404,9 +448,11 @@ impl NoteEditor {
     /// After Orbit deletes the note, or as its folder locks: writes still
     /// queued are dropped, so none can bring it back. Doesn't wait for one
     /// that's writing.
-    pub fn forget_disk(&mut self) {
+    pub fn forget_disk(&mut self, cx: &mut App) {
         self.autosave = None;
         self.saves.forgotten.store(true, Ordering::Release);
+        // No decrypted text is kept in Live Preview's undo either.
+        self.source.forget_history(cx);
     }
 
     pub fn is_dirty(&self) -> bool {
@@ -497,7 +543,7 @@ impl NoteEditor {
     fn catch_up(&mut self, cx: &mut Context<Self>) {
         self.catching_up = None;
         self.words = word_count(&self.text);
-        self.outline = outline_of(self.mode, &self.text);
+        self.outline = outline_of(self.is_source_only(), &self.text);
         self.links_changed(cx);
     }
 
@@ -570,7 +616,7 @@ impl NoteEditor {
     /// takes it on the next frame, which has the window it needs.
     fn show_saved_text(&mut self, text: String, cx: &mut Context<Self>) {
         // Grown very large meanwhile (in another app, say): source only.
-        if self.large.is_none() && self.mode == Mode::Split && is_large_note(&text) {
+        if self.large.is_none() && self.mode != Mode::Source && is_large_note(&text) {
             self.large = Some(text.len());
             self.set_mode(Mode::Source, cx);
         }
@@ -851,16 +897,16 @@ impl NoteEditor {
                         .outline()
                         .small()
                         .label("Use live preview")
-                        .on_click(cx.listener(|this, _, _, cx| this.use_live_preview(cx))),
+                        .on_click(cx.listener(|this, _, _, cx| this.show_preview_anyway(cx))),
                 )
                 .into_any_element(),
         )
     }
 
     /// Shows a very large note's preview after all.
-    fn use_live_preview(&mut self, cx: &mut Context<Self>) {
+    fn show_preview_anyway(&mut self, cx: &mut Context<Self>) {
         self.large = None;
-        self.set_mode(Mode::of(&self.path, false), cx);
+        self.set_mode(Mode::of(self.is_source_only()), cx);
     }
 
     fn apply_format(&mut self, kind: Format, window: &mut Window, cx: &mut Context<Self>) {
@@ -872,15 +918,22 @@ impl NoteEditor {
 impl Render for NoteEditor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(text) = self.reload.take() {
-            // `set_value` emits no change event, so this isn't an edit.
+            // Loading emits no change event, so this isn't an edit.
             self.source.load(text, window, cx);
+        }
+        // The development setting turned off: back to the mode it opens in.
+        if self.mode == Mode::LivePreview && !AppSettings::get(cx).live_preview_in_development {
+            self.set_mode(Mode::of(self.is_source_only()), cx);
+        }
+        if self.source.shown(cx) != self.mode.shown() {
+            self.source.show(self.mode.shown(), window, cx);
         }
         let border = cx.theme().border;
         let editor = div()
             .flex_1()
             .min_w_0()
             .h_full()
-            .child(self.source.element());
+            .child(self.source.element(cx));
         let banner = self.render_banner(cx);
         let body = h_flex()
             .flex_1()
@@ -894,6 +947,9 @@ impl Render for NoteEditor {
             }))
             .on_action(cx.listener(|this, _: &InsertLink, window, cx| {
                 this.apply_format(Format::Link, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ToggleLivePreview, window, cx| {
+                this.toggle_live_preview(window, cx)
             }))
             .child(editor)
             .when(self.mode == Mode::Split, |this| {
@@ -941,10 +997,11 @@ fn megabytes(bytes: usize) -> String {
     format!("{:.1} MB", bytes as f64 / 1_000_000.)
 }
 
-/// A note's Outline: its headings, unless it's plain text.
-fn outline_of(mode: Mode, text: &str) -> Rc<[Heading]> {
-    match mode {
-        Mode::Split => headings(text).into(),
-        Mode::Source => Rc::new([]),
+/// A note's Outline: its headings, unless it shows only as source.
+fn outline_of(source_only: bool, text: &str) -> Rc<[Heading]> {
+    if source_only {
+        Rc::new([])
+    } else {
+        headings(text).into()
     }
 }

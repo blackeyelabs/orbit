@@ -149,3 +149,13 @@ fn new_notes_start_with_properties_unless_turned_off() {
     s.save(dir.path()).unwrap();
     assert!(!Settings::load(dir.path()).new_notes_get_properties);
 }
+
+#[test]
+fn live_preview_stays_off_until_turned_on_for_development() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(!Settings::load(dir.path()).live_preview_in_development);
+    let mut s = Settings::default();
+    s.live_preview_in_development = true;
+    s.save(dir.path()).unwrap();
+    assert!(Settings::load(dir.path()).live_preview_in_development);
+}

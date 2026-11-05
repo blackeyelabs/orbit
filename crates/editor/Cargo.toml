@@ -5,4 +5,4 @@ edition.workspace = true
 
 [dependencies]
 gpui-kit.workspace = true
-md-engine.workspace = true
+live-preview.workspace = true

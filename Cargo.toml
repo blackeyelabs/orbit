@@ -25,12 +25,16 @@ orbit-crypto = { path = "crates/orbit-crypto" }
 orbit-fs = { path = "crates/orbit-fs" }
 diagrams = { path = "crates/diagrams" }
 editor = { path = "crates/editor" }
+live-preview = { path = "crates/live-preview" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Atomic saves in orbit-fs; temporary folders in tests.
 tempfile = "3"
 unicode-segmentation = "=1.13.3"
+# Live Preview's buffer: the rope Kit's editor uses (gpui-base pins this
+# beta exactly), named directly so the GPUI-free model can hold one.
+ropey = { version = "=2.0.0-beta.1", default-features = false, features = ["metric_lines_lf", "metric_utf16"] }
 # Deleting sends plain files to the freedesktop trash.
 trash = "=5.2.6"
 # Hands the watcher's batches from its thread to the UI.

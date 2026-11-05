@@ -232,6 +232,7 @@ dependencies = [
  "editor",
  "gpui-kit",
  "gpui-pre",
+ "live-preview",
  "lsp-types",
  "md-engine",
  "orbit-core",
@@ -1795,7 +1796,7 @@ name = "editor"
 version = "0.1.0"
 dependencies = [
  "gpui-kit",
- "md-engine",
+ "live-preview",
 ]
 
 [[package]]
@@ -4122,6 +4123,15 @@ name = "litrs"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
+
+[[package]]
+name = "live-preview"
+version = "0.1.0"
+dependencies = [
+ "md-engine",
+ "ropey",
+ "unicode-segmentation",
+]
 
 [[package]]
 name = "lock_api"
@@ -7344,15 +7354,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "spike1-conceal"
-version = "0.1.0"
-
-[[package]]
 name = "spike1-gpui"
 version = "0.1.0"
 dependencies = [
  "gpui-kit",
- "spike1-conceal",
+ "live-preview",
  "unicode-segmentation",
 ]
 
@@ -7362,8 +7368,8 @@ version = "0.1.0"
 dependencies = [
  "gpui-kit",
  "gpui-pre",
+ "live-preview",
  "serde_json",
- "spike1-conceal",
  "unicode-segmentation",
 ]
 

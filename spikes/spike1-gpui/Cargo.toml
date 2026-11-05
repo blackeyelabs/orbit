@@ -6,5 +6,6 @@ publish = false
 
 [dependencies]
 gpui-kit.workspace = true
-spike1-conceal = { path = "../spike1-conceal" }
+# The conceal model, which moved from spike1-conceal into the crate.
+live-preview.workspace = true
 unicode-segmentation = "1.12"

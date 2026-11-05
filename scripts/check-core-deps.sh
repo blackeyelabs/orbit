@@ -4,7 +4,7 @@
 # reused by orbit-api; only `editor` and `app` may link GPUI.
 set -euo pipefail
 
-core_crates=(md-engine orbit-core orbit-index orbit-crypto orbit-fs diagrams)
+core_crates=(md-engine orbit-core orbit-index orbit-crypto orbit-fs diagrams live-preview)
 
 status=0
 for crate in "${core_crates[@]}"; do

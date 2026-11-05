@@ -715,7 +715,7 @@ impl OrbitWindow {
         {
             self.tabs[ix]
                 .editor
-                .update(cx, |editor, _| editor.forget_disk());
+                .update(cx, |editor, cx| editor.forget_disk(cx));
             self.remove_tab(ix, cx);
         }
         self.error = None;
@@ -759,7 +759,7 @@ impl OrbitWindow {
                             NoteEditorEvent::Close => {
                                 if let Some(ix) = this.tabs.iter().position(|t| &t.editor == editor)
                                 {
-                                    editor.update(cx, |editor, _| editor.forget_disk());
+                                    editor.update(cx, |editor, cx| editor.forget_disk(cx));
                                     this.remove_tab(ix, cx);
                                 }
                             }
@@ -1054,7 +1054,7 @@ impl OrbitWindow {
                 let editor = editor.read(cx);
                 (editor.path().clone(), editor.unsaved_text())
             };
-            editor.update(cx, |editor, _| editor.forget_disk());
+            editor.update(cx, |editor, cx| editor.forget_disk(cx));
             edits.extend(text.map(|text| (path, text)));
             self.remove_tab(ix, cx);
         }

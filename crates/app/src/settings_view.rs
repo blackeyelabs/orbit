@@ -154,23 +154,37 @@ impl Render for AppearancePane {
     }
 }
 
-/// Settings › Notes: what a new note starts with.
+/// Settings › Notes: what a new note starts with, and Live Preview while
+/// it's built.
 pub struct NotesPane;
 
 impl Render for NotesPane {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let properties = AppSettings::get(cx).new_notes_get_properties;
-        v_flex().child(row(
-            "New notes start with properties",
-            "When the note was created, and an empty list of tags, as front matter.",
-            Switch::new("new-note-properties")
-                .checked(properties)
-                .on_click(cx.listener(|_, checked: &bool, window, cx| {
-                    let checked = *checked;
-                    change(window, cx, |s| s.new_notes_get_properties = checked);
-                })),
-            cx,
-        ))
+        let live_preview = AppSettings::get(cx).live_preview_in_development;
+        v_flex()
+            .child(row(
+                "New notes start with properties",
+                "When the note was created, and an empty list of tags, as front matter.",
+                Switch::new("new-note-properties")
+                    .checked(properties)
+                    .on_click(cx.listener(|_, checked: &bool, window, cx| {
+                        let checked = *checked;
+                        change(window, cx, |s| s.new_notes_get_properties = checked);
+                    })),
+                cx,
+            ))
+            .child(row(
+                "Live Preview (in development)",
+                "Ctrl+E switches a note between Live Preview and Source mode. Unfinished: only paragraphs and headings are formatted.",
+                Switch::new("live-preview-in-development")
+                    .checked(live_preview)
+                    .on_click(cx.listener(|_, checked: &bool, window, cx| {
+                        let checked = *checked;
+                        change(window, cx, |s| s.live_preview_in_development = checked);
+                    })),
+                cx,
+            ))
     }
 }
 

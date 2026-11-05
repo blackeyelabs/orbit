@@ -10,7 +10,7 @@
 use std::ops::Range;
 
 use gpui_kit::*;
-use spike1_conceal::{Layout, Selection, Style as RunStyle, layout};
+use live_preview::conceal::{Layout, Selection, Style as RunStyle, layout};
 use unicode_segmentation::UnicodeSegmentation as _;
 
 actions!(

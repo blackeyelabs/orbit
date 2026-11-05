@@ -1,24 +1,28 @@
-//! Spike 1: the Live Preview conceal model.
+//! The conceal model, moved from Spike 1 (`spikes/spike1-conceal`).
 //!
-//! Given a note's source text and the selection, `layout` decides which
-//! markdown syntax is hidden (syntax shows only where the caret or selection
-//! touches its span), maps offsets between source and display text, and
-//! reports styled runs over the display text.
+//! Given one leaf's source text and the selection, [`layout`] decides which
+//! markdown syntax is hidden (syntax shows only where the caret or
+//! selection touches its span), maps offsets between source and display
+//! text, and reports styled runs over the display text.
 //!
-//! Known limits (spike scope): no nesting of the same construct, no escapes,
-//! lists, quotes or setext headings. A heading's style run can overlap the
-//! inline runs inside it; the renderer merges them.
+//! Known limits, for later Live Preview tickets: no nesting of the same
+//! construct, no escapes, tags, highlights, embeds or math. A heading's
+//! style run can overlap the inline runs inside it; the renderer merges
+//! them.
 
 use std::ops::Range;
 
 /// The caret or selection, as byte offsets into the source.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Selection {
+    /// Where the selection started; it stays put as the selection grows.
     pub anchor: usize,
+    /// The moving end, where the caret is drawn.
     pub head: usize,
 }
 
 impl Selection {
+    /// A caret at `offset`: nothing selected.
     pub fn caret(offset: usize) -> Self {
         Self {
             anchor: offset,
@@ -26,24 +30,40 @@ impl Selection {
         }
     }
 
-    fn range(&self) -> Range<usize> {
+    /// The selected range, start first.
+    pub fn range(&self) -> Range<usize> {
         self.anchor.min(self.head)..self.anchor.max(self.head)
     }
 
+    /// Selects `range`, the caret at its end.
+    pub fn spanning(range: Range<usize>) -> Self {
+        Self {
+            anchor: range.start,
+            head: range.end,
+        }
+    }
+
     /// The reveal rule: touching a span's boundary counts.
-    fn touches(&self, span: &Range<usize>) -> bool {
+    pub fn touches(&self, span: &Range<usize>) -> bool {
         let sel = self.range();
         sel.start <= span.end && span.start <= sel.end
     }
 }
 
+/// How a run of display text is styled.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Style {
+    /// `**bold**`.
     Bold,
+    /// `*italic*` or `_italic_`.
     Italic,
+    /// `~~struck~~`.
     Strike,
+    /// `` `code` ``.
     Code,
+    /// A link's or wikilink's text.
     Link,
+    /// A heading of this level, its whole line.
     Heading(u8),
     /// Markdown syntax that is showing because the caret revealed it.
     Syntax,
@@ -52,7 +72,9 @@ pub enum Style {
 /// A styled range of the display text.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Run {
+    /// Display offsets.
     pub range: Range<usize>,
+    /// How the run is styled.
     pub style: Style,
 }
 
@@ -67,6 +89,7 @@ pub struct Layout {
 }
 
 impl Layout {
+    /// The text shown: the source with concealed syntax left out.
     pub fn display_text(&self) -> &str {
         &self.display
     }
@@ -103,6 +126,8 @@ impl Layout {
     }
 }
 
+/// Lays out `source` for `selection`: what's hidden, and how the rest is
+/// styled.
 pub fn layout(source: &str, selection: Selection) -> Layout {
     let spans: Vec<(Span, bool)> = parse(source)
         .into_iter()
@@ -191,6 +216,8 @@ const PAIRS: &[(&str, Style)] = &[
     ("_", Style::Italic),
 ];
 
+/// Every span of syntax in `source`: headings, then inline spans left to
+/// right, none overlapping another inline span.
 fn parse(source: &str) -> Vec<Span> {
     let mut spans = headings(source);
     let mut i = 0;
@@ -292,6 +319,7 @@ fn headings(source: &str) -> Vec<Span> {
     spans
 }
 
+/// Whether the character before `at` is a letter or digit.
 fn is_word_char_before(source: &str, at: usize) -> bool {
     source[..at]
         .chars()
@@ -299,6 +327,7 @@ fn is_word_char_before(source: &str, at: usize) -> bool {
         .is_some_and(char::is_alphanumeric)
 }
 
+/// Whether the character at `at` is a letter or digit.
 fn is_word_char_at(source: &str, at: usize) -> bool {
     source[at..]
         .chars()

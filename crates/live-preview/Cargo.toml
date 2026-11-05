@@ -1,0 +1,10 @@
+[package]
+name = "live-preview"
+version.workspace = true
+edition.workspace = true
+
+# The Live Preview document model: no GPUI (scripts/check-core-deps.sh).
+[dependencies]
+md-engine.workspace = true
+ropey.workspace = true
+unicode-segmentation.workspace = true

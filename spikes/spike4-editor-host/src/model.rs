@@ -7,8 +7,8 @@
 
 use std::ops::Range;
 
-use spike1_conceal::{Layout, layout};
-pub use spike1_conceal::{Run, Selection, Style};
+use live_preview::conceal::{Layout, layout};
+pub use live_preview::conceal::{Run, Selection, Style};
 use unicode_segmentation::UnicodeSegmentation as _;
 
 /// A selection no span can touch, so a leaf lays out fully concealed.
