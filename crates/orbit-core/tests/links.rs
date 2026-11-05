@@ -5,7 +5,8 @@
 
 use std::fs;
 
-use orbit_core::{Error, VaultPath};
+use chrono::NaiveDate;
+use orbit_core::{Error, NoteStart, VaultPath};
 use serde_json::Value;
 
 mod common;
@@ -82,7 +83,9 @@ fn following_an_unresolved_link_creates_its_note() {
     assert_eq!(vault.resolve(&from, "Missing note"), None);
 
     // A bare name goes at the vault root, like a new note.
-    let created = vault.create_linked_note(&from, "Missing note").unwrap();
+    let created = vault
+        .create_linked_note(&from, "Missing note", NoteStart::Empty)
+        .unwrap();
     assert_eq!(created, p("Missing note.md"));
     assert_eq!(vault.read_note(&created).unwrap(), "");
     assert_eq!(vault.resolve(&from, "Missing note"), Some(created));
@@ -91,32 +94,75 @@ fn following_an_unresolved_link_creates_its_note() {
     // the linking note's folder.
     assert_eq!(
         vault
-            .create_linked_note(&from, "Projects/New/Idea")
+            .create_linked_note(&from, "Projects/New/Idea", NoteStart::Empty)
             .unwrap(),
         p("Projects/New/Idea.md")
     );
     assert_eq!(
-        vault.create_linked_note(&from, "./Draft").unwrap(),
+        vault
+            .create_linked_note(&from, "./Draft", NoteStart::Empty)
+            .unwrap(),
         p("Inbox/Draft.md")
     );
     // A dotted name is a note name, as Obsidian reads it; .txt stays .txt.
     assert_eq!(
-        vault.create_linked_note(&from, "v1.2 notes").unwrap(),
+        vault
+            .create_linked_note(&from, "v1.2 notes", NoteStart::Empty)
+            .unwrap(),
         p("v1.2 notes.md")
     );
     assert_eq!(
-        vault.create_linked_note(&from, "todo.txt").unwrap(),
+        vault
+            .create_linked_note(&from, "todo.txt", NoteStart::Empty)
+            .unwrap(),
         p("todo.txt")
     );
     assert!(dir.path().join("Projects/New/Idea.md").is_file());
 
     // Never over an existing file, into a tool folder, or out of the vault.
     assert!(matches!(
-        vault.create_linked_note(&from, "Ideas"),
+        vault.create_linked_note(&from, "Ideas", NoteStart::Empty),
         Err(Error::AlreadyExists(_))
     ));
-    assert!(vault.create_linked_note(&from, ".obsidian/x").is_err());
-    assert!(vault.create_linked_note(&from, "../../outside").is_err());
+    assert!(
+        vault
+            .create_linked_note(&from, ".obsidian/x", NoteStart::Empty)
+            .is_err()
+    );
+    assert!(
+        vault
+            .create_linked_note(&from, "../../outside", NoteStart::Empty)
+            .is_err()
+    );
+}
+
+#[test]
+fn a_note_made_from_a_link_starts_with_properties_unless_it_is_plain_text() {
+    let (_dir, vault) = fixture_vault("links");
+    let from = p("Inbox/Capture.md");
+    let created = NaiveDate::from_ymd_opt(2026, 11, 5)
+        .unwrap()
+        .and_hms_opt(14, 32, 59)
+        .unwrap();
+    let start = NoteStart::WithProperties { created };
+
+    let note = vault
+        .create_linked_note(&from, "Fresh idea", start)
+        .unwrap();
+    // What Obsidian 1.15 writes for these two properties.
+    assert_eq!(
+        vault.read_note(&note).unwrap(),
+        "---\ncreated: 2026-11-05T14:32\ntags: []\n---\n"
+    );
+    let followed = vault.follow_link(&from, "Later idea#Why", start).unwrap();
+    assert!(followed.created);
+    assert_eq!(
+        vault.read_note(&followed.path).unwrap(),
+        "---\ncreated: 2026-11-05T14:32\ntags: []\n---\n"
+    );
+    // Front matter means nothing in a .txt note.
+    let todo = vault.create_linked_note(&from, "todo.txt", start).unwrap();
+    assert_eq!(vault.read_note(&todo).unwrap(), "");
 }
 
 #[test]
@@ -124,19 +170,32 @@ fn following_a_link_opens_its_target_at_the_heading_or_creates_the_note() {
     let (dir, vault) = fixture_vault("links");
     let from = p("Home.md");
 
-    let plan = vault.follow_link(&from, "Projects/Plan#Goals").unwrap();
+    let plan = vault
+        .follow_link(&from, "Projects/Plan#Goals", NoteStart::Empty)
+        .unwrap();
     assert_eq!(plan.path, p("Projects/Plan.md"));
     assert_eq!(plan.heading.as_deref(), Some("Goals"));
     assert!(!plan.created);
     // An alias leads to its note too.
     assert_eq!(
-        vault.follow_link(&from, "Roadmap").unwrap().path,
+        vault
+            .follow_link(&from, "Roadmap", NoteStart::Empty)
+            .unwrap()
+            .path,
         p("Projects/Plan.md")
     );
     // A heading of the same note.
-    assert_eq!(vault.follow_link(&from, "#Risks").unwrap().path, from);
+    assert_eq!(
+        vault
+            .follow_link(&from, "#Risks", NoteStart::Empty)
+            .unwrap()
+            .path,
+        from
+    );
 
-    let missing = vault.follow_link(&from, "Missing note#Later").unwrap();
+    let missing = vault
+        .follow_link(&from, "Missing note#Later", NoteStart::Empty)
+        .unwrap();
     assert_eq!(
         (missing.path.as_str(), missing.created),
         ("Missing note.md", true)
@@ -144,14 +203,22 @@ fn following_a_link_opens_its_target_at_the_heading_or_creates_the_note() {
     assert!(dir.path().join("Missing note.md").is_file());
 
     // A missing image is an Attachment to add, not a note to create.
-    assert!(vault.follow_link(&from, "missing.png").is_err());
+    assert!(
+        vault
+            .follow_link(&from, "missing.png", NoteStart::Empty)
+            .is_err()
+    );
     assert!(!dir.path().join("missing.png.md").exists());
     // Refused before any folder it needs is made.
     assert!(matches!(
-        vault.create_linked_note(&from, "Inbox/Ideas"),
+        vault.create_linked_note(&from, "Inbox/Ideas", NoteStart::Empty),
         Err(Error::AlreadyExists(_))
     ));
-    assert!(vault.create_linked_note(&from, "Fresh/x.png").is_err());
+    assert!(
+        vault
+            .create_linked_note(&from, "Fresh/x.png", NoteStart::Empty)
+            .is_err()
+    );
     assert!(!dir.path().join("Fresh").exists());
 }
 

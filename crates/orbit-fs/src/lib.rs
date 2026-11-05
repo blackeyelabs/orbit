@@ -162,8 +162,6 @@ pub trait VaultFs: Send + Sync {
         contents: &[u8],
         may_replace: &mut dyn FnMut(Option<&[u8]>) -> bool,
     ) -> io::Result<bool>;
-    /// Creates an empty file; fails if anything already has that path.
-    fn create_file(&self, file: &VaultPath) -> io::Result<()>;
     /// Creates a folder inside an existing one.
     fn create_dir(&self, dir: &VaultPath) -> io::Result<()>;
     /// Renames or moves a file or folder; fails if `to` already exists.
@@ -363,15 +361,6 @@ impl VaultFs for PlainFs {
 
     fn read(&self, file: &VaultPath) -> io::Result<Vec<u8>> {
         fs::read(self.resolve(file)?)
-    }
-
-    fn create_file(&self, file: &VaultPath) -> io::Result<()> {
-        let target = self.resolve_for_write(file)?;
-        fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(target)?;
-        Ok(())
     }
 
     fn create_dir(&self, dir: &VaultPath) -> io::Result<()> {

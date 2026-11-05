@@ -780,19 +780,6 @@ impl VaultFs for ProtectedFs {
         Ok(true)
     }
 
-    fn create_file(&self, file: &VaultPath) -> io::Result<()> {
-        if self.protected_folder_of(file).is_none() {
-            self.check_not_locked(file)?;
-            return self.plain.create_file(file);
-        }
-        let created = self.write_if(file, &[], &mut |existing| existing.is_none())?;
-        if created {
-            Ok(())
-        } else {
-            Err(io::ErrorKind::AlreadyExists.into())
-        }
-    }
-
     fn create_dir(&self, dir: &VaultPath) -> io::Result<()> {
         let mut mounts = self.mounts_mut();
         let Some(ix) = Self::mount_index(&mounts, dir) else {

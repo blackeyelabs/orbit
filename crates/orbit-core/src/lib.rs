@@ -474,8 +474,13 @@ impl Vault {
 
     /// Follows a link clicked in the note `from` (`Note#Heading`): to the
     /// note or file it resolves to, or, unresolved, to the note
-    /// [`Self::create_linked_note`] makes for it.
-    pub fn follow_link(&self, from: &VaultPath, target: &str) -> Result<Followed, Error> {
+    /// [`Self::create_linked_note`] makes for it, starting as `start` says.
+    pub fn follow_link(
+        &self,
+        from: &VaultPath,
+        target: &str,
+        start: NoteStart,
+    ) -> Result<Followed, Error> {
         let (link, heading) = md_engine::split_target(target);
         let heading = heading.map(str::to_string);
         if let Some(path) = self.resolve(from, link) {
@@ -485,7 +490,7 @@ impl Vault {
                 created: false,
             });
         }
-        let path = self.create_linked_note(from, link)?;
+        let path = self.create_linked_note(from, link, start)?;
         Ok(Followed {
             path,
             heading,
@@ -498,12 +503,18 @@ impl Vault {
         self.root.join(path.as_str())
     }
 
-    /// Following an unresolved link: creates its (empty) note. A name goes
+    /// Following an unresolved link: creates its note, starting as `start`
+    /// says (a `.txt` note always starts empty). A name goes
     /// at the vault root, a path where it says, with any folders it needs,
     /// and `./` or `../` from `from`'s folder. Without a note's extension,
     /// `.md` is added, but a missing image or other Attachment isn't made a
     /// note. Nothing that exists is replaced.
-    pub fn create_linked_note(&self, from: &VaultPath, link: &str) -> Result<VaultPath, Error> {
+    pub fn create_linked_note(
+        &self,
+        from: &VaultPath,
+        link: &str,
+        start: NoteStart,
+    ) -> Result<VaultPath, Error> {
         let invalid = || Error::InvalidName(link.to_string());
         let from_folder = from.parent();
         let mut segments: Vec<&str> = Vec::new();
@@ -544,14 +555,7 @@ impl Vault {
                 _ => {}
             }
         }
-        match self.fs.create_file(&path) {
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-                return Err(Error::AlreadyExists(path));
-            }
-            result => result?,
-        }
-        self.touched([path.clone()]);
-        Ok(path)
+        self.write_new_note(path, start)
     }
 
     /// Orbit changed these paths: links and search see it now, not when
@@ -593,11 +597,17 @@ impl Vault {
     /// `folder`, starting as `start` says. Nothing that exists is replaced.
     pub fn create_note(&self, folder: &VaultPath, start: NoteStart) -> Result<VaultPath, Error> {
         let path = self.untitled(folder, ".md")?;
+        self.write_new_note(path, start)
+    }
+
+    /// Writes the new note `path`, starting as `start` says; front matter
+    /// means nothing to a `.txt` note, so that one starts empty.
+    fn write_new_note(&self, path: VaultPath, start: NoteStart) -> Result<VaultPath, Error> {
         let text = match start {
-            NoteStart::Empty => String::new(),
-            NoteStart::WithProperties { created } => {
+            NoteStart::WithProperties { created } if !is_plain_text_note(&path) => {
                 md_engine::new_note_properties(&created.format("%Y-%m-%dT%H:%M").to_string())
             }
+            _ => String::new(),
         };
         // One write, only if nothing's there: never half made, never
         // replacing a note that appeared meanwhile.

@@ -5,7 +5,7 @@
 
 use std::{fs, path::Path};
 
-use orbit_core::{Vault, VaultPath};
+use orbit_core::{NoteStart, Vault, VaultPath};
 use orbit_crypto::KdfParams;
 
 fn p(path: &str) -> VaultPath {
@@ -190,7 +190,9 @@ fn a_link_into_a_locked_folder_is_like_any_unresolved_link() {
     let public = p("Public.md");
     assert_eq!(vault.resolve(&public, "Vault Room/Quokka Ledger"), None);
     // Following it creates a plain note, as for any unresolved link.
-    let followed = vault.follow_link(&public, "Vault Room/New idea").unwrap();
+    let followed = vault
+        .follow_link(&public, "Vault Room/New idea", NoteStart::Empty)
+        .unwrap();
     assert!(followed.created);
     assert_eq!(followed.path, p("Vault Room/New idea.md"));
     assert!(dir.path().join("Vault Room/New idea.md").is_file());

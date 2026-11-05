@@ -402,7 +402,7 @@ impl OrbitWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let followed = match self.vault.follow_link(from, target) {
+        let followed = match self.vault.follow_link(from, target, note_start(cx)) {
             Ok(followed) => followed,
             Err(e) => return self.report(&format!("follow {target}"), e, cx),
         };
@@ -412,7 +412,11 @@ impl OrbitWindow {
             self.refresh_tree(&expanded, cx);
         }
         self.open_file(followed.path.clone(), window, cx);
-        if let (Some(heading), Some(ix)) = (&followed.heading, self.tab_of(&followed.path, cx)) {
+        if followed.created {
+            self.ready_for_typing(followed.path, window, cx);
+        } else if let (Some(heading), Some(ix)) =
+            (&followed.heading, self.tab_of(&followed.path, cx))
+        {
             self.tabs[ix]
                 .editor
                 .update(cx, |editor, cx| editor.go_to_heading(heading, window, cx));
@@ -515,7 +519,7 @@ impl OrbitWindow {
 
     /// Creates the note a link typed in `from` names, staying in `from`.
     fn create_linked_note(&mut self, from: &VaultPath, link: &str, cx: &mut Context<Self>) {
-        match self.vault.create_linked_note(from, link) {
+        match self.vault.create_linked_note(from, link, note_start(cx)) {
             Ok(path) => {
                 let mut expanded = self.expanded_folders(cx);
                 expanded.insert(path.parent());
@@ -573,29 +577,28 @@ impl OrbitWindow {
         cx.notify();
     }
 
+    /// Puts the caret at the end of the note just made at `path` (below its
+    /// front matter), if it did open.
+    fn ready_for_typing(&mut self, path: VaultPath, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active_path(cx) == Some(path)
+            && let Some(tab) = self.active()
+        {
+            tab.editor
+                .update(cx, |editor, cx| editor.go_to_end(window, cx));
+        }
+    }
+
     /// A new note in `folder`, opened in a tab and ready for typing: with
     /// its `created` time and empty `tags` (unless turned off in Settings),
     /// the caret below them.
     pub fn new_note(&mut self, folder: VaultPath, window: &mut Window, cx: &mut Context<Self>) {
-        let start = if AppSettings::get(cx).new_notes_get_properties {
-            let created = chrono::Local::now().naive_local();
-            NoteStart::WithProperties { created }
-        } else {
-            NoteStart::Empty
-        };
-        match self.vault.create_note(&folder, start) {
+        match self.vault.create_note(&folder, note_start(cx)) {
             Ok(path) => {
                 let mut expanded = self.expanded_folders(cx);
                 expanded.insert(folder);
                 self.refresh_tree(&expanded, cx);
                 self.open_note(path.clone(), window, cx);
-                // Below the front matter, if the note did open.
-                if self.active_path(cx) == Some(path)
-                    && let Some(tab) = self.active()
-                {
-                    tab.editor
-                        .update(cx, |editor, cx| editor.go_to_end(window, cx));
-                }
+                self.ready_for_typing(path, window, cx);
             }
             Err(e) => self.report("create a note", e, cx),
         }
@@ -1768,4 +1771,15 @@ fn unsaved_dot(cx: &App) -> impl IntoElement {
         .size(rems(0.4))
         .rounded_full()
         .bg(cx.theme().muted_foreground)
+}
+
+/// What a note made now starts with: its `created` time and empty `tags`,
+/// unless that's turned off in Settings.
+fn note_start(cx: &App) -> NoteStart {
+    if AppSettings::get(cx).new_notes_get_properties {
+        let created = chrono::Local::now().naive_local();
+        NoteStart::WithProperties { created }
+    } else {
+        NoteStart::Empty
+    }
 }
