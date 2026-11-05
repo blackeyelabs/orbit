@@ -1,4 +1,5 @@
-//! One open note: the Split view (the text editor beside the rendered
+//! One open note, under its inline title (its name, edited to rename it):
+//! the Split view (the text editor beside the rendered
 //! preview), Source mode (just the text editor, always for `.txt`), or,
 //! with the development setting on, Live Preview; with autosave. The text
 //! editor is reached through `text_editor`.
@@ -19,15 +20,18 @@ use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::Icon;
 use gpui_kit::component::Sizable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use md_engine::{Format, Heading, format_edit, headings, word_count};
 use orbit_core::{
-    DiskCheck, OpenNote, Trouble, Vault, VaultPath, Zeroizing, is_large_note, is_plain_text_note,
+    DiskCheck, EntryKind, OpenNote, Trouble, Vault, VaultPath, Zeroizing, is_large_note,
+    is_plain_text_note,
 };
 
 use crate::appearance::AppSettings;
 use crate::clipboard_guard::{self, Copying};
+use crate::file_actions::editable_name;
 use crate::link_completion::LinkCompletions;
 use crate::preview::{FollowLink, PreviewContext, PreviewPane};
 use crate::text_editor::{Shown, TextEditor};
@@ -196,6 +200,9 @@ pub enum NoteEditorEvent {
     /// "Create … as a new note" was chosen for a link being typed: the
     /// link, whose note is wanted now.
     CreateLinkedNote(String),
+    /// The inline title was edited and Enter pressed: the note's new name
+    /// (its extension kept unless another is typed).
+    Rename(String),
 }
 
 impl EventEmitter<NoteEditorEvent> for NoteEditor {}
@@ -212,6 +219,9 @@ pub struct NoteEditor {
     follow: FollowLink,
     /// Wikilink autocomplete, which links from this note.
     links: Rc<LinkCompletions>,
+    /// The inline title: the note's name, edited to rename it. Unless
+    /// it's being edited, it shows the name the note has.
+    title: Entity<InputState>,
     /// The source as of the last edit.
     text: SharedString,
     /// What the preview renders: the source with its links rewritten.
@@ -239,6 +249,8 @@ pub struct NoteEditor {
     /// goes when focus leaves the note (else Copy elsewhere would take it).
     focus: FocusHandle,
     _focus_out: Subscription,
+    /// Enter in the inline title.
+    _title_events: Subscription,
     _subscription: Subscription,
 }
 
@@ -271,6 +283,14 @@ impl NoteEditor {
                 TextSelection::clear(window, cx);
             }
         });
+        let title = cx.new(|cx| {
+            InputState::new(window, cx).default_value(editable_name(&path, EntryKind::Note))
+        });
+        let title_events = cx.subscribe_in(&title, window, |this, _, event, window, cx| {
+            if let InputEvent::PressEnter { .. } = event {
+                this.rename_from_title(window, cx);
+            }
+        });
         let shown: SharedString = preview.rewrite_links(&text).into();
         let pane = cx.new(|_| PreviewPane::new(preview_id(&path), shown.clone(), preview.clone()));
         NoteEditor {
@@ -281,6 +301,7 @@ impl NoteEditor {
             shown,
             saves: Saves::new(note),
             vault,
+            title,
             path,
             mode,
             source,
@@ -296,6 +317,7 @@ impl NoteEditor {
             copy_agreed: false,
             focus,
             _focus_out: focus_out,
+            _title_events: title_events,
             _subscription: subscription,
         }
     }
@@ -337,6 +359,24 @@ impl NoteEditor {
             Some(selected.clone())
         };
         clipboard_guard::ask(copying, copy, window, cx);
+    }
+
+    /// Enter in the inline title: asks for the rename (the window does it,
+    /// as from the file tree), and goes on to the text. Whether it worked
+    /// or not, the title then shows the name the note has.
+    fn rename_from_title(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let name = self.title.read(cx).value().trim().to_string();
+        let unchanged = name == self.name();
+        if !name.is_empty() && !unchanged {
+            cx.emit(NoteEditorEvent::Rename(name));
+        }
+        self.source.focus_handle(cx).focus(window, cx);
+        cx.notify();
+    }
+
+    /// The note's name as the inline title shows it: without its extension.
+    fn name(&self) -> String {
+        editable_name(&self.path, EntryKind::Note)
     }
 
     /// Whether the note is in a protected folder (unlocked, as it's open).
@@ -909,7 +949,12 @@ impl NoteEditor {
         self.set_mode(Mode::of(self.is_source_only()), cx);
     }
 
+    /// Bold, Italic or Link on the text's selection; nothing while the
+    /// inline title has focus.
     fn apply_format(&mut self, kind: Format, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.source.focus_handle(cx).contains_focused(window, cx) {
+            return;
+        }
         let edit = format_edit(&self.source.text(cx), self.source.selection(cx), kind);
         self.source.apply(edit, window, cx);
     }
@@ -928,12 +973,28 @@ impl Render for NoteEditor {
         if self.source.shown(cx) != self.mode.shown() {
             self.source.show(self.mode.shown(), window, cx);
         }
+        // Not being edited (left, renamed, or the rename failed): the
+        // note's name.
+        let name = self.name();
+        let editing = self.title.read(cx).focus_handle(cx).is_focused(window);
+        if !editing && self.title.read(cx).value() != name {
+            self.title
+                .update(cx, |title, cx| title.set_value(name, window, cx));
+        }
         let border = cx.theme().border;
-        let editor = div()
+        // The inline title, shown as a heading above the text.
+        let title = div().flex_none().px_4().pt_4().pb_1().child(
+            Input::new(&self.title)
+                .appearance(false)
+                .text_size(rems(1.75))
+                .font_weight(FontWeight::BOLD),
+        );
+        let editor = v_flex()
             .flex_1()
             .min_w_0()
             .h_full()
-            .child(self.source.element(cx));
+            .child(title)
+            .child(div().flex_1().min_h_0().child(self.source.element(cx)));
         let banner = self.render_banner(cx);
         let body = h_flex()
             .flex_1()

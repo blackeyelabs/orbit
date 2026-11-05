@@ -771,6 +771,12 @@ impl OrbitWindow {
                                 let from = editor.read(cx).path().clone();
                                 this.create_linked_note(&from, link, cx);
                             }
+                            // The same rename as the file tree's, with its
+                            // checks and its error in the status bar.
+                            NoteEditorEvent::Rename(name) => {
+                                let path = editor.read(cx).path().clone();
+                                this.rename_entry(path, name, window, cx);
+                            }
                         },
                     )
                     .detach();

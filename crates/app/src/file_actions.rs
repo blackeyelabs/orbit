@@ -121,6 +121,17 @@ fn menu_item(
         })
 }
 
+/// The part of an entry's name a rename edits: a note's name without its
+/// extension (which the Vault keeps unless another is typed), else the
+/// whole name.
+pub fn editable_name(path: &VaultPath, kind: EntryKind) -> String {
+    let name = path.name();
+    match name.rsplit_once('.') {
+        Some((stem, _)) if kind == EntryKind::Note && !stem.is_empty() => stem.to_string(),
+        _ => name.to_string(),
+    }
+}
+
 /// Asks for a new name. A note's extension is kept out of the way: only its
 /// name is shown, and the Vault keeps the extension unless another is typed.
 pub fn ask_rename(
@@ -131,11 +142,7 @@ pub fn ask_rename(
     cx: &mut Context<OrbitWindow>,
 ) {
     let name = path.name().to_string();
-    let stem = match name.rsplit_once('.') {
-        Some((stem, _)) if kind == EntryKind::Note && !stem.is_empty() => stem.to_string(),
-        _ => name.clone(),
-    };
-    let input = cx.new(|cx| InputState::new(window, cx).default_value(stem));
+    let input = cx.new(|cx| InputState::new(window, cx).default_value(editable_name(&path, kind)));
     let view = cx.entity().downgrade();
     // The new name, typed; renamed through `this` (the window).
     let rename = {
