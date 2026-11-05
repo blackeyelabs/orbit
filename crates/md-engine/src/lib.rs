@@ -25,6 +25,12 @@ pub fn word_count(source: &str) -> usize {
     source[front_matter_len(source)..].unicode_words().count()
 }
 
+/// A new note's front matter: `created` (already formatted) and an empty
+/// `tags`, which Obsidian and Orbit read as no tags.
+pub fn new_note_properties(created: &str) -> String {
+    format!("---\ncreated: {created}\ntags: []\n---\n")
+}
+
 /// A note's text after its front matter.
 pub fn without_front_matter(source: &str) -> &str {
     &source[front_matter_len(source)..]

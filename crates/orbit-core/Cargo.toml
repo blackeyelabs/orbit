@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+chrono.workspace = true
 md-engine.workspace = true
 nucleo-matcher.workspace = true
 orbit-crypto.workspace = true

@@ -4,7 +4,7 @@
 
 use std::{collections::BTreeMap, fs};
 
-use orbit_core::VaultPath;
+use orbit_core::{NoteStart, VaultPath};
 
 mod common;
 use common::{fixture_vault, fixtures, obsidian};
@@ -91,7 +91,9 @@ fn a_tag_lists_its_notes_and_those_of_tags_nested_in_it_ignoring_case() {
 #[test]
 fn tags_follow_notes_being_saved_moved_and_deleted() {
     let (_dir, vault) = fixture_vault("tags");
-    let note = vault.create_note(&VaultPath::root()).unwrap();
+    let note = vault
+        .create_note(&VaultPath::root(), NoteStart::Empty)
+        .unwrap();
     vault.save_note(&note, "New #Fresh/idea here").unwrap();
     assert_eq!(paths(vault.notes_tagged("fresh")), ["Untitled.md"]);
     assert!(vault.tags().iter().any(|t| t.name == "Fresh/idea"));

@@ -2,7 +2,7 @@
 
 use std::fs;
 
-use orbit_core::{Error, Vault, VaultPath};
+use orbit_core::{Error, NoteStart, Vault, VaultPath};
 
 fn p(path: &str) -> VaultPath {
     VaultPath::new(path).unwrap()
@@ -24,15 +24,17 @@ fn new_notes_and_folders_get_the_next_free_untitled_name() {
     let (dir, vault) = vault_with(&[("Projects/Untitled.md", "taken")]);
 
     assert_eq!(
-        vault.create_note(&p("Projects")).unwrap(),
+        vault.create_note(&p("Projects"), NoteStart::Empty).unwrap(),
         p("Projects/Untitled 1.md")
     );
     assert_eq!(
-        vault.create_note(&p("Projects")).unwrap(),
+        vault.create_note(&p("Projects"), NoteStart::Empty).unwrap(),
         p("Projects/Untitled 2.md")
     );
     assert_eq!(
-        vault.create_note(&VaultPath::root()).unwrap(),
+        vault
+            .create_note(&VaultPath::root(), NoteStart::Empty)
+            .unwrap(),
         p("Untitled.md")
     );
     assert_eq!(vault.read_note(&p("Projects/Untitled 1.md")).unwrap(), "");
@@ -179,4 +181,22 @@ fn nothing_inside_a_tool_folder_is_renamed_or_moved() {
             .is_err()
     );
     assert!(vault.rename(&VaultPath::root(), "x").is_err());
+}
+
+#[test]
+fn a_new_note_can_start_with_its_created_time_and_empty_tags() {
+    let (_dir, vault) = vault_with(&[]);
+    let created = chrono::NaiveDate::from_ymd_opt(2026, 11, 4)
+        .unwrap()
+        .and_hms_opt(9, 5, 42)
+        .unwrap();
+    let note = vault
+        .create_note(&VaultPath::root(), NoteStart::WithProperties { created })
+        .unwrap();
+    assert_eq!(note, p("Untitled.md"));
+    let text = vault.read_note(&note).unwrap();
+    // Obsidian's date-time format: local time, to the minute.
+    assert_eq!(text, "---\ncreated: 2026-11-04T09:05\ntags: []\n---\n");
+    assert!(md_engine::front_matter_tags(&text).is_empty());
+    assert_eq!(md_engine::without_front_matter(&text), "");
 }

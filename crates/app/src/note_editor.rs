@@ -390,6 +390,12 @@ impl NoteEditor {
         NoteEditor::focus(&cx.entity(), window, cx);
     }
 
+    /// Puts the caret at the start of the note's last line (in a new note,
+    /// the one below its front matter), scrolled into view.
+    pub fn go_to_end(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.go_to_line_of(self.text.len(), window, cx);
+    }
+
     /// The note's headings as of the last edit; none in Source mode.
     pub fn outline(&self) -> Rc<[Heading]> {
         self.outline.clone()

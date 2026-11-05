@@ -4,7 +4,7 @@
 
 use std::fs;
 
-use orbit_core::{SearchResults, Vault, VaultPath};
+use orbit_core::{NoteStart, SearchResults, Vault, VaultPath};
 
 fn p(path: &str) -> VaultPath {
     VaultPath::new(path).unwrap()
@@ -150,7 +150,9 @@ fn tag_and_in_narrow_the_results_nested_ones_included() {
 #[test]
 fn results_follow_notes_being_saved_renamed_and_deleted() {
     let (_dir, vault) = sample();
-    let note = vault.create_note(&VaultPath::root()).unwrap();
+    let note = vault
+        .create_note(&VaultPath::root(), NoteStart::Empty)
+        .unwrap();
     vault.save_note(&note, "Zebra crossing").unwrap();
     assert_eq!(paths(&vault.search("zebra", 20)), ["Untitled.md"]);
 

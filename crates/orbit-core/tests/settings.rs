@@ -139,3 +139,13 @@ fn detailed_logging_is_off_until_turned_on() {
     settings.save(dir.path()).unwrap();
     assert!(Settings::load(dir.path()).detailed_logging);
 }
+
+#[test]
+fn new_notes_start_with_properties_unless_turned_off() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(Settings::load(dir.path()).new_notes_get_properties);
+    let mut s = Settings::default();
+    s.new_notes_get_properties = false;
+    s.save(dir.path()).unwrap();
+    assert!(!Settings::load(dir.path()).new_notes_get_properties);
+}

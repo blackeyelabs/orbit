@@ -154,6 +154,26 @@ impl Render for AppearancePane {
     }
 }
 
+/// Settings › Notes: what a new note starts with.
+pub struct NotesPane;
+
+impl Render for NotesPane {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let properties = AppSettings::get(cx).new_notes_get_properties;
+        v_flex().child(row(
+            "New notes start with properties",
+            "When the note was created, and an empty list of tags, as front matter.",
+            Switch::new("new-note-properties")
+                .checked(properties)
+                .on_click(cx.listener(|_, checked: &bool, window, cx| {
+                    let checked = *checked;
+                    change(window, cx, |s| s.new_notes_get_properties = checked);
+                })),
+            cx,
+        ))
+    }
+}
+
 /// Settings › Logs: what's recorded for bug reports, and where.
 pub struct LogsPane;
 

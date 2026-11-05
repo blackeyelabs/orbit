@@ -4,7 +4,7 @@
 
 use std::fs;
 
-use orbit_core::{Backlink, Vault, VaultPath};
+use orbit_core::{Backlink, NoteStart, Vault, VaultPath};
 
 fn p(path: &str) -> VaultPath {
     VaultPath::new(path).unwrap()
@@ -140,7 +140,9 @@ fn backlinks_follow_linking_notes_being_created_edited_renamed_and_deleted() {
     let froms = |vault: &Vault| froms(vault, &plan);
     assert!(froms(&vault).is_empty());
 
-    let note = vault.create_note(&VaultPath::root()).unwrap();
+    let note = vault
+        .create_note(&VaultPath::root(), NoteStart::Empty)
+        .unwrap();
     vault.save_note(&note, "About [[Plan]].").unwrap();
     assert_eq!(froms(&vault), ["Untitled.md"]);
 

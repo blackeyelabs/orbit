@@ -5,7 +5,7 @@
 
 use std::{fs, path::Path, time::Duration};
 
-use orbit_core::{Error, UnlockError, Vault, VaultPath};
+use orbit_core::{Error, NoteStart, UnlockError, Vault, VaultPath};
 use orbit_crypto::KdfParams;
 
 fn p(path: &str) -> VaultPath {
@@ -108,10 +108,28 @@ fn protect_edit_lock_and_unlock_round_trip_with_nothing_left_in_plain_text() {
     vault
         .save_note(&note, "edited-after-protecting the quiet albatross")
         .unwrap();
-    let new = vault.create_note(&p("Zanzibar Diary/Hidden Wing")).unwrap();
+    let new = vault
+        .create_note(&p("Zanzibar Diary/Hidden Wing"), NoteStart::Empty)
+        .unwrap();
     vault.save_note(&new, "otter-confession again").unwrap();
     let renamed = vault.rename(&new, "Kestrel Plans 2").unwrap();
     assert_eq!(renamed, p("Zanzibar Diary/Hidden Wing/Kestrel Plans 2.md"));
+    // A new note with its properties, encrypted like any other.
+    let created = chrono::NaiveDate::from_ymd_opt(2026, 11, 4)
+        .unwrap()
+        .and_hms_opt(9, 5, 0)
+        .unwrap();
+    let dated = vault
+        .create_note(
+            &p("Zanzibar Diary/Hidden Wing"),
+            NoteStart::WithProperties { created },
+        )
+        .unwrap();
+    assert_eq!(
+        vault.read_note(&dated).unwrap(),
+        "---\ncreated: 2026-11-04T09:05\ntags: []\n---\n"
+    );
+    vault.delete(&dated).unwrap();
     // Deleted outright: the system trash would keep plaintext.
     vault.delete(&renamed).unwrap();
     assert_eq!(vault.protected_folder_of(&note), Some(folder.clone()));

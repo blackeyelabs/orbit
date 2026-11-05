@@ -111,6 +111,16 @@ pub struct TreeNode {
     pub children: Vec<TreeNode>,
 }
 
+/// What a new note starts with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoteStart {
+    /// Nothing.
+    Empty,
+    /// Front matter with its `created` time (local, to the minute, in
+    /// Obsidian's date-time format) and an empty `tags`.
+    WithProperties { created: chrono::NaiveDateTime },
+}
+
 #[derive(Debug)]
 pub enum Error {
     /// The vault folder doesn't exist or isn't a folder.
@@ -579,11 +589,24 @@ impl Vault {
         Ok(written)
     }
 
-    /// Creates an empty note named `Untitled.md` (or `Untitled 1.md`, …) in
-    /// `folder`.
-    pub fn create_note(&self, folder: &VaultPath) -> Result<VaultPath, Error> {
+    /// Creates a note named `Untitled.md` (or `Untitled 1.md`, …) in
+    /// `folder`, starting as `start` says. Nothing that exists is replaced.
+    pub fn create_note(&self, folder: &VaultPath, start: NoteStart) -> Result<VaultPath, Error> {
         let path = self.untitled(folder, ".md")?;
-        self.fs.create_file(&path)?;
+        let text = match start {
+            NoteStart::Empty => String::new(),
+            NoteStart::WithProperties { created } => {
+                md_engine::new_note_properties(&created.format("%Y-%m-%dT%H:%M").to_string())
+            }
+        };
+        // One write, only if nothing's there: never half made, never
+        // replacing a note that appeared meanwhile.
+        if !self
+            .fs
+            .write_if(&path, text.as_bytes(), &mut |old| old.is_none())?
+        {
+            return Err(Error::AlreadyExists(path));
+        }
         self.touched([path.clone()]);
         Ok(path)
     }

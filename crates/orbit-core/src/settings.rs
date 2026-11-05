@@ -48,6 +48,9 @@ pub struct Settings {
     pub clear_clipboard_seconds: u16,
     /// Orbit's own crates log at debug level, for bug reports (ADR 0007).
     pub detailed_logging: bool,
+    /// A new note starts with front matter: its `created` time and an
+    /// empty `tags`.
+    pub new_notes_get_properties: bool,
 }
 
 impl Default for Settings {
@@ -63,6 +66,7 @@ impl Default for Settings {
             ask_before_protected_copy: true,
             clear_clipboard_seconds: 30,
             detailed_logging: false,
+            new_notes_get_properties: true,
         }
     }
 }
@@ -113,6 +117,9 @@ impl Settings {
         }
         if let Some(detailed) = field("detailed_logging").and_then(|v| v.as_bool()) {
             settings.detailed_logging = detailed;
+        }
+        if let Some(properties) = field("new_notes_get_properties").and_then(|v| v.as_bool()) {
+            settings.new_notes_get_properties = properties;
         }
         if let Some(seconds) = field("clear_clipboard_seconds")
             .and_then(|v| v.as_u64())

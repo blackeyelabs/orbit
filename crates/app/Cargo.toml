@@ -26,6 +26,8 @@ lsp-types.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-appender.workspace = true
+# Reads the clock for a new note's `created` time.
+chrono = { workspace = true, features = ["clock"] }
 
 [dev-dependencies]
 # Headless windows for the text editor's tests.

@@ -24,8 +24,8 @@ use gpui_kit::component::{ActiveTheme as _, Sizable as _, TitleBar, WindowExt as
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use orbit_core::{
-    Backlink, EntryKind, IndexingProgress, SearchResults, Session, SessionTab, TagCount, TreeNode,
-    Vault, VaultPath, Watch, Zeroizing, same_tag,
+    Backlink, EntryKind, IndexingProgress, NoteStart, SearchResults, Session, SessionTab, TagCount,
+    TreeNode, Vault, VaultPath, Watch, Zeroizing, same_tag,
 };
 
 use crate::appearance::{self, AppSettings};
@@ -43,7 +43,7 @@ use crate::protection;
 use crate::protection_manage;
 use crate::right_panel;
 use crate::search_panel;
-use crate::settings_view::{AppearancePane, LogsPane, SecurityPane};
+use crate::settings_view::{AppearancePane, LogsPane, NotesPane, SecurityPane};
 use crate::switcher::{self, Chosen, Switcher};
 use crate::vaults;
 
@@ -573,14 +573,29 @@ impl OrbitWindow {
         cx.notify();
     }
 
-    /// A new empty note in `folder`, opened in a tab and ready for typing.
+    /// A new note in `folder`, opened in a tab and ready for typing: with
+    /// its `created` time and empty `tags` (unless turned off in Settings),
+    /// the caret below them.
     pub fn new_note(&mut self, folder: VaultPath, window: &mut Window, cx: &mut Context<Self>) {
-        match self.vault.create_note(&folder) {
+        let start = if AppSettings::get(cx).new_notes_get_properties {
+            let created = chrono::Local::now().naive_local();
+            NoteStart::WithProperties { created }
+        } else {
+            NoteStart::Empty
+        };
+        match self.vault.create_note(&folder, start) {
             Ok(path) => {
                 let mut expanded = self.expanded_folders(cx);
                 expanded.insert(folder);
                 self.refresh_tree(&expanded, cx);
-                self.open_note(path, window, cx);
+                self.open_note(path.clone(), window, cx);
+                // Below the front matter, if the note did open.
+                if self.active_path(cx) == Some(path)
+                    && let Some(tab) = self.active()
+                {
+                    tab.editor
+                        .update(cx, |editor, cx| editor.go_to_end(window, cx));
+                }
             }
             Err(e) => self.report("create a note", e, cx),
         }
@@ -1083,6 +1098,7 @@ impl OrbitWindow {
         let (view, vault) = (cx.entity().downgrade(), self.vault.clone());
         let security = cx.new(|cx| SecurityPane::new(view, vault, cx));
         let logs = cx.new(|_| LogsPane);
+        let notes = cx.new(|_| NotesPane);
         window.open_dialog(cx, move |dialog, window, _| {
             let heading = |title: &'static str| {
                 div()
@@ -1099,6 +1115,8 @@ impl OrbitWindow {
                     .gap_2()
                     .child(heading("Appearance"))
                     .child(appearance.clone())
+                    .child(heading("Notes"))
+                    .child(notes.clone())
                     .child(heading("Security"))
                     .child(security.clone())
                     .child(heading("Logs"))
