@@ -57,6 +57,15 @@ impl AppSettings {
         &cx.global::<AppSettings>().settings
     }
 
+    /// Default settings saved nowhere, for tests.
+    #[cfg(test)]
+    pub fn for_tests() -> Self {
+        AppSettings {
+            settings: Settings::default(),
+            config_dir: None,
+        }
+    }
+
     pub fn load() -> Self {
         let config_dir = orbit_core::default_config_dir();
         let settings = config_dir

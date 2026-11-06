@@ -242,6 +242,7 @@ Estimates assume part-time solo work while learning Rust and GPUI, so treat them
 - [x] Protected folders: create, unlock, lock, edit, auto-lock
 - [x] Mermaid blocks in the preview
 - [ ] Live Preview editor replaces the split view as the default: concealed inline syntax first, then block widgets (images, callouts, math, tables, Mermaid), with the inline title and properties panel (spec #35, tickets #36–#56; moved here from Phase 2 on 2026-11-05)
+  - [x] Split view removed early, on 2026-11-06: Live Preview is the default and Source mode the other view (ADR 0008); blocks without their own ticket done yet show as source
 - [ ] **Gate:** daily-usable notes app with Live Preview as the default editor; protected folders pass the leak checklist (the Phase 1 close ticket)
 
 **Phase 2: Core features (10 to 14 weeks)**

@@ -228,7 +228,6 @@ version = "0.1.0"
 dependencies = [
  "async-channel",
  "chrono",
- "diagrams",
  "editor",
  "gpui-kit",
  "gpui-pre",

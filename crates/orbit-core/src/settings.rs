@@ -52,9 +52,6 @@ pub struct Settings {
     /// front matter: its `created` time and an empty `tags`. A `.txt` note
     /// never does.
     pub new_notes_get_properties: bool,
-    /// Live Preview, while it's built (#35): Ctrl+E switches a note
-    /// between it and Source mode. Off by default; Split view stays.
-    pub live_preview_in_development: bool,
 }
 
 impl Default for Settings {
@@ -71,7 +68,6 @@ impl Default for Settings {
             clear_clipboard_seconds: 30,
             detailed_logging: false,
             new_notes_get_properties: true,
-            live_preview_in_development: false,
         }
     }
 }
@@ -125,9 +121,6 @@ impl Settings {
         }
         if let Some(properties) = field("new_notes_get_properties").and_then(|v| v.as_bool()) {
             settings.new_notes_get_properties = properties;
-        }
-        if let Some(live) = field("live_preview_in_development").and_then(|v| v.as_bool()) {
-            settings.live_preview_in_development = live;
         }
         if let Some(seconds) = field("clear_clipboard_seconds")
             .and_then(|v| v.as_u64())

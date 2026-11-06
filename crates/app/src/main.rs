@@ -8,7 +8,6 @@ mod clipboard_guard;
 mod commands;
 #[cfg(feature = "dev-profiler")]
 mod dev_scenarios;
-mod diagram_block;
 mod empty_states;
 mod file_actions;
 #[cfg(unix)]
@@ -16,7 +15,6 @@ mod instance;
 mod link_completion;
 mod logging;
 mod note_editor;
-mod preview;
 mod protection;
 mod protection_manage;
 mod right_panel;
@@ -50,7 +48,6 @@ fn main() {
             editor::init(cx);
             note_editor::init(cx);
             auto_lock::init(cx);
-            diagram_block::init(cx);
             file_actions::init(cx);
             commands::init(cx);
             switcher::init(cx);

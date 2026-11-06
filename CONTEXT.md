@@ -62,10 +62,6 @@ _Avoid_: WYSIWYG mode, rich mode
 The editor mode that shows every markdown mark exactly as stored.
 _Avoid_: raw mode, plain mode, code view
 
-**Split view**:
-A temporary source-plus-preview layout that exists only until Live Preview ships.
-_Avoid_: preview pane, reading view
-
 **Inline title**:
 A note's file name, shown as a heading above its text. Editing it renames the note.
 _Avoid_: header, note heading (a `#` heading in the text is a different thing)

@@ -1,8 +1,7 @@
 //! One open note, under its inline title (its name, edited to rename it):
-//! the Split view (the text editor beside the rendered
-//! preview), Source mode (just the text editor, always for `.txt`), or,
-//! with the development setting on, Live Preview; with autosave. The text
-//! editor is reached through `text_editor`.
+//! in Live Preview, or Source mode (always for `.txt` and very large
+//! notes); with autosave. The text editor is reached through
+//! `text_editor`.
 
 use std::{
     rc::Rc,
@@ -29,11 +28,9 @@ use orbit_core::{
     is_plain_text_note,
 };
 
-use crate::appearance::AppSettings;
 use crate::clipboard_guard::{self, Copying};
 use crate::file_actions::editable_name;
 use crate::link_completion::LinkCompletions;
-use crate::preview::{FollowLink, PreviewContext, PreviewPane};
 use crate::text_editor::{Shown, TextEditor};
 
 actions!(
@@ -47,8 +44,7 @@ actions!(
         ToggleItalic,
         /// Ctrl+K.
         InsertLink,
-        /// Ctrl+E: Live Preview or Source mode, with the development
-        /// setting on.
+        /// Ctrl+E: Live Preview or Source mode.
         ToggleLivePreview
     ]
 );
@@ -57,9 +53,8 @@ pub const KEY_CONTEXT: &str = "NoteEditor";
 
 /// How long typing must pause before the note saves itself.
 const AUTOSAVE_DELAY: Duration = Duration::from_millis(1500);
-/// The pause in typing after which the preview, Outline and word count
-/// catch up: redrawing the preview of a long note on every key is what
-/// typing spent its time on (docs/research/performance.md).
+/// The pause in typing after which the Outline and word count catch up,
+/// rather than on every key (docs/research/performance.md).
 const DERIVED_PAUSE: Duration = Duration::from_millis(150);
 /// While typing goes on, they still catch up at least this often.
 const DERIVED_AT_LEAST: Duration = Duration::from_secs(1);
@@ -76,12 +71,10 @@ pub fn init(cx: &mut App) {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
-    /// Markdown source beside the rendered preview.
-    Split,
     /// The note formatted, its syntax showing where the caret is (#35).
     LivePreview,
-    /// Source only: always for `.txt` notes, and very large notes until
-    /// the preview is asked for.
+    /// The markdown as typed: always for `.txt` notes, and very large
+    /// notes until Live Preview is asked for.
     Source,
 }
 
@@ -92,7 +85,7 @@ impl Mode {
         if source_only {
             Mode::Source
         } else {
-            Mode::Split
+            Mode::LivePreview
         }
     }
 
@@ -100,13 +93,12 @@ impl Mode {
     fn shown(self) -> Shown {
         match self {
             Mode::LivePreview => Shown::LivePreview,
-            Mode::Split | Mode::Source => Shown::Source,
+            Mode::Source => Shown::Source,
         }
     }
 
     fn label(self) -> &'static str {
         match self {
-            Mode::Split => "Split view",
             Mode::LivePreview => "Live Preview",
             Mode::Source => "Source mode",
         }
@@ -213,11 +205,6 @@ pub struct NoteEditor {
     path: VaultPath,
     mode: Mode,
     source: TextEditor,
-    preview: PreviewContext,
-    /// The preview beside the source, drawn only when its text changes.
-    pane: Entity<PreviewPane>,
-    /// Tells the window a link was clicked; kept for a new path's preview.
-    follow: FollowLink,
     /// Wikilink autocomplete, which links from this note.
     links: Rc<LinkCompletions>,
     /// The inline title: the note's name, edited to rename it. Unless
@@ -227,8 +214,6 @@ pub struct NoteEditor {
     title_name: String,
     /// The source as of the last edit.
     text: SharedString,
-    /// What the preview renders: the source with its links rewritten.
-    shown: SharedString,
     words: usize,
     /// The source's headings, for the Outline.
     outline: Rc<[Heading]>,
@@ -238,7 +223,7 @@ pub struct NoteEditor {
     /// Shown with a failed save: where Save elsewhere put a copy.
     saved_elsewhere: Option<SharedString>,
     autosave: Option<Task<()>>,
-    /// The preview, Outline and word count catching up with typing, and
+    /// The Outline and word count catching up with typing, and
     /// since when they've been behind.
     catching_up: Option<(Task<()>, std::time::Instant)>,
     /// The scroll restored from the session, until the editor is laid out.
@@ -248,7 +233,7 @@ pub struct NoteEditor {
     /// While a Copy or Cut agreed to in a protected note runs: it goes
     /// ahead.
     copy_agreed: bool,
-    /// Held by the note's whole view, so the protected preview's selection
+    /// Held by the note's whole view, so a selection of its rendered text
     /// goes when focus leaves the note (else Copy elsewhere would take it).
     focus: FocusHandle,
     _focus_out: Subscription,
@@ -272,21 +257,13 @@ impl NoteEditor {
         let mode = Mode::of(source_only);
         let links = Rc::new(LinkCompletions::new(vault.clone(), path.clone()));
         let source = TextEditor::new(&text, language(source_only), links.clone(), window, cx);
+        source.show(mode.shown(), window, cx);
         let subscription = Subscription::join(
             source.on_edit(cx, |this, cx| this.edited(cx)),
-            // Followed as from the preview.
             source.on_follow_link(cx, |_, target, cx| {
                 cx.emit(NoteEditorEvent::FollowLink(target.to_string()))
             }),
         );
-        let this = cx.entity().downgrade();
-        let follow: FollowLink = Arc::new(move |target, _, cx| {
-            this.update(cx, |_, cx| {
-                cx.emit(NoteEditorEvent::FollowLink(target.to_string()))
-            })
-            .ok();
-        });
-        let preview = PreviewContext::new(vault.clone(), path.clone(), follow.clone());
         let focus = cx.focus_handle();
         let focus_out = cx.on_focus_out(&focus, window, |this, _, window, cx| {
             if this.is_protected() {
@@ -306,14 +283,8 @@ impl NoteEditor {
         let title_blur = cx.on_blur(&title_focus, window, |this, window, cx| {
             this.rename_from_title(window, cx)
         });
-        let shown: SharedString = preview.rewrite_links(&text).into();
-        let pane = cx.new(|_| PreviewPane::new(preview_id(&path), shown.clone(), preview.clone()));
         NoteEditor {
-            preview,
-            pane,
-            follow,
             links,
-            shown,
             saves: Saves::new(note),
             vault,
             title,
@@ -339,12 +310,13 @@ impl NoteEditor {
         }
     }
 
-    /// Copy or Cut in a protected note, before the editor or preview has
-    /// it: asked about first, then cleared from the clipboard later
+    /// Copy or Cut in a protected note, before the editor has it: asked
+    /// about first, then cleared from the clipboard later
     /// (clipboard_guard). In the editor, once agreed, the editor copies as
     /// it would have (every cursor's selection); even with nothing
-    /// selected it asks, as other cursors may have some. The preview's
-    /// selection is taken now, since a dialog clears it.
+    /// selected it asks, as other cursors may have some. A selection of
+    /// rendered text outside the editor is taken now, since a dialog
+    /// clears it.
     fn copy_protected(&mut self, copying: Copying, window: &mut Window, cx: &mut Context<Self>) {
         if self.copy_agreed {
             return;
@@ -361,7 +333,7 @@ impl NoteEditor {
             };
             return clipboard_guard::ask(copying, copy, window, cx);
         }
-        // The preview has nothing to cut.
+        // Rendered text has nothing to cut.
         if copying == Copying::Cut {
             return;
         }
@@ -420,7 +392,6 @@ impl NoteEditor {
     fn follow_path(&mut self, path: VaultPath, cx: &mut Context<Self>) {
         let was_source_only = self.is_source_only();
         self.links.set_note(path.clone());
-        self.preview = PreviewContext::new(self.vault.clone(), path.clone(), self.follow.clone());
         self.path = path;
         // A new extension can make it source only, or no longer.
         let mode = if was_source_only != self.is_source_only() {
@@ -437,8 +408,8 @@ impl NoteEditor {
         self.large.is_some() || is_plain_text_note(&self.path)
     }
 
-    /// Shows the note in `mode`: the editor's highlighting, the Outline and
-    /// the preview follow, and the editor shown does on the next frame.
+    /// Shows the note in `mode`: the editor's highlighting and the Outline
+    /// follow, and the editor shown does on the next frame.
     fn set_mode(&mut self, mode: Mode, cx: &mut Context<Self>) {
         self.source
             .set_language(language(self.is_source_only()), cx);
@@ -447,30 +418,25 @@ impl NoteEditor {
         self.links_changed(cx);
     }
 
-    /// Ctrl+E, with the development setting on: Live Preview, or back to
-    /// Source mode. A note shown only as source stays so.
+    /// Ctrl+E: Live Preview, or Source mode. A note shown only as source
+    /// stays so.
     fn toggle_live_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !AppSettings::get(cx).live_preview_in_development || self.is_source_only() {
+        if self.is_source_only() {
             return;
         }
         let mode = match self.mode {
             Mode::LivePreview => Mode::Source,
-            Mode::Split | Mode::Source => Mode::LivePreview,
+            Mode::Source => Mode::LivePreview,
         };
         self.set_mode(mode, cx);
         self.source.show(mode.shown(), window, cx);
         self.source.focus_handle(cx).focus(window, cx);
     }
 
-    /// Notes were added, removed or renamed: links may resolve differently.
+    /// Notes were added, removed or renamed: links may resolve differently,
+    /// so Live Preview draws them again.
     pub fn links_changed(&mut self, cx: &mut Context<Self>) {
-        if self.mode == Mode::Split {
-            self.shown = self.preview.rewrite_links(&self.text).into();
-            let (id, shown) = (preview_id(&self.path), self.shown.clone());
-            let context = &self.preview;
-            self.pane
-                .update(cx, |pane, cx| pane.show(id, shown, context, cx));
-        }
+        self.source.redraw(cx);
         cx.notify();
     }
 
@@ -597,8 +563,7 @@ impl NoteEditor {
         self.catch_up(cx);
     }
 
-    /// The preview, Outline and word count, brought up to date with the
-    /// source.
+    /// The Outline and word count, brought up to date with the source.
     fn catch_up(&mut self, cx: &mut Context<Self>) {
         self.catching_up = None;
         self.words = word_count(&self.text);
@@ -606,7 +571,7 @@ impl NoteEditor {
         self.links_changed(cx);
     }
 
-    /// Brings the preview, Outline and word count up to date once typing
+    /// Brings the Outline and word count up to date once typing
     /// pauses, or after a second of it at most.
     fn catch_up_later(&mut self, cx: &mut Context<Self>) {
         let since = self
@@ -919,7 +884,7 @@ impl NoteEditor {
         )
     }
 
-    /// A very large note, opened as source: says so, with the preview a
+    /// A very large note, opened as source: says so, with Live Preview a
     /// click away.
     fn render_large_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let bytes = self.large?;
@@ -956,14 +921,14 @@ impl NoteEditor {
                         .outline()
                         .small()
                         .label("Use live preview")
-                        .on_click(cx.listener(|this, _, _, cx| this.show_preview_anyway(cx))),
+                        .on_click(cx.listener(|this, _, _, cx| this.show_live_preview_anyway(cx))),
                 )
                 .into_any_element(),
         )
     }
 
-    /// Shows a very large note's preview after all.
-    fn show_preview_anyway(&mut self, cx: &mut Context<Self>) {
+    /// Shows a very large note in Live Preview after all.
+    fn show_live_preview_anyway(&mut self, cx: &mut Context<Self>) {
         self.large = None;
         self.set_mode(Mode::of(self.is_source_only()), cx);
     }
@@ -985,10 +950,6 @@ impl Render for NoteEditor {
             // Loading emits no change event, so this isn't an edit.
             self.source.load(text, window, cx);
         }
-        // The development setting turned off: back to the mode it opens in.
-        if self.mode == Mode::LivePreview && !AppSettings::get(cx).live_preview_in_development {
-            self.set_mode(Mode::of(self.is_source_only()), cx);
-        }
         if self.source.shown(cx) != self.mode.shown() {
             self.source.show(self.mode.shown(), window, cx);
         }
@@ -1001,7 +962,6 @@ impl Render for NoteEditor {
             self.title
                 .update(cx, |title, cx| title.set_value(name, window, cx));
         }
-        let border = cx.theme().border;
         // The inline title, shown as a heading above the text.
         let title = div().flex_none().px_4().pt_4().pb_1().child(
             Input::new(&self.title)
@@ -1032,22 +992,7 @@ impl Render for NoteEditor {
             .on_action(cx.listener(|this, _: &ToggleLivePreview, window, cx| {
                 this.toggle_live_preview(window, cx)
             }))
-            .child(editor)
-            .when(self.mode == Mode::Split, |this| {
-                this.child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .h_full()
-                        .border_l_1()
-                        .border_color(border)
-                        .child(
-                            self.pane
-                                .clone()
-                                .cached(StyleRefinement::default().size_full()),
-                        ),
-                )
-            });
+            .child(editor);
         let protected = self.is_protected();
         v_flex()
             .key_context(KEY_CONTEXT)
@@ -1067,12 +1012,6 @@ impl Render for NoteEditor {
     }
 }
 
-/// The preview's element id: per note, so another note's preview doesn't
-/// inherit its state.
-fn preview_id(path: &VaultPath) -> SharedString {
-    format!("preview-{path}").into()
-}
-
 /// "4.2 MB": a large note's size.
 fn megabytes(bytes: usize) -> String {
     format!("{:.1} MB", bytes as f64 / 1_000_000.)
@@ -1084,5 +1023,81 @@ fn outline_of(source_only: bool, text: &str) -> Rc<[Heading]> {
         Rc::new([])
     } else {
         headings(text).into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    // Named, not globbed: Kit's glob brings gpui's `test` macro, which then
+    // shadows `#[test]` inside `#[gpui::test]`.
+    use gpui::{Entity, TestAppContext, VisualTestContext};
+    use orbit_core::{Vault, VaultPath};
+
+    use super::NoteEditor;
+    use crate::appearance::AppSettings;
+
+    /// Opens `name` (holding `text`) in a note editor in a headless window,
+    /// its text focused.
+    fn open<'a>(
+        cx: &'a mut TestAppContext,
+        name: &str,
+        text: &str,
+    ) -> (
+        Entity<NoteEditor>,
+        &'a mut VisualTestContext,
+        tempfile::TempDir,
+    ) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            editor::init(cx);
+            super::init(cx);
+            cx.set_global(AppSettings::for_tests());
+        });
+        let dir = tempfile::tempdir().expect("a temporary vault");
+        std::fs::write(dir.path().join(name), text).unwrap();
+        let vault = Arc::new(Vault::open(dir.path()).expect("the vault opens"));
+        let path = VaultPath::new(name).unwrap();
+        let (note, text) = vault.open_note(&path).expect("the note opens");
+        let (editor, cx) =
+            cx.add_window_view(|window, cx| NoteEditor::new(vault, note, text, window, cx));
+        cx.update(|window, cx| NoteEditor::focus(&editor, window, cx));
+        cx.run_until_parked();
+        (editor, cx, dir)
+    }
+
+    /// The mode the status bar names.
+    fn mode(editor: &Entity<NoteEditor>, cx: &mut VisualTestContext) -> String {
+        let summary = cx.update(|_, cx| editor.read(cx).summary_text(cx));
+        summary.rsplit(" · ").next().unwrap().to_string()
+    }
+
+    #[gpui::test]
+    fn a_note_opens_in_live_preview_and_ctrl_e_switches_to_source_and_back(
+        cx: &mut TestAppContext,
+    ) {
+        let (editor, cx, _dir) = open(cx, "Note.md", "# Hi\n\nSome **bold** text");
+        assert_eq!(mode(&editor, cx), "Live Preview");
+        cx.simulate_keystrokes("ctrl-e");
+        cx.run_until_parked();
+        assert_eq!(mode(&editor, cx), "Source mode");
+        // Typed in Source mode, it's there back in Live Preview.
+        cx.simulate_keystrokes("ctrl-end");
+        cx.simulate_input("!");
+        cx.simulate_keystrokes("ctrl-e");
+        cx.run_until_parked();
+        assert_eq!(mode(&editor, cx), "Live Preview");
+        let text = cx.update(|_, cx| editor.read(cx).source.text(cx));
+        assert_eq!(text, "# Hi\n\nSome **bold** text!");
+    }
+
+    #[gpui::test]
+    fn a_plain_text_note_stays_in_source_mode(cx: &mut TestAppContext) {
+        let (editor, cx, _dir) = open(cx, "List.txt", "milk\neggs");
+        assert_eq!(mode(&editor, cx), "Source mode");
+        cx.simulate_keystrokes("ctrl-e");
+        cx.run_until_parked();
+        assert_eq!(mode(&editor, cx), "Source mode");
     }
 }

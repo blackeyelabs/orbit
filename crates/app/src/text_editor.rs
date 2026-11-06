@@ -1,8 +1,7 @@
 //! The note editor's text view behind one interface: the only place the
-//! editors are reached. It's Kit's source editor (Source mode, and the
-//! source half of Split view) or, once asked for, Live Preview (the
-//! `editor` crate, #35); each keeps its own undo, and switching hands the
-//! shown one the other's text.
+//! editors are reached. It's Live Preview (the `editor` crate, #35) or
+//! Kit's source editor (Source mode); each keeps its own undo, and
+//! switching hands the shown one the other's text.
 //!
 //! Offsets are UTF-8 bytes into the note's text. Lines and columns, for the
 //! status bar and go to line, start at zero.
@@ -186,6 +185,14 @@ impl TextEditor {
         }
         self.state
             .update(cx, |state, cx| state.set_value(text, window, cx));
+    }
+
+    /// Draws Live Preview again, as something it shows changed outside
+    /// the text (which links resolve).
+    pub fn redraw(&self, cx: &mut App) {
+        if let Some(live) = self.views.read(cx).live.clone() {
+            live.update(cx, |_, cx| cx.notify());
+        }
     }
 
     /// Highlights the source as `language` from now on.

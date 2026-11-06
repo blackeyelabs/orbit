@@ -267,7 +267,7 @@ impl OrbitWindow {
     }
 
     /// Indexes the vault for links and search, off the UI thread (so the
-    /// first preview doesn't wait for it), showing how far it's got.
+    /// first note doesn't wait for it), showing how far it's got.
     fn index_vault(&mut self, cx: &mut Context<Self>) {
         let vault = self.vault.clone();
         let done = Arc::new(AtomicBool::new(false));
@@ -392,7 +392,7 @@ impl OrbitWindow {
         }
     }
 
-    /// Follows a link clicked in `from`'s preview: a note opens in a tab, at
+    /// Follows a link clicked in `from`: a note opens in a tab, at
     /// the heading the link names; an Attachment opens in its app; and an
     /// unresolved link creates its note first.
     fn follow_link(

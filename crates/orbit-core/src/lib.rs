@@ -837,7 +837,7 @@ pub fn is_plain_text_note(path: &VaultPath) -> bool {
 }
 
 /// Notes this large (2 MB) or larger open as source only, to keep typing
-/// fast; the preview is one choice away.
+/// fast; Live Preview is one choice away.
 pub const LARGE_NOTE_BYTES: usize = 2_000_000;
 
 /// Whether a note's text is large enough to open as source only.

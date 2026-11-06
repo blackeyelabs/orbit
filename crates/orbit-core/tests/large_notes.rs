@@ -1,4 +1,4 @@
-//! Very large notes open as source only, to keep typing fast; the preview
+//! Very large notes open as source only, to keep typing fast; Live Preview
 //! is one choice away.
 
 use std::fs;
