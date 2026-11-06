@@ -473,6 +473,8 @@ fn text_runs(conceal: &Layout, marked: Option<Range<usize>>, base: &TextStyle) -
                         })
                     }
                     RunStyle::Code => font.family = CODE_FONT.into(),
+                    // The spike predates highlights: shown as plain text.
+                    RunStyle::Highlight => {}
                     RunStyle::Link => {
                         color = link;
                         underline = Some(UnderlineStyle {

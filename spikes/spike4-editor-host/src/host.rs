@@ -909,6 +909,8 @@ fn marks(view: &View, marked: Option<Range<usize>>) -> Vec<(Range<usize>, TextMa
                     Style::Italic => mark.italic = true,
                     Style::Strike => mark.strikethrough = true,
                     Style::Code => mark.code = true,
+                    // The spike predates highlights: shown as plain text.
+                    Style::Highlight => {}
                     // A real link mark would make the text a link Kit
                     // follows on click; the spike only underlines.
                     Style::Link => mark.underline = true,

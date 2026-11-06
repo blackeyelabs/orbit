@@ -330,6 +330,8 @@ const FIXTURES: &[&str] = &[
     "",
     "\n\n\n",
     "unclosed **bold and [link( and [[wiki",
+    "a **bold *it*** ==hi== ~~x~~ \\*esc\\* ``co`de`` [[N#H]] [[#H]] [**t**](u.md) <https://a.b> https://c.d #tag",
+    "***x*** *a **b** c* [[N#H|al]] ![[e.png]] [x](<a b.md> \"t\")",
 ];
 
 /// From the first stop to the last, every caret stop is inside a leaf and

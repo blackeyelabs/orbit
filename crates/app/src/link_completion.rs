@@ -47,6 +47,13 @@ impl LinkCompletions {
         *self.note.borrow_mut() = note;
     }
 
+    /// Whether a link's `target` (`Note#Heading`) resolves from the note:
+    /// a link to a heading in the note itself always does.
+    pub fn resolves(&self, target: &str) -> bool {
+        let (path, _) = md_engine::split_target(target);
+        path.is_empty() || self.vault.resolve(&self.note.borrow(), path).is_some()
+    }
+
     /// After an edit: the name whose "Create …" row was just accepted, if it
     /// was. Accepting writes `name]]` in one edit that leaves the caret
     /// after it, with no request for suggestions between (typing `]]`

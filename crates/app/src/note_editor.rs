@@ -195,7 +195,8 @@ impl Saves {
 pub enum NoteEditorEvent {
     /// The user chose to close the note without saving (it was deleted).
     Close,
-    /// A link was clicked in the preview: its target, `Note#Heading`.
+    /// A link was clicked in the preview or Live Preview: its target,
+    /// `Note#Heading`.
     FollowLink(String),
     /// "Create … as a new note" was chosen for a link being typed: the
     /// link, whose note is wanted now.
@@ -271,7 +272,13 @@ impl NoteEditor {
         let mode = Mode::of(source_only);
         let links = Rc::new(LinkCompletions::new(vault.clone(), path.clone()));
         let source = TextEditor::new(&text, language(source_only), links.clone(), window, cx);
-        let subscription = source.on_edit(cx, |this, cx| this.edited(cx));
+        let subscription = Subscription::join(
+            source.on_edit(cx, |this, cx| this.edited(cx)),
+            // Followed as from the preview.
+            source.on_follow_link(cx, |_, target, cx| {
+                cx.emit(NoteEditorEvent::FollowLink(target.to_string()))
+            }),
+        );
         let this = cx.entity().downgrade();
         let follow: FollowLink = Arc::new(move |target, _, cx| {
             this.update(cx, |_, cx| {

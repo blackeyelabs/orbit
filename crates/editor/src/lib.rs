@@ -16,14 +16,14 @@ use gpui_kit::base::input::{
     SelectToNextWordEnd, SelectToPreviousWordStart, SelectToStart, SelectToStartOfLine, Undo,
 };
 use gpui_kit::base::text::editor_host::{
-    BlockNode, FlowPosition, InlineNode, LeafGeometry, Paragraph, RenderContext, TextMark,
-    collect_leaf_geometry,
+    BlockNode, FlowPosition, InlineNode, LeafGeometry, LinkMark, Paragraph, RenderContext,
+    TextMark, collect_leaf_geometry,
 };
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use live_preview::blocks::{Block, Kind};
-use live_preview::conceal::Style;
+use live_preview::conceal::{Style, Target};
 use live_preview::{Document, View};
 
 actions!(
@@ -96,6 +96,18 @@ const SYNTAX_TINT: Hsla = Hsla {
     a: 0.14,
 };
 
+/// Behind `==highlighted==` text: a marker-pen yellow.
+const HIGHLIGHT: Hsla = Hsla {
+    h: 50. / 360.,
+    s: 1.,
+    l: 0.5,
+    a: 0.35,
+};
+
+/// Whether a link's target (a note, maybe with a `#heading`) resolves in
+/// the vault.
+pub type LinkResolver = Rc<dyn Fn(&str) -> bool>;
+
 /// The line height assumed for a leaf not laid out yet.
 const FALLBACK_LINE_HEIGHT: Pixels = px(20.);
 
@@ -111,10 +123,14 @@ fn leaf_key(leaf: usize) -> u64 {
 }
 
 /// What the editor tells its owner.
+#[derive(Clone, Debug)]
 pub enum LivePreviewEvent {
     /// The person edited the text (typing, deleting, undo, paste). Loading
     /// text isn't an edit.
     Edited,
+    /// A link to a note was clicked: its target, `Note#Heading`. A click on
+    /// a web address opens it instead.
+    FollowLink(String),
 }
 
 /// A note being edited in Live Preview.
@@ -138,13 +154,16 @@ pub struct LivePreview {
     /// line: Kit's `LeafGeometry` has no affinity, so it would draw it at
     /// the end of the upper one (see `source_for_point`).
     wrap_next: bool,
+    /// Which link targets resolve: those that don't are drawn apart.
+    resolves: LinkResolver,
 }
 
 impl EventEmitter<LivePreviewEvent> for LivePreview {}
 
 impl LivePreview {
-    /// An editor over a note's `text`, the caret at its start.
-    pub fn new(text: &str, cx: &mut Context<Self>) -> Self {
+    /// An editor over a note's `text`, the caret at its start; links whose
+    /// target `resolves` are drawn as links, the others as unresolved.
+    pub fn new(text: &str, resolves: LinkResolver, cx: &mut Context<Self>) -> Self {
         let doc = Document::new(text);
         let blocks = doc.blocks().blocks.len();
         let mut this = LivePreview {
@@ -158,6 +177,7 @@ impl LivePreview {
             goal_x: None,
             reveal_caret: false,
             wrap_next: false,
+            resolves,
         };
         this.relayout();
         this
@@ -388,6 +408,36 @@ impl LivePreview {
         Some((leaves[leaf].source.start + local, next_line))
     }
 
+    /// The link a click at `at` follows: one on the text of a link whose
+    /// syntax is hidden, not beside it.
+    fn link_at_point(&self, at: Point<Pixels>) -> Option<Target> {
+        let geometry = self.geometry.borrow();
+        let (leaf, g) = (0..self.views.len())
+            .filter_map(|leaf| Some((leaf, geometry.get(&leaf_key(leaf))?)))
+            .find(|(_, g)| g.bounds().contains(&at))?;
+        let index = g.index_for_position(at);
+        let line = |i: usize| {
+            let p = g.position_for_index(i);
+            p.y <= at.y && at.y < p.y + g.line_height()
+        };
+        // Past the link's first character's left edge and its last one's
+        // right edge, on their lines.
+        let on = |range: &Range<usize>| {
+            let start = g.position_for_index(range.start);
+            let end = g.position_for_index(range.end);
+            range.start < index && index < range.end
+                || index == range.start && line(index) && at.x >= start.x
+                || index == range.end && line(index) && at.x <= end.x
+        };
+        // A link inside another's text is the one clicked.
+        self.views[leaf]
+            .links()
+            .iter()
+            .filter(|link| link.followable && !link.range.is_empty() && on(&link.range))
+            .min_by_key(|link| link.range.len())
+            .map(|link| link.target.clone())
+    }
+
     /// The caret one visual line up or down, at `x`: within a wrapped
     /// leaf, or into the nearest leaf above or below.
     fn vertical_target(&self, down: bool, x: Pixels) -> Option<(usize, bool)> {
@@ -487,8 +537,9 @@ impl LivePreview {
         }
     }
 
-    /// A click places the caret (Shift extends the selection) and starts
-    /// a drag; a double-click selects a word, a triple-click a line.
+    /// A click on a link (its syntax hidden) follows it. Elsewhere a click
+    /// places the caret (Shift extends the selection) and starts a drag; a
+    /// double-click selects a word, a triple-click a line.
     fn on_mouse_down(
         &mut self,
         event: &MouseDownEvent,
@@ -496,6 +547,16 @@ impl LivePreview {
         cx: &mut Context<Self>,
     ) {
         window.focus(&self.focus_handle, cx);
+        if event.click_count == 1
+            && !event.modifiers.shift
+            && let Some(target) = self.link_at_point(event.position)
+        {
+            match target {
+                Target::Note(target) => cx.emit(LivePreviewEvent::FollowLink(target)),
+                Target::Url(url) => cx.open_url(&url),
+            }
+            return;
+        }
         let Some((at, next_line)) = self.source_for_point(event.position, |_| true) else {
             return;
         };
@@ -524,6 +585,11 @@ impl LivePreview {
 
     /// While dragging, the selection follows the pointer.
     fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        // Released over a link, the drag's mouse-up went to Kit's link
+        // handler instead.
+        if event.pressed_button != Some(MouseButton::Left) {
+            self.is_selecting = false;
+        }
         if self.is_selecting
             && let Some((at, next_line)) = self.source_for_point(event.position, |_| true)
         {
@@ -595,7 +661,8 @@ impl LivePreview {
                 .as_ref()
                 .and_then(|m| self.display_range(leaf, m));
             let mut p = Paragraph::default();
-            p.push(InlineNode::new(view.display_text().to_string()).marks(marks(view, marked)));
+            let marks = marks(view, marked, &*self.resolves);
+            p.push(InlineNode::new(view.display_text().to_string()).marks(marks));
             p.with_leaf_key(leaf_key(leaf))
         };
         let selection = self.doc.selection();
@@ -629,10 +696,28 @@ impl LivePreview {
 }
 
 /// Kit marks for a leaf: the conceal runs flattened into non-overlapping
-/// ranges, plus an underline under IME preedit text.
-fn marks(view: &View, marked: Option<Range<usize>>) -> Vec<(Range<usize>, TextMark)> {
+/// ranges, plus an underline under IME preedit text. A link that resolves
+/// (or a web address) gets Kit's link mark, so its colour; an unresolved
+/// one keeps the text colour, underlined (Kit has no colour mark to fade
+/// it with, as the preview does).
+fn marks(
+    view: &View,
+    marked: Option<Range<usize>>,
+    resolves: &dyn Fn(&str) -> bool,
+) -> Vec<(Range<usize>, TextMark)> {
     let len = view.display_text().len();
     let runs = view.runs();
+    let links: Vec<_> = view
+        .links()
+        .iter()
+        .map(|link| {
+            let url = match &link.target {
+                Target::Note(target) => resolves(target).then(|| target.clone()),
+                Target::Url(url) => Some(url.clone()),
+            };
+            (link.range.clone(), url)
+        })
+        .collect();
     let mut cuts = vec![0, len];
     for r in runs {
         cuts.extend([r.range.start, r.range.end]);
@@ -656,13 +741,26 @@ fn marks(view: &View, marked: Option<Range<usize>>) -> Vec<(Range<usize>, TextMa
                     Style::Italic => mark.italic = true,
                     Style::Strike => mark.strikethrough = true,
                     Style::Code => mark.code = true,
-                    // A real link mark would make Kit follow it on click;
-                    // following links is a later ticket (#41).
-                    Style::Link => mark.underline = true,
+                    Style::Highlight => mark.highlight = Some(HIGHLIGHT),
+                    // Set from the link below.
+                    Style::Link => {}
                     // Kit's heading block sets the size and weight.
                     Style::Heading(_) => {}
                     Style::Syntax => mark.highlight = Some(SYNTAX_TINT),
                 }
+            }
+            let link = links
+                .iter()
+                .find(|(range, _)| range.start <= seg.start && seg.end <= range.end);
+            match link {
+                Some((_, Some(url))) => {
+                    mark.link = Some(LinkMark {
+                        url: url.clone().into(),
+                        ..LinkMark::default()
+                    })
+                }
+                Some((_, None)) => mark.underline = true,
+                None => {}
             }
             if marked
                 .as_ref()
@@ -902,7 +1000,8 @@ impl Element for HostElement {
 
 impl Render for LivePreview {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let rcx = RenderContext::from_app(cx);
+        // A click on a link is the editor's (see `on_mouse_down`).
+        let rcx = RenderContext::from_app(cx).on_link_click(|_, _, _, _| {});
         let (blocks, decorations) = self.render_blocks(cx);
         let flows: Vec<FlowPosition> = {
             let refs: Vec<&BlockNode> = blocks.iter().collect();

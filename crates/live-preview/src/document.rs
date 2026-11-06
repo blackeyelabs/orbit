@@ -5,7 +5,7 @@ use std::{ops::Range, time::Instant};
 use ropey::{LineType, Rope};
 
 use crate::blocks::{Blocks, Kind, next_grapheme, prev_grapheme};
-use crate::conceal::{Layout, Run, Selection, layout};
+use crate::conceal::{Layout, Link, Run, Selection, layout};
 use crate::undo::{Change, EditKind, History};
 
 /// Where the time comes from, for grouping undo steps.
@@ -540,6 +540,14 @@ impl View {
     pub fn runs(&self) -> &[Run] {
         match self {
             View::Concealed(l) => l.runs(),
+            View::Verbatim(_) => &[],
+        }
+    }
+
+    /// The links in the text, in display offsets.
+    pub fn links(&self) -> &[Link] {
+        match self {
+            View::Concealed(l) => l.links(),
             View::Verbatim(_) => &[],
         }
     }

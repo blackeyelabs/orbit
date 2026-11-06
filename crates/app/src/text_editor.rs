@@ -30,13 +30,14 @@ pub enum Shown {
 struct Views {
     shown: Shown,
     live: Option<Entity<LivePreview>>,
-    _live_edits: Option<Subscription>,
+    _live_events: Option<Subscription>,
+    /// For Live Preview's links: which targets resolve.
+    links: Rc<LinkCompletions>,
 }
 
-/// Live Preview reported an edit (re-emitted for [`TextEditor::on_edit`]).
-struct LiveEdited;
-
-impl EventEmitter<LiveEdited> for Views {}
+/// Live Preview's events are re-emitted, for [`TextEditor::on_edit`] and
+/// [`TextEditor::on_follow_link`].
+impl EventEmitter<LivePreviewEvent> for Views {}
 
 impl Views {
     /// Live Preview, if it's the one shown.
@@ -71,7 +72,7 @@ impl TextEditor {
                 .line_number(false)
                 .soft_wrap(true)
                 .default_value(text.to_string());
-            state.lsp_mut().completion_provider = Some(links);
+            state.lsp_mut().completion_provider = Some(links.clone());
             state
                 .lsp_mut()
                 .set_completion_highlighter(LinkCompletions::highlighter());
@@ -80,7 +81,8 @@ impl TextEditor {
         let views = cx.new(|_| Views {
             shown: Shown::Source,
             live: None,
-            _live_edits: None,
+            _live_events: None,
+            links,
         });
         TextEditor { state, views }
     }
@@ -103,11 +105,13 @@ impl TextEditor {
                 match live {
                     Some(live) => live.update(cx, |live, cx| live.take_text(&text, cx)),
                     None => {
-                        let live = cx.new(|cx| LivePreview::new(&text, cx));
+                        let links = self.views.read(cx).links.clone();
+                        let resolves = Rc::new(move |target: &str| links.resolves(target));
+                        let live = cx.new(|cx| LivePreview::new(&text, resolves, cx));
                         self.views.update(cx, |views, cx| {
-                            views._live_edits =
-                                Some(cx.subscribe(&live, |_, _, _: &LivePreviewEvent, cx| {
-                                    cx.emit(LiveEdited)
+                            views._live_events =
+                                Some(cx.subscribe(&live, |_, _, event: &LivePreviewEvent, cx| {
+                                    cx.emit(event.clone())
                                 }));
                             views.live = Some(live);
                         });
@@ -144,10 +148,26 @@ impl TextEditor {
                 (in_source.borrow_mut())(this, cx);
             }
         });
-        let live = cx.subscribe(&self.views, move |this, _, _: &LiveEdited, cx| {
-            (edited.borrow_mut())(this, cx);
+        let live = cx.subscribe(&self.views, move |this, _, event: &LivePreviewEvent, cx| {
+            if let LivePreviewEvent::Edited = event {
+                (edited.borrow_mut())(this, cx);
+            }
         });
         Subscription::join(source, live)
+    }
+
+    /// Calls `follow` with a link's target (`Note#Heading`) when one is
+    /// clicked in Live Preview. (Kit's source editor follows none.)
+    pub fn on_follow_link<T: 'static>(
+        &self,
+        cx: &mut Context<T>,
+        mut follow: impl FnMut(&mut T, &str, &mut Context<T>) + 'static,
+    ) -> Subscription {
+        cx.subscribe(&self.views, move |this, _, event: &LivePreviewEvent, cx| {
+            if let LivePreviewEvent::FollowLink(target) = event {
+                follow(this, target, cx);
+            }
+        })
     }
 
     /// The text as it is now.
@@ -303,6 +323,9 @@ mod tests {
         editor: TextEditor,
         edits: usize,
         _edits: Subscription,
+        /// The links Live Preview followed.
+        followed: Vec<String>,
+        _follows: Subscription,
         /// The vault's folder, removed with the host.
         _vault: tempfile::TempDir,
     }
@@ -332,10 +355,15 @@ mod tests {
         let (host, cx) = cx.add_window_view(|window, cx| {
             let editor = TextEditor::new(&text, "markdown", links, window, cx);
             let edits = editor.on_edit(cx, |host: &mut Host, _| host.edits += 1);
+            let follows = editor.on_follow_link(cx, |host: &mut Host, target, _| {
+                host.followed.push(target.to_string())
+            });
             Host {
                 editor,
                 edits: 0,
                 _edits: edits,
+                followed: Vec::new(),
+                _follows: follows,
                 _vault: dir,
             }
         });
@@ -511,5 +539,77 @@ mod tests {
         cx.simulate_keystrokes("down");
         cx.run_until_parked();
         assert_eq!(cx.update(|_, cx| editor.caret_line_column(cx)).0, 3);
+    }
+
+    #[gpui::test]
+    fn a_click_on_a_link_in_live_preview_follows_it(cx: &mut TestAppContext) {
+        let (host, cx) = open(cx, "[[Target#Part|go there]] or stay\n\nEnd");
+        live(&host, cx);
+        // Away from the link, its brackets are hidden.
+        cx.simulate_keystrokes("ctrl-end");
+        cx.run_until_parked();
+        // The text starts past the editor's padding (24 px left, 16 top).
+        cx.simulate_click(
+            gpui::point(gpui::px(30.), gpui::px(26.)),
+            gpui::Modifiers::none(),
+        );
+        cx.run_until_parked();
+        assert_eq!(
+            host.read_with(cx, |h, _| h.followed.clone()),
+            ["Target#Part"]
+        );
+        let editor = editor(&host, cx);
+        assert_eq!(
+            cx.update(|_, cx| editor.caret(cx)),
+            37,
+            "the caret stays at the end"
+        );
+        // Beside it, past the line's end: the caret goes there.
+        cx.simulate_click(
+            gpui::point(gpui::px(600.), gpui::px(26.)),
+            gpui::Modifiers::none(),
+        );
+        cx.run_until_parked();
+        assert_eq!(host.read_with(cx, |h, _| h.followed.len()), 1);
+        assert_eq!(cx.update(|_, cx| editor.caret(cx)), 32);
+        // Arrowing in reveals it instead: then a click there edits it.
+        cx.simulate_keystrokes("ctrl-home");
+        cx.simulate_click(
+            gpui::point(gpui::px(30.), gpui::px(26.)),
+            gpui::Modifiers::none(),
+        );
+        cx.run_until_parked();
+        assert_eq!(host.read_with(cx, |h, _| h.followed.len()), 1);
+    }
+
+    #[gpui::test]
+    fn a_click_on_a_web_address_opens_it_and_on_a_note_link_follows_it(cx: &mut TestAppContext) {
+        let click = |cx: &mut VisualTestContext| {
+            cx.simulate_click(
+                gpui::point(gpui::px(30.), gpui::px(26.)),
+                gpui::Modifiers::none(),
+            );
+            cx.run_until_parked();
+        };
+        let (host, cx) = open(cx, "[the web](https://a.b/c) or not\n\nEnd");
+        live(&host, cx);
+        cx.simulate_keystrokes("ctrl-end");
+        click(cx);
+        assert_eq!(cx.opened_url().as_deref(), Some("https://a.b/c"));
+        assert!(host.read_with(cx, |h, _| h.followed.is_empty()));
+        let editor = editor(&host, cx);
+        cx.update(|window, cx| {
+            editor.load(
+                "[a note](Other%20note.md#Top) here\n\nEnd".into(),
+                window,
+                cx,
+            )
+        });
+        cx.simulate_keystrokes("ctrl-end");
+        click(cx);
+        assert_eq!(
+            host.read_with(cx, |h, _| h.followed.clone()),
+            ["Other note.md#Top"]
+        );
     }
 }

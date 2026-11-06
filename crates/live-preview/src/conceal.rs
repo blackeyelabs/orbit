@@ -3,14 +3,21 @@
 //! Given one leaf's source text and the selection, [`layout`] decides which
 //! markdown syntax is hidden (syntax shows only where the caret or
 //! selection touches its span), maps offsets between source and display
-//! text, and reports styled runs over the display text.
+//! text, and reports styled runs and links over the display text.
 //!
-//! Known limits, for later Live Preview tickets: no nesting of the same
-//! construct, no escapes, tags, highlights, embeds or math. A heading's
-//! style run can overlap the inline runs inside it; the renderer merges
-//! them.
+//! Inline syntax, as Obsidian's Live Preview conceals it: emphasis
+//! (nested), strike, highlights, code spans, escapes, wikilinks (aliases
+//! and headings), markdown links, autolinks and bare web addresses.
+//! Nothing inside code is concealed. Tags show as typed. Embeds, images
+//! and math are left as text for their own tickets. Emphasis doesn't
+//! cross a line break. A heading's style run can overlap the inline runs
+//! inside it; the renderer merges them.
 
-use std::ops::Range;
+use std::{
+    cell::{Cell, RefCell},
+    ops::Range,
+    rc::Rc,
+};
 
 /// The caret or selection, as byte offsets into the source.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,15 +60,17 @@ impl Selection {
 /// How a run of display text is styled.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Style {
-    /// `**bold**`.
+    /// `**bold**` or `__bold__`.
     Bold,
     /// `*italic*` or `_italic_`.
     Italic,
     /// `~~struck~~`.
     Strike,
+    /// `==highlighted==`.
+    Highlight,
     /// `` `code` ``.
     Code,
-    /// A link's or wikilink's text.
+    /// A markdown link's or wikilink's text, or a web address.
     Link,
     /// A heading of this level, its whole line.
     Heading(u8),
@@ -78,14 +87,58 @@ pub struct Run {
     pub style: Style,
 }
 
+/// Where a link goes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Target {
+    /// A note or attachment in the vault, maybe with a `#heading`: a wikilink's
+    /// target, or a markdown link's destination, percent-decoded.
+    Note(String),
+    /// A web address (anything with a scheme, `mailto:` too).
+    Url(String),
+}
+
+/// A link in the display text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Link {
+    /// Its text, in display offsets.
+    pub range: Range<usize>,
+    /// Where it goes.
+    pub target: Target,
+    /// A click follows it: its syntax is hidden (or it has none, as a bare
+    /// web address). A revealed link is being edited, so a click there
+    /// places the caret.
+    pub followable: bool,
+}
+
+/// Source syntax hidden from the display, which shows `shown` in its place
+/// (usually nothing; ` > ` for the `#` in `[[Note#Heading]]`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Hide {
+    range: Range<usize>,
+    shown: &'static str,
+}
+
+impl Hide {
+    /// Hidden, with nothing in its place.
+    fn new(range: Range<usize>) -> Self {
+        Hide { range, shown: "" }
+    }
+
+    /// How much longer the source is than the display, across it.
+    fn shrink(&self) -> isize {
+        self.range.len() as isize - self.shown.len() as isize
+    }
+}
+
 /// What the editor shows for one layout pass.
 #[derive(Debug)]
 pub struct Layout {
     display: String,
     source_len: usize,
-    /// Hidden source ranges, sorted and non-overlapping.
-    hidden: Vec<Range<usize>>,
+    /// Hidden source, sorted and non-overlapping.
+    hidden: Vec<Hide>,
     runs: Vec<Run>,
+    links: Vec<Link>,
 }
 
 impl Layout {
@@ -99,30 +152,44 @@ impl Layout {
         &self.runs
     }
 
+    /// The links in the text, in order.
+    pub fn links(&self) -> &[Link] {
+        &self.links
+    }
+
     /// Display offset for a source offset. An offset inside hidden syntax
     /// collapses to the display position where that syntax would be.
     pub fn to_display(&self, source: usize) -> usize {
-        let mut removed = 0;
-        for r in &self.hidden {
-            if source <= r.start {
+        let mut shift = 0;
+        for h in &self.hidden {
+            if source <= h.range.start {
                 break;
             }
-            removed += source.min(r.end) - r.start;
+            if source < h.range.end {
+                return (h.range.start as isize - shift) as usize;
+            }
+            shift += h.shrink();
         }
-        source - removed
+        (source as isize - shift) as usize
     }
 
     /// Source offset for a display offset: the start of the next visible
-    /// source character (or the end of the source).
+    /// source character (or the end of the source). Inside text shown in
+    /// place of hidden syntax, that's the end of the syntax.
     pub fn to_source(&self, display: usize) -> usize {
-        let mut source = display;
-        for r in &self.hidden {
-            if source < r.start {
+        let display = display as isize;
+        let mut shift = 0;
+        for h in &self.hidden {
+            let start = h.range.start as isize - shift;
+            if display < start {
                 break;
             }
-            source += r.len();
+            if display < start + h.shown.len() as isize {
+                return h.range.end;
+            }
+            shift += h.shrink();
         }
-        source.min(self.source_len)
+        ((display + shift).max(0) as usize).min(self.source_len)
     }
 }
 
@@ -137,19 +204,20 @@ pub fn layout(source: &str, selection: Selection) -> Layout {
         })
         .collect();
 
-    let mut hidden: Vec<Range<usize>> = spans
+    let mut hidden: Vec<Hide> = spans
         .iter()
         .filter(|(_, revealed)| !revealed)
-        .flat_map(|(s, _)| s.syntax.iter().cloned())
+        .flat_map(|(s, _)| s.hidden.iter().cloned())
         .collect();
-    // Heading and inline spans are found in separate passes.
-    hidden.sort_by_key(|r| r.start);
+    // Headings, outer and nested spans are found apart.
+    hidden.sort_by_key(|h| h.range.start);
 
     let mut display = String::with_capacity(source.len());
     let mut at = 0;
-    for r in &hidden {
-        display.push_str(&source[at..r.start]);
-        at = r.end;
+    for h in &hidden {
+        display.push_str(&source[at..h.range.start]);
+        display.push_str(h.shown);
+        at = h.range.end;
     }
     display.push_str(&source[at..]);
 
@@ -158,145 +226,446 @@ pub fn layout(source: &str, selection: Selection) -> Layout {
         source_len: source.len(),
         hidden,
         runs: Vec::new(),
+        links: Vec::new(),
     };
+    let to_display =
+        |layout: &Layout, r: &Range<usize>| layout.to_display(r.start)..layout.to_display(r.end);
     let mut runs = Vec::new();
+    let mut links = Vec::new();
     for (span, revealed) in &spans {
         if *revealed {
-            runs.extend(span.syntax.iter().map(|r| Run {
-                range: r.clone(),
+            runs.extend(span.hidden.iter().map(|h| Run {
+                range: to_display(&layout, &h.range),
                 style: Style::Syntax,
             }));
         }
-        runs.push(Run {
-            range: span.content(),
-            style: span.style,
-        });
+        if let Some(style) = span.style {
+            runs.push(Run {
+                range: to_display(&layout, &span.content),
+                style,
+            });
+        }
+        if let Some(target) = &span.target {
+            links.push(Link {
+                range: to_display(&layout, &span.content),
+                target: target.clone(),
+                followable: !revealed || span.hidden.is_empty(),
+            });
+        }
     }
-    layout.runs = runs
-        .into_iter()
-        .map(|r| Run {
-            range: layout.to_display(r.range.start)..layout.to_display(r.range.end),
-            ..r
-        })
-        .filter(|r| !r.range.is_empty())
-        .collect();
-    layout.runs.sort_by_key(|r| r.range.start);
+    runs.retain(|r| !r.range.is_empty());
+    runs.sort_by_key(|r| r.range.start);
+    links.sort_by_key(|l| l.range.start);
+    layout.runs = runs;
+    layout.links = links;
     layout
 }
 
-/// A piece of markdown syntax: its whole extent, the parts of it that are pure
-/// syntax (hidden unless revealed), and how its content is styled.
-#[derive(Debug)]
+/// A piece of markdown syntax: its whole extent, the parts of it that are
+/// pure syntax (hidden unless revealed), its visible content, and how
+/// that's styled.
+#[derive(Clone, Debug)]
 struct Span {
     range: Range<usize>,
-    syntax: Vec<Range<usize>>,
-    style: Style,
+    hidden: Vec<Hide>,
+    content: Range<usize>,
+    style: Option<Style>,
+    target: Option<Target>,
+    /// Inline syntax inside the content is parsed too (emphasis, a
+    /// markdown link's text); code and wikilinks are taken as written.
+    nests: bool,
 }
 
 impl Span {
-    /// The visible content: after the opening syntax, before the closing one.
-    fn content(&self) -> Range<usize> {
-        let start = self.syntax[0].end;
-        let end = match self.syntax.as_slice() {
-            [_] => self.range.end,
-            [.., close] => close.start,
-            [] => unreachable!("every span has syntax"),
-        };
-        start..end
+    /// A span of `range` showing `content` styled `style`, its syntax
+    /// `hidden`: nothing inside it is parsed, and it goes nowhere.
+    fn new(
+        range: Range<usize>,
+        hidden: Vec<Hide>,
+        content: Range<usize>,
+        style: Option<Style>,
+    ) -> Self {
+        Span {
+            range,
+            hidden,
+            content,
+            style,
+            target: None,
+            nests: false,
+        }
+    }
+
+    /// A span of `range` whose syntax is `open` bytes at its start and
+    /// `close` at its end, styled `style`.
+    fn paired(range: Range<usize>, open: usize, close: usize, style: Style) -> Self {
+        let content = range.start + open..range.end - close;
+        let hidden = vec![
+            Hide::new(range.start..content.start),
+            Hide::new(content.end..range.end),
+        ];
+        Span::new(range, hidden, content, Some(style))
+    }
+
+    /// Source shown as typed, nothing inside it parsed: an embed or image
+    /// (until their own ticket), or a run of backticks nothing closes.
+    fn literal(range: Range<usize>) -> Self {
+        Span::new(range.clone(), Vec::new(), range, None)
+    }
+
+    /// Its content is parsed for more inline syntax.
+    fn nesting(self) -> Self {
+        Span {
+            nests: true,
+            ..self
+        }
+    }
+
+    /// It's a link to `target`.
+    fn to(self, target: Target) -> Self {
+        Span {
+            target: Some(target),
+            ..self
+        }
     }
 }
 
-/// Paired inline delimiters. Code comes first so its content is never
-/// parsed; longer delimiters come before their prefixes (`**` before `*`).
+/// Emphasis delimiters, longer before their prefixes (`**` before `*`).
 const PAIRS: &[(&str, Style)] = &[
-    ("`", Style::Code),
     ("**", Style::Bold),
+    ("__", Style::Bold),
     ("~~", Style::Strike),
+    ("==", Style::Highlight),
     ("*", Style::Italic),
     ("_", Style::Italic),
 ];
 
 /// Every span of syntax in `source`: headings, then inline spans left to
-/// right, none overlapping another inline span.
+/// right, each followed by the spans nested in it.
 fn parse(source: &str) -> Vec<Span> {
     let mut spans = headings(source);
-    let mut i = 0;
-    while i < source.len() {
-        let span = wikilink(source, i).or_else(|| link(source, i)).or_else(|| {
-            PAIRS
-                .iter()
-                .find_map(|&(d, style)| paired(source, i, d, style))
-        });
-        if let Some(span) = span {
-            i = span.range.end;
-            spans.push(span);
-        } else {
-            i += source[i..].chars().next().map_or(1, char::len_utf8);
-        }
-    }
+    let parser = Parser {
+        source,
+        found: RefCell::new(vec![None; source.len() + 1]),
+        depth: Cell::new(0),
+    };
+    parser.inline(0..source.len(), &mut spans);
     spans
 }
 
-/// `delim content delim` starting at `at`, with non-empty content on one line.
-fn paired(source: &str, at: usize, delim: &str, style: Style) -> Option<Span> {
-    let rest = source[at..].strip_prefix(delim)?;
-    let len = rest.find(delim)?;
-    if len == 0 || rest[..len].contains('\n') {
-        return None;
+/// How deep spans are looked for inside the content of others: a search
+/// for a close past it steps over characters, as a run of openers would
+/// otherwise nest as deep as it's long.
+const MAX_DEPTH: usize = 16;
+
+/// The inline parser over one leaf. The span starting at each offset is
+/// worked out once: a search for a closing delimiter skips the spans
+/// inside, which would otherwise be parsed again and again.
+struct Parser<'a> {
+    source: &'a str,
+    /// By offset: not looked for yet, or the span there (if any).
+    found: RefCell<Vec<Option<Option<Rc<Span>>>>>,
+    /// How many searches for a close are under way. A span worked out at
+    /// the limit is cached as found there, which only tells in nesting
+    /// deeper than anyone writes.
+    depth: Cell<usize>,
+}
+
+impl Parser<'_> {
+    /// The spans in `range`, and those nested in them, in order.
+    fn inline(&self, range: Range<usize>, out: &mut Vec<Span>) {
+        let mut i = range.start;
+        while i < range.end {
+            match self.span_at(i).filter(|s| s.range.end <= range.end) {
+                Some(span) => {
+                    i = span.range.end;
+                    let nested = span.nests.then(|| span.content.clone());
+                    out.push(Span::clone(&span));
+                    if let Some(content) = nested {
+                        self.inline(content, out);
+                    }
+                }
+                None => i += self.char_len(i),
+            }
+        }
     }
-    let close = at + delim.len() + len;
-    // `_` only delimits at word edges, so snake_case_names stay literal.
-    if delim == "_" && (is_word_char_before(source, at) || is_word_char_at(source, close + 1)) {
-        return None;
+
+    /// The span that starts at `at`, if one does.
+    fn span_at(&self, at: usize) -> Option<Rc<Span>> {
+        if let Some(span) = &self.found.borrow()[at] {
+            return span.clone();
+        }
+        self.depth.set(self.depth.get() + 1);
+        let span = self.parse_at(at).map(Rc::new);
+        self.depth.set(self.depth.get() - 1);
+        self.found.borrow_mut()[at] = Some(span.clone());
+        span
     }
-    Some(Span {
-        range: at..close + delim.len(),
-        syntax: vec![at..at + delim.len(), close..close + delim.len()],
-        style,
+
+    /// Past the span at `at` inside another's content, or past its
+    /// character once spans are nested too deep to look for.
+    fn skip(&self, at: usize) -> usize {
+        let inner = (self.depth.get() < MAX_DEPTH)
+            .then(|| self.span_at(at))
+            .flatten();
+        inner.map_or(at + self.char_len(at), |s| s.range.end)
+    }
+
+    /// Works out the span that starts at `at`; see [`Self::span_at`].
+    fn parse_at(&self, at: usize) -> Option<Span> {
+        let s = self.source;
+        let rest = &s[at..];
+        match rest.as_bytes().first()? {
+            b'\\' => escape(s, at),
+            b'`' => code(s, at),
+            b'!' if rest[1..].starts_with('[') => {
+                let link = wikilink(s, at + 1).or_else(|| self.link(at + 1))?;
+                Some(Span::literal(at..link.range.end))
+            }
+            b'[' => wikilink(s, at).or_else(|| self.link(at)),
+            b'<' => autolink(s, at),
+            b'h' => bare_url(s, at),
+            _ => PAIRS
+                .iter()
+                .find_map(|&(delim, style)| self.emphasis(at, delim, style)),
+        }
+    }
+
+    /// The length of the character at `at`.
+    fn char_len(&self, at: usize) -> usize {
+        self.source[at..].chars().next().map_or(1, char::len_utf8)
+    }
+
+    /// `delim content delim` from `at`: the content starts and ends with
+    /// something other than whitespace, stays on one line, and spans
+    /// inside it are skipped over while looking for the close.
+    fn emphasis(&self, at: usize, delim: &str, style: Style) -> Option<Span> {
+        let s = self.source;
+        let start = at + delim.len();
+        let first = s[at..].strip_prefix(delim)?.chars().next()?;
+        if first.is_whitespace() {
+            return None;
+        }
+        // `_` only delimits at word edges, so snake_case_names stay literal.
+        let underscore = delim.starts_with('_');
+        if underscore && is_word_char_before(s, at) {
+            return None;
+        }
+        let mark = delim.chars().next()?;
+        let mut j = start;
+        // Whether `j` was reached past a span nested inside.
+        let mut after_span = false;
+        while j < s.len() && s.as_bytes()[j] != b'\n' {
+            // A close follows text, or the end of a nested span: never
+            // whitespace, nor the middle of a run of its own marker.
+            let prev = s[..j].chars().next_back();
+            let follows_text = after_span || prev.is_some_and(|c| !c.is_whitespace() && c != mark);
+            let closes = j > start
+                && follows_text
+                && s[j..].starts_with(delim)
+                && !(underscore && is_word_char_at(s, j + delim.len()));
+            if closes {
+                let range = at..j + delim.len();
+                return Some(Span::paired(range, delim.len(), delim.len(), style).nesting());
+            }
+            let next = self.skip(j);
+            after_span = next > j + self.char_len(j);
+            j = next;
+        }
+        None
+    }
+
+    /// `[text](destination)` from `at`: shows only the text, which may hold
+    /// more inline syntax.
+    fn link(&self, at: usize) -> Option<Span> {
+        let s = self.source;
+        let bytes = s.as_bytes();
+        // The text: brackets nest, code inside is skipped, one line.
+        let mut depth = 0;
+        let mut i = at;
+        let text_end = loop {
+            match *bytes.get(i)? {
+                b'\n' => return None,
+                b'\\' => i += 1,
+                b'`' => i = code(s, i).map_or(i, |c| c.range.end - 1),
+                b'[' => depth += 1,
+                b']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break i;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        };
+        if text_end == at + 1 || bytes.get(text_end + 1) != Some(&b'(') {
+            return None;
+        }
+        // The destination: parentheses nest, one line.
+        let dest_start = text_end + 2;
+        let mut depth = 0;
+        let mut j = dest_start;
+        let close = loop {
+            match *bytes.get(j)? {
+                b'\n' => return None,
+                b'(' => depth += 1,
+                b')' if depth == 0 => break j,
+                b')' => depth -= 1,
+                _ => {}
+            }
+            j += 1;
+        };
+        let destination = destination(&s[dest_start..close])?;
+        let target = if md_engine::has_scheme(destination) {
+            Target::Url(destination.to_string())
+        } else {
+            Target::Note(
+                md_engine::percent_decode(destination).unwrap_or_else(|| destination.to_string()),
+            )
+        };
+        let range = at..close + 1;
+        Some(
+            Span::paired(range, 1, close + 1 - text_end, Style::Link)
+                .nesting()
+                .to(target),
+        )
+    }
+}
+
+/// A link's destination, without the `<>` around it or a `"title"` (or
+/// `'title'`) after it; anything else after it isn't a link.
+fn destination(inside: &str) -> Option<&str> {
+    let inside = inside.trim();
+    let (dest, rest) = match inside.strip_prefix('<') {
+        Some(rest) => rest.split_at(rest.find('>')?),
+        None => inside.split_at(inside.find([' ', '\t']).unwrap_or(inside.len())),
+    };
+    let rest = rest.strip_prefix('>').unwrap_or(rest).trim();
+    let titled = rest.is_empty()
+        || ['"', '\'']
+            .iter()
+            .any(|&q| rest.len() > 1 && rest.starts_with(q) && rest.ends_with(q));
+    (!dest.is_empty() && titled).then_some(dest)
+}
+
+/// `\` and an ASCII punctuation character: the character shows as typed,
+/// the backslash is hidden.
+fn escape(source: &str, at: usize) -> Option<Span> {
+    let c = *source.as_bytes().get(at + 1)?;
+    c.is_ascii_punctuation().then(|| {
+        Span::new(
+            at..at + 2,
+            vec![Hide::new(at..at + 1)],
+            at + 1..at + 2,
+            None,
+        )
     })
 }
 
-/// `[[target]]` shows the target; `[[target|alias]]` shows the alias. An
-/// empty alias (`[[target|]]`) shows the target.
+/// A code span: a run of backticks, up to the next run as long. Nothing
+/// inside it is parsed. A run nothing closes is text, all of it.
+fn code(source: &str, at: usize) -> Option<Span> {
+    let bytes = source.as_bytes();
+    let run = bytes[at..].iter().take_while(|&&b| b == b'`').count();
+    let mut j = at + run;
+    while j < bytes.len() {
+        if bytes[j] == b'`' {
+            let len = bytes[j..].iter().take_while(|&&b| b == b'`').count();
+            if len == run {
+                return Some(Span::paired(at..j + len, run, run, Style::Code));
+            }
+            j += len;
+        } else {
+            j += 1;
+        }
+    }
+    Some(Span::literal(at..at + run))
+}
+
+/// `[[target]]` shows the target, a heading in it as `Note > Heading`;
+/// `[[target|alias]]` shows the alias. An empty alias (`[[target|]]`)
+/// shows the target. All on one line.
 fn wikilink(source: &str, at: usize) -> Option<Span> {
     let inner = source[at..].strip_prefix("[[")?;
     let len = inner
         .find("]]")
-        .filter(|&n| n > 0 && !inner[..n].contains('\n'))?;
+        .filter(|&n| n > 0 && !inner[..n].contains(['\n', '[']))?;
     let body = at + 2..at + 2 + len;
-    let mut open = at..body.start;
-    let mut close = body.end..body.end + 2;
-    if let Some(bar) = inner[..len].find('|').map(|b| body.start + b) {
-        if bar + 1 < body.end {
+    let close = body.end..body.end + 2;
+    let text = &inner[..len];
+    let (target, alias) = match text.split_once('|') {
+        // In a table the pipe is written `\|`.
+        Some((target, alias)) => (target.strip_suffix('\\').unwrap_or(target), Some(alias)),
+        None => (text, None),
+    };
+    let mut hidden = Vec::new();
+    let content = match alias {
+        Some(alias) if !alias.is_empty() => {
             // Hide "target|" along with the opening brackets.
-            open.end = bar + 1;
-        } else {
-            // Empty alias: hide the stray "|" with the closing brackets.
-            close.start = bar;
+            let content = body.end - alias.len()..body.end;
+            hidden.push(Hide::new(at..content.start));
+            content
         }
-    }
-    Some(Span {
-        range: at..close.end,
-        syntax: vec![open, close],
-        style: Style::Link,
-    })
+        _ => {
+            // The target, its headings joined by ` > `.
+            let mut open = at..body.start;
+            if target.starts_with('#') {
+                // `[[#Heading]]`: just the heading.
+                open.end += 1;
+            }
+            let content = open.end..body.start + target.len();
+            hidden.push(Hide::new(open));
+            for (i, _) in source[content.clone()].match_indices('#') {
+                let range = content.start + i..content.start + i + 1;
+                // A `#` with no heading after it is just hidden.
+                let shown = if range.end == content.end { "" } else { " > " };
+                hidden.push(Hide { range, shown });
+            }
+            content
+        }
+    };
+    // The closing brackets, and an empty alias's stray `|` with them.
+    hidden.push(Hide::new(content.end..close.end));
+    let target = Target::Note(target.to_string());
+    Some(Span::new(at..close.end, hidden, content, Some(Style::Link)).to(target))
 }
 
-/// `[text](url)` shows only the text.
-fn link(source: &str, at: usize) -> Option<Span> {
-    let inner = source[at..].strip_prefix('[')?;
-    let text_len = inner
-        .find(']')
-        .filter(|&n| n > 0 && !inner[..n].contains('\n'))?;
-    let url = inner[text_len + "]".len()..].strip_prefix('(')?;
-    let url_len = url.find(')').filter(|&n| !url[..n].contains('\n'))?;
-    let text_end = at + "[".len() + text_len;
-    let end = text_end + "](".len() + url_len + ")".len();
-    Some(Span {
-        range: at..end,
-        syntax: vec![at..at + 1, text_end..end],
-        style: Style::Link,
-    })
+/// `<https://…>`: the address, without its angle brackets.
+fn autolink(source: &str, at: usize) -> Option<Span> {
+    let inner = &source[at + 1..];
+    let len = inner.find('>')?;
+    let url = &inner[..len];
+    if !md_engine::has_scheme(url) || url.contains(char::is_whitespace) {
+        return None;
+    }
+    let target = Target::Url(url.to_string());
+    Some(Span::paired(at..at + len + 2, 1, 1, Style::Link).to(target))
+}
+
+/// A bare `http://` or `https://` address, at a word's start, up to
+/// whitespace, without the punctuation or emphasis markers that end it
+/// (a `)` stays while it closes a `(` in the address).
+fn bare_url(source: &str, at: usize) -> Option<Span> {
+    let rest = &source[at..];
+    if !(rest.starts_with("https://") || rest.starts_with("http://"))
+        || is_word_char_before(source, at)
+    {
+        return None;
+    }
+    let mut url = &rest[..rest.find(char::is_whitespace).unwrap_or(rest.len())];
+    while let Some(last) = url.chars().next_back() {
+        let unbalanced = last == ')' && url.matches(')').count() > url.matches('(').count();
+        if !(unbalanced || ".,;:!?\"'*_~=".contains(last)) {
+            break;
+        }
+        url = &url[..url.len() - 1];
+    }
+    if url.ends_with("//") {
+        return None;
+    }
+    let range = at..at + url.len();
+    let target = Target::Url(url.to_string());
+    Some(Span::new(range.clone(), Vec::new(), range, Some(Style::Link)).to(target))
 }
 
 /// ATX headings: 1–6 `#` and a space at the start of a line. The span is the
@@ -307,12 +676,16 @@ fn headings(source: &str) -> Vec<Span> {
     for line in source.split('\n') {
         let hashes = line.bytes().take_while(|&b| b == b'#').count();
         if (1..=6).contains(&hashes) && line[hashes..].starts_with(' ') {
+            let end = start + line.len();
             let marker = start..start + hashes + 1;
-            spans.push(Span {
-                range: start..start + line.len(),
-                syntax: vec![marker],
-                style: Style::Heading(hashes as u8),
-            });
+            let content = marker.end..end;
+            let style = Some(Style::Heading(hashes as u8));
+            spans.push(Span::new(
+                start..end,
+                vec![Hide::new(marker)],
+                content,
+                style,
+            ));
         }
         start += line.len() + 1;
     }
