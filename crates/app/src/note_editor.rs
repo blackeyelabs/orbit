@@ -200,8 +200,8 @@ pub enum NoteEditorEvent {
     /// "Create … as a new note" was chosen for a link being typed: the
     /// link, whose note is wanted now.
     CreateLinkedNote(String),
-    /// The inline title was edited and Enter pressed: the note's new name
-    /// (its extension kept unless another is typed).
+    /// The inline title was edited and left (or Enter pressed): the note's
+    /// new name (its extension kept unless another is typed).
     Rename(String),
 }
 
@@ -222,6 +222,8 @@ pub struct NoteEditor {
     /// The inline title: the note's name, edited to rename it. Unless
     /// it's being edited, it shows the name the note has.
     title: Entity<InputState>,
+    /// The name the title was last given, to see the note renamed.
+    title_name: String,
     /// The source as of the last edit.
     text: SharedString,
     /// What the preview renders: the source with its links rewritten.
@@ -249,8 +251,9 @@ pub struct NoteEditor {
     /// goes when focus leaves the note (else Copy elsewhere would take it).
     focus: FocusHandle,
     _focus_out: Subscription,
-    /// Enter in the inline title.
+    /// Enter in the inline title, and leaving it.
     _title_events: Subscription,
+    _title_blur: Subscription,
     _subscription: Subscription,
 }
 
@@ -288,8 +291,13 @@ impl NoteEditor {
         });
         let title_events = cx.subscribe_in(&title, window, |this, _, event, window, cx| {
             if let InputEvent::PressEnter { .. } = event {
-                this.rename_from_title(window, cx);
+                // Leaving the title renames.
+                this.source.focus_handle(cx).focus(window, cx);
             }
+        });
+        let title_focus = title.read(cx).focus_handle(cx);
+        let title_blur = cx.on_blur(&title_focus, window, |this, window, cx| {
+            this.rename_from_title(window, cx)
         });
         let shown: SharedString = preview.rewrite_links(&text).into();
         let pane = cx.new(|_| PreviewPane::new(preview_id(&path), shown.clone(), preview.clone()));
@@ -302,6 +310,7 @@ impl NoteEditor {
             saves: Saves::new(note),
             vault,
             title,
+            title_name: editable_name(&path, EntryKind::Note),
             path,
             mode,
             source,
@@ -318,6 +327,7 @@ impl NoteEditor {
             focus,
             _focus_out: focus_out,
             _title_events: title_events,
+            _title_blur: title_blur,
             _subscription: subscription,
         }
     }
@@ -361,17 +371,19 @@ impl NoteEditor {
         clipboard_guard::ask(copying, copy, window, cx);
     }
 
-    /// Enter in the inline title: asks for the rename (the window does it,
-    /// as from the file tree), and goes on to the text. Whether it worked
-    /// or not, the title then shows the name the note has.
+    /// Leaving the inline title, as in Obsidian: asks for the rename (the
+    /// window does it, as from the file tree). Whether it worked or not,
+    /// the title then shows the name the note has.
     fn rename_from_title(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let name = self.title.read(cx).value().trim().to_string();
         let unchanged = name == self.name();
         if !name.is_empty() && !unchanged {
             cx.emit(NoteEditorEvent::Rename(name));
         }
-        self.source.focus_handle(cx).focus(window, cx);
-        cx.notify();
+        // Renamed, it then shows the new name (see `render`).
+        let name = self.name();
+        self.title
+            .update(cx, |title, cx| title.set_value(name, window, cx));
     }
 
     /// The note's name as the inline title shows it: without its extension.
@@ -973,11 +985,12 @@ impl Render for NoteEditor {
         if self.source.shown(cx) != self.mode.shown() {
             self.source.show(self.mode.shown(), window, cx);
         }
-        // Not being edited (left, renamed, or the rename failed): the
-        // note's name.
+        // Renamed (from the title or elsewhere): the title shows the new
+        // name, unless it's being edited.
         let name = self.name();
         let editing = self.title.read(cx).focus_handle(cx).is_focused(window);
-        if !editing && self.title.read(cx).value() != name {
+        if !editing && self.title_name != name {
+            self.title_name = name.clone();
             self.title
                 .update(cx, |title, cx| title.set_value(name, window, cx));
         }
