@@ -8,6 +8,7 @@
 pub mod blocks;
 pub mod conceal;
 mod document;
+mod lists;
 pub mod undo;
 
 pub use document::{Clock, Document, View};

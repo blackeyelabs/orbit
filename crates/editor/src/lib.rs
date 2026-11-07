@@ -48,8 +48,11 @@ actions!(
         SelectDown,
         /// Enter.
         Newline,
-        /// Tab: accepts a suggestion, else types a tab.
+        /// Tab: accepts a suggestion, else nests the list items selected,
+        /// else types a tab.
         InsertTab,
+        /// Shift+Tab: unnests the list items selected.
+        Outdent,
         /// Escape: closes the suggestions.
         Dismiss
     ]
@@ -98,6 +101,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-x", Cut, context),
         KeyBinding::new("ctrl-v", Paste, context),
         KeyBinding::new("tab", InsertTab, context),
+        KeyBinding::new("shift-tab", Outdent, context),
         KeyBinding::new("escape", Dismiss, context),
         KeyBinding::new("ctrl-f", Search, context),
         KeyBinding::new("ctrl-h", Replace, context),
@@ -1330,8 +1334,17 @@ impl Render for LivePreview {
                 }))
                 .on_action(cx.listener(|this, _: &InsertTab, _, cx| {
                     if !this.accept_chosen_suggestion(cx) {
-                        this.edited(cx, |doc| doc.type_text("\t"))
+                        this.edited(cx, |doc| {
+                            if !doc.indent() {
+                                doc.type_text("\t")
+                            }
+                        })
                     }
+                }))
+                .on_action(cx.listener(|this, _: &Outdent, _, cx| {
+                    this.edited(cx, |doc| {
+                        doc.outdent();
+                    })
                 }))
                 .on_action(cx.listener(|this, _: &Dismiss, _, cx| {
                     if !this.close_suggestions(cx) {

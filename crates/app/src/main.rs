@@ -46,6 +46,7 @@ fn main() {
             gpui_kit::init(cx);
             appearance::init(cx);
             editor::init(cx);
+            text_editor::init(cx);
             note_editor::init(cx);
             auto_lock::init(cx);
             file_actions::init(cx);

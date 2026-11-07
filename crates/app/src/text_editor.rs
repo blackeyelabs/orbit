@@ -8,9 +8,14 @@
 
 use std::rc::Rc;
 
+use editor::Links as _;
 use editor::{LivePreview, LivePreviewEvent};
-use gpui_kit::component::input::{Editor, EditorState, InputEvent, Position};
+use gpui_kit::component::input::{
+    Editor, EditorState, Enter, IndentInline, InputEvent, OutdentInline, Position,
+};
 use gpui_kit::*;
+use live_preview::Document;
+use live_preview::conceal::Selection;
 use md_engine::TextEdit;
 use orbit_core::Scroll;
 
@@ -24,6 +29,65 @@ pub enum Shown {
     Source,
     /// Live Preview.
     LivePreview,
+}
+
+actions!(
+    text_editor,
+    [
+        /// Enter in Source mode: continues or ends a list, else Kit's.
+        SourceEnter,
+        /// Tab in Source mode: nests list items, else Kit's.
+        SourceTab,
+        /// Shift+Tab in Source mode: unnests list items, else Kit's.
+        SourceShiftTab
+    ]
+);
+
+/// The key context around Kit's source editor.
+const SOURCE_CONTEXT: &str = "SourceEditor";
+
+/// Binds Enter, Tab and Shift+Tab in Source mode over Kit's own, so they
+/// edit lists as Live Preview does. Call after Kit's `init`.
+pub fn init(cx: &mut App) {
+    let context = format!("{SOURCE_CONTEXT} > Input");
+    let context = Some(context.as_str());
+    cx.bind_keys([
+        KeyBinding::new("enter", SourceEnter, context),
+        KeyBinding::new("tab", SourceTab, context),
+        KeyBinding::new("shift-tab", SourceShiftTab, context),
+    ]);
+}
+
+/// A list key in Source mode.
+#[derive(Clone, Copy)]
+enum ListKey {
+    Enter,
+    Tab,
+    ShiftTab,
+}
+
+impl ListKey {
+    /// The list edit Live Preview makes for the key, made in `doc`; says
+    /// whether there was one.
+    fn edit(self, doc: &mut Document) -> bool {
+        match self {
+            ListKey::Enter => doc.continue_list(),
+            ListKey::Tab => doc.indent(),
+            ListKey::ShiftTab => doc.outdent(),
+        }
+    }
+
+    /// What Kit's editor does with the key.
+    fn kit_action(self) -> Box<dyn Action> {
+        match self {
+            ListKey::Enter => Box::new(Enter {
+                secondary: false,
+                shift: false,
+            }),
+            ListKey::Tab => Box::new(IndentInline),
+            ListKey::ShiftTab => Box::new(OutdentInline),
+        }
+    }
 }
 
 /// Live Preview, once it was first shown, and which editor shows now.
@@ -314,11 +378,55 @@ impl TextEditor {
     pub fn element(&self, cx: &App) -> AnyElement {
         match self.views.read(cx).live_shown() {
             Some(live) => live.clone().into_any_element(),
-            None => Editor::new(&self.state)
-                .h_full()
-                .bordered(false)
-                .into_any_element(),
+            None => {
+                let on = |key: ListKey| {
+                    let this = self.clone();
+                    move |window: &mut Window, cx: &mut App| this.list_key(key, window, cx)
+                };
+                let (enter, tab, shift_tab) =
+                    (on(ListKey::Enter), on(ListKey::Tab), on(ListKey::ShiftTab));
+                div()
+                    .size_full()
+                    .key_context(SOURCE_CONTEXT)
+                    .on_action(move |_: &SourceEnter, window, cx| enter(window, cx))
+                    .on_action(move |_: &SourceTab, window, cx| tab(window, cx))
+                    .on_action(move |_: &SourceShiftTab, window, cx| shift_tab(window, cx))
+                    .child(Editor::new(&self.state).h_full().bordered(false))
+                    .into_any_element()
+            }
         }
+    }
+
+    /// A list key in Source mode: the list edit Live Preview makes for it,
+    /// worked out by the same Document facade, as one edit; or, outside a
+    /// list (or with a link being typed, whose suggestions take Enter and
+    /// Tab), what Kit's editor does with the key.
+    fn list_key(&self, key: ListKey, window: &mut Window, cx: &mut App) {
+        let text = self.state.read(cx).value().to_string();
+        let selection = self.state.read(cx).selected_range();
+        let caret = self.state.read(cx).cursor();
+        let suggesting =
+            selection.is_empty() && self.views.read(cx).links.suggest(&text, caret).is_some();
+        let mut doc = Document::new(&text);
+        let anchor = if caret == selection.start {
+            selection.end
+        } else {
+            selection.start
+        };
+        doc.set_selection(Selection {
+            anchor,
+            head: caret,
+        });
+        if suggesting || !key.edit(&mut doc) {
+            return window.dispatch_action(key.kit_action(), cx);
+        }
+        let (range, new) = live_preview::differing(&text, doc.text());
+        let edit = TextEdit {
+            range,
+            text: new.to_string(),
+            selection: doc.selection(),
+        };
+        self.apply(edit, window, cx);
     }
 }
 
@@ -373,6 +481,7 @@ mod tests {
         cx.update(|cx| {
             gpui_kit::init(cx);
             editor::init(cx);
+            super::init(cx);
         });
         let dir = tempfile::tempdir().expect("a temporary vault");
         for name in others {
@@ -876,6 +985,68 @@ mod tests {
     /// Notes for the link tests: typing `[[orbit r` suggests the first,
     /// then offers to create "orbit r".
     const NOTES: &[&str] = &["Orbit roadmap.md", "Recipes.md"];
+
+    /// The editor `host` shows, in Source mode, focused.
+    fn source(host: &Entity<Host>, cx: &mut VisualTestContext) -> TextEditor {
+        let editor = editor(host, cx);
+        cx.update(|window, cx| editor.focus_handle(cx).focus(window, cx));
+        cx.run_until_parked();
+        editor
+    }
+
+    #[gpui::test]
+    fn list_keys_edit_a_list_alike_in_both_views(cx: &mut TestAppContext) {
+        for in_live in [true, false] {
+            let (host, cx) = open(cx, "1. one\n2. two");
+            let editor = if in_live {
+                live(&host, cx)
+            } else {
+                source(&host, cx)
+            };
+            let text = |cx: &mut VisualTestContext| {
+                cx.run_until_parked();
+                cx.update(|_, cx| editor.text(cx)).to_string()
+            };
+            cx.simulate_keystrokes("ctrl-home end enter");
+            assert_eq!(text(cx), "1. one\n2. \n3. two", "live: {in_live}");
+            cx.simulate_input("x");
+            cx.simulate_keystrokes("tab");
+            assert_eq!(text(cx), "1. one\n\t1. x\n2. two", "live: {in_live}");
+            cx.simulate_keystrokes("shift-tab");
+            assert_eq!(text(cx), "1. one\n2. x\n3. two", "live: {in_live}");
+            assert_eq!(cx.update(|_, cx| editor.caret(cx)), 11, "live: {in_live}");
+            // Each is one undo step.
+            cx.simulate_keystrokes("ctrl-z");
+            assert_eq!(text(cx), "1. one\n\t1. x\n2. two", "live: {in_live}");
+        }
+    }
+
+    #[gpui::test]
+    fn outside_a_list_source_mode_keys_do_what_kit_s_do(cx: &mut TestAppContext) {
+        let (host, cx) = open(cx, "plain");
+        let editor = source(&host, cx);
+        cx.simulate_keystrokes("ctrl-end enter");
+        cx.run_until_parked();
+        assert_eq!(cx.update(|_, cx| editor.text(cx)), "plain\n");
+    }
+
+    #[gpui::test]
+    fn in_a_list_item_enter_still_takes_a_link_suggestion(cx: &mut TestAppContext) {
+        for in_live in [true, false] {
+            let (host, cx) = open_among(cx, "", NOTES);
+            let editor = if in_live {
+                live(&host, cx)
+            } else {
+                source(&host, cx)
+            };
+            cx.simulate_input("- [[orbit r");
+            cx.run_until_parked();
+            cx.simulate_keystrokes("enter");
+            cx.run_until_parked();
+            let text = cx.update(|_, cx| editor.text(cx));
+            assert_eq!(text, "- [[Orbit roadmap]]", "live: {in_live}");
+        }
+    }
 
     #[gpui::test]
     fn typing_a_wikilink_in_live_preview_suggests_notes_and_enter_accepts(cx: &mut TestAppContext) {

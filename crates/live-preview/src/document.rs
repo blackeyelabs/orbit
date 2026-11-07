@@ -145,8 +145,62 @@ impl Document {
                 let after = Selection::caret(caret + named.len() + 1);
                 self.edit(caret..caret, &inserted, EditKind::Typing, after);
             }
-            _ => self.type_text("\n"),
+            _ => {
+                if !self.continue_list() {
+                    self.type_text("\n");
+                }
+            }
         }
+    }
+
+    /// Enter in a list item or quote line, with no selection: the next item
+    /// (or line) begins, the rest of the line going into it, and a numbered
+    /// list renumbers; in an empty one, its marker goes, ending the list.
+    /// One undo step. Says whether the caret was in one.
+    pub fn continue_list(&mut self) -> bool {
+        if !self.selection.range().is_empty() {
+            return false;
+        }
+        match crate::lists::enter(&self.text, &self.blocks, self.caret()) {
+            Some(edited) => {
+                self.take_edit(edited, EditKind::Typing);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Tab: every list item the selection touches nests a tab deeper, and
+    /// its list renumbers; one undo step. Says whether one did; if not,
+    /// nothing changes (Tab types a tab instead).
+    pub fn indent(&mut self) -> bool {
+        self.nest(false)
+    }
+
+    /// Shift+Tab: every list item the selection touches moves a level out
+    /// (a tab, or up to 4 spaces, fewer), and its list renumbers; one undo
+    /// step. Says whether one did.
+    pub fn outdent(&mut self) -> bool {
+        self.nest(true)
+    }
+
+    /// [`Self::indent`], or with `out` [`Self::outdent`].
+    fn nest(&mut self, out: bool) -> bool {
+        match crate::lists::indent(&self.text, &self.blocks, self.selection, out) {
+            Some(edited) => {
+                self.take_edit(edited, EditKind::Other);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Makes a list edit: the part of the text that changed, as one edit
+    /// of `kind`, then its selection.
+    fn take_edit(&mut self, edited: crate::lists::Edited, kind: EditKind) {
+        let (range, inserted) = crate::differing(&self.text, &edited.text);
+        let inserted = inserted.to_string();
+        self.edit(range, &inserted, kind, edited.selection);
     }
 
     /// The code block whose opening fence ends at `offset`, if it's one
