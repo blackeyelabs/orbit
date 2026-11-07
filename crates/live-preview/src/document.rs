@@ -4,8 +4,8 @@ use std::{ops::Range, time::Instant};
 
 use ropey::{LineType, Rope};
 
-use crate::blocks::{Blocks, Kind, next_grapheme, prev_grapheme};
-use crate::conceal::{Layout, Link, Run, Selection, layout};
+use crate::blocks::{Block, Blocks, Item, Kind, next_grapheme, prev_grapheme};
+use crate::conceal::{Layout, Link, Run, Selection, layout_line};
 use crate::undo::{Change, EditKind, History};
 
 /// Where the time comes from, for grouping undo steps.
@@ -208,6 +208,30 @@ impl Document {
         }
         let caret = span.start + replaced.len();
         self.edit(span, &replaced, EditKind::Other, Selection::caret(caret));
+    }
+
+    /// Ticks the task that is block `block`, or unticks it: `[ ]` and
+    /// `[x]` swap in the source, an undo step of its own, the selection
+    /// where it was. Says whether the block is a task.
+    pub fn toggle_task(&mut self, block: usize) -> bool {
+        let Some(Block {
+            kind: Kind::ListItem(Item {
+                task: Some(ticked), ..
+            }),
+            leaves,
+        }) = self.blocks.blocks.get(block)
+        else {
+            return false;
+        };
+        let leaf = &self.blocks.leaves[leaves.start];
+        let marker = &self.text[leaf.source.start..leaf.source.start + leaf.marker];
+        let Some(open) = marker.find('[') else {
+            return false;
+        };
+        let at = leaf.source.start + open + 1;
+        let mark = if *ticked { " " } else { "x" };
+        self.edit(at..at + 1, mark, EditKind::Other, self.selection);
+        true
     }
 
     /// Replaces `range` with `text` as typing, putting the caret after it.
@@ -527,6 +551,15 @@ impl Document {
         found
     }
 
+    /// Whether the selection reaches leaf `leaf`, so syntax in it can show:
+    /// a list item's or quote's marker shows anywhere on its line.
+    pub fn reveals(&self, leaf: usize) -> bool {
+        self.blocks
+            .leaves
+            .get(leaf)
+            .is_some_and(|l| self.selection.touches(&l.source))
+    }
+
     /// What each leaf shows for the current selection. A leaf the
     /// selection doesn't reach lays out fully concealed; a source block's
     /// leaf is verbatim.
@@ -535,12 +568,13 @@ impl Document {
         self.blocks
             .leaves
             .iter()
-            .map(|leaf| {
+            .enumerate()
+            .map(|(ix, leaf)| {
                 let text = &self.text[leaf.source.clone()];
                 if !leaf.conceals {
                     return View::Verbatim(text.to_string());
                 }
-                let local = if selection.touches(&leaf.source) {
+                let local = if self.reveals(ix) {
                     let rel =
                         |o: usize| o.clamp(leaf.source.start, leaf.source.end) - leaf.source.start;
                     Selection {
@@ -550,7 +584,7 @@ impl Document {
                 } else {
                     NOTHING_REVEALED
                 };
-                View::Concealed(layout(text, local))
+                View::Concealed(layout_line(text, leaf.marker, local))
             })
             .collect()
     }

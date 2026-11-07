@@ -558,7 +558,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_list_shown_as_source_keeps_its_lines(cx: &mut TestAppContext) {
+    fn down_steps_through_a_list_item_by_item(cx: &mut TestAppContext) {
         let (host, cx) = open(cx, "- one\n- two\n\nend");
         let editor = live(&host, cx);
         cx.simulate_keystrokes("right right right");
@@ -612,6 +612,35 @@ mod tests {
         );
         cx.run_until_parked();
         assert_eq!(host.read_with(cx, |h, _| h.followed.len()), 1);
+    }
+
+    #[gpui::test]
+    fn a_click_on_a_task_s_checkbox_ticks_it(cx: &mut TestAppContext) {
+        let (host, cx) = open(cx, "- [ ] buy milk\n\nEnd");
+        live(&host, cx);
+        let editor = editor(&host, cx);
+        cx.simulate_keystrokes("ctrl-end");
+        cx.run_until_parked();
+        // The box comes first on the line, past the editor's padding (24 px
+        // left, 16 top): x = 31 is inside it, 15 px wide; the text starts
+        // past its 24 px column, so x = 600 is beyond the line's end.
+        let click = |x: f32, cx: &mut VisualTestContext| {
+            cx.simulate_click(
+                gpui::point(gpui::px(x), gpui::px(26.)),
+                gpui::Modifiers::none(),
+            );
+            cx.run_until_parked();
+        };
+        click(31., cx);
+        assert_eq!(cx.update(|_, cx| editor.text(cx)), "- [x] buy milk\n\nEnd");
+        assert_eq!(host.read_with(cx, |h, _| h.edits), 1);
+        assert_eq!(cx.update(|_, cx| editor.caret(cx)), 19, "the caret stays");
+        click(31., cx);
+        assert_eq!(cx.update(|_, cx| editor.text(cx)), "- [ ] buy milk\n\nEnd");
+        // A click on its line places the caret there instead.
+        click(600., cx);
+        assert_eq!(cx.update(|_, cx| editor.text(cx)), "- [ ] buy milk\n\nEnd");
+        assert_eq!(cx.update(|_, cx| editor.caret(cx)), 14, "the line's end");
     }
 
     #[gpui::test]

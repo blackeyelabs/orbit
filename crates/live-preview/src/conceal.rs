@@ -196,7 +196,14 @@ impl Layout {
 /// Lays out `source` for `selection`: what's hidden, and how the rest is
 /// styled.
 pub fn layout(source: &str, selection: Selection) -> Layout {
-    let spans: Vec<(Span, bool)> = parse(source)
+    layout_line(source, 0, selection)
+}
+
+/// Lays out a list item's or quote's line, whose first `marker` bytes are
+/// its marker: hidden, like a heading's `#`s, unless the selection touches
+/// the line.
+pub fn layout_line(source: &str, marker: usize, selection: Selection) -> Layout {
+    let spans: Vec<(Span, bool)> = parse(source, marker)
         .into_iter()
         .map(|s| {
             let revealed = selection.touches(&s.range);
@@ -339,16 +346,27 @@ const PAIRS: &[(&str, Style)] = &[
     ("_", Style::Italic),
 ];
 
-/// Every span of syntax in `source`: headings, then inline spans left to
-/// right, each followed by the spans nested in it.
-fn parse(source: &str) -> Vec<Span> {
-    let mut spans = headings(source);
+/// Every span of syntax in `source`: headings (or the line's `marker`),
+/// then inline spans after it left to right, each followed by the spans
+/// nested in it.
+fn parse(source: &str, marker: usize) -> Vec<Span> {
+    let mut spans = if marker == 0 {
+        headings(source)
+    } else {
+        let line = 0..source.len();
+        vec![Span::new(
+            line,
+            vec![Hide::new(0..marker)],
+            marker..source.len(),
+            None,
+        )]
+    };
     let parser = Parser {
         source,
         found: RefCell::new(vec![None; source.len() + 1]),
         depth: Cell::new(0),
     };
-    parser.inline(0..source.len(), &mut spans);
+    parser.inline(marker..source.len(), &mut spans);
     spans
 }
 

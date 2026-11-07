@@ -9,6 +9,7 @@
 
 use std::{cell::RefCell, collections::HashMap, ops::Range, rc::Rc};
 
+use gpui_kit::assets::IconName;
 use gpui_kit::base::input::{
     Backspace, Copy, Cut, Delete, DeleteToNextWordEnd, DeleteToPreviousWordStart, MoveDown,
     MoveEnd, MoveHome, MoveLeft, MoveRight, MoveToEnd, MoveToNextWord, MoveToPreviousWord,
@@ -19,12 +20,12 @@ use gpui_kit::base::text::editor_host::{
     BlockNode, FlowPosition, InlineNode, LeafGeometry, LinkMark, Paragraph, RenderContext,
     TextMark, collect_leaf_geometry,
 };
-use gpui_kit::base::v_flex;
-use gpui_kit::component::ActiveTheme as _;
+use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::input::{Replace, Search};
+use gpui_kit::component::{ActiveTheme as _, Icon};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use live_preview::blocks::{Block, Kind};
+use live_preview::blocks::{Block, Item, Kind};
 use live_preview::conceal::{Style, Target};
 use live_preview::{Document, View};
 
@@ -128,6 +129,35 @@ type Decorations = HashMap<u64, Vec<(Range<usize>, Hsla)>>;
 
 /// The geometry the last prepaint collected, by leaf key.
 type Geometry = Rc<RefCell<HashMap<u64, LeafGeometry>>>;
+
+/// A list's marker column, and how far each level it nests steps in, in
+/// rems. The editor draws list rows itself, not as Kit's list node: Kit's
+/// draws every item's marker, with no way to show one line's as text while
+/// the caret is on it, nor to hear a click on a checkbox.
+const LIST_INDENT: f32 = 1.5;
+
+/// A task's checkbox, in rems: 15 px at the usual size, as Kit's.
+const CHECKBOX: f32 = 0.9375;
+
+/// Bullets, by how deep the item nests, as Kit's preview draws them.
+const BULLETS: [&str; 3] = ["•", "◦", "▪"];
+
+/// A block as drawn: its Kit node, and the row around it if it's a list
+/// item.
+struct Drawn {
+    node: BlockNode,
+    item: Option<ItemRow>,
+}
+
+/// A list item's row: its marker column (a bullet, number or checkbox)
+/// and the item's text, stepped in by how deep it nests.
+struct ItemRow {
+    item: Item,
+    /// Its block, which a click on the checkbox ticks.
+    block: usize,
+    /// The caret is on the line, so the marker shows as text instead.
+    revealed: bool,
+}
 
 /// A leaf's key in Kit: its index plus one.
 fn leaf_key(leaf: usize) -> u64 {
@@ -701,9 +731,9 @@ impl LivePreview {
             .then(|| view.to_display(start - source.start)..view.to_display(end - source.start))
     }
 
-    /// The Kit block node for each block, and the decorations (the
-    /// selection, and find's other matches) per leaf key.
-    fn render_blocks(&self, cx: &App) -> (Vec<BlockNode>, Decorations) {
+    /// How each block is drawn, and the decorations (the selection, and
+    /// find's other matches) per leaf key.
+    fn render_blocks(&self, cx: &App) -> (Vec<Drawn>, Decorations) {
         let selection_color = cx.theme().colors.selection.opacity(0.5);
         // As Kit's editor: the other matches in a fainter selection colour.
         let match_color = cx.theme().colors.selection.opacity(0.2);
@@ -746,21 +776,64 @@ impl LivePreview {
             .blocks()
             .blocks
             .iter()
-            .map(|block| {
+            .enumerate()
+            .map(|(ix, block)| {
                 let leaf = block.leaves.start;
-                match &block.kind {
+                let node = match &block.kind {
                     Kind::Heading(level) => BlockNode::Heading {
                         level: *level,
                         children: paragraph(leaf),
                         span: None,
                     },
-                    Kind::Paragraph | Kind::Empty | Kind::Source => {
+                    // A bar for each level it nests.
+                    Kind::Quote(depth) => {
+                        (0..*depth).fold(BlockNode::Paragraph(paragraph(leaf)), |inner, _| {
+                            BlockNode::Blockquote {
+                                children: vec![inner],
+                                span: None,
+                            }
+                        })
+                    }
+                    Kind::Paragraph | Kind::Empty | Kind::ListItem(_) | Kind::Source => {
                         BlockNode::Paragraph(paragraph(leaf))
                     }
-                }
+                };
+                let item = match &block.kind {
+                    Kind::ListItem(item) => Some(ItemRow {
+                        item: item.clone(),
+                        block: ix,
+                        revealed: self.doc.reveals(leaf),
+                    }),
+                    _ => None,
+                };
+                Drawn { node, item }
             })
             .collect();
         (blocks, decorations)
+    }
+}
+
+impl LivePreview {
+    /// Where each block stands in the flow, for the gaps around it. A list
+    /// item or quote line goes on into the next, with no gap between.
+    fn flows(&self, blocks: &[Drawn]) -> Vec<FlowPosition> {
+        let kinds = &self.doc.blocks().blocks;
+        let goes_on = |ix: usize| {
+            kinds
+                .get(ix + 1)
+                .is_some_and(|next| kinds[ix].kind.runs_into(&next.kind))
+        };
+        let refs: Vec<&BlockNode> = blocks.iter().map(|d| &d.node).collect();
+        (0..refs.len())
+            .map(|ix| FlowPosition::at(&refs, ix, ix + 1 == refs.len() || goes_on(ix)))
+            .collect()
+    }
+
+    /// A click on a task's checkbox: ticks or unticks it.
+    fn toggle_task(&mut self, block: usize, cx: &mut Context<Self>) {
+        self.edited(cx, |doc| {
+            doc.toggle_task(block);
+        });
     }
 }
 
@@ -1070,24 +1143,113 @@ impl Element for HostElement {
     }
 }
 
+/// A list item's row around its rendered `text`: stepped in by its depth,
+/// then its marker column (unless the marker shows as text), then the text.
+/// A ticked task's text steps back, as in Kit's preview.
+fn item_row(
+    row: &ItemRow,
+    text: AnyElement,
+    editor: &Entity<LivePreview>,
+    window: &Window,
+    cx: &App,
+) -> AnyElement {
+    let theme = cx.theme();
+    let muted = theme.muted_foreground;
+    let Item {
+        depth,
+        number,
+        task,
+    } = row.item;
+    let column = || {
+        div()
+            .flex_none()
+            .w(rems(LIST_INDENT))
+            .h(window.line_height())
+            .flex()
+            .items_center()
+            .text_color(muted)
+    };
+    // A bullet or number, then a task's box: an ordered task has both.
+    let mut markers = Vec::new();
+    if !row.revealed {
+        match (number, task) {
+            (Some(number), _) => {
+                markers.push(column().justify_end().pr_2().child(format!("{number}.")))
+            }
+            (None, None) => markers.push(
+                column()
+                    .justify_center()
+                    .child(BULLETS[depth % BULLETS.len()]),
+            ),
+            (None, Some(_)) => {}
+        }
+        if let Some(ticked) = task {
+            markers.push(column().child(checkbox(ticked, row.block, editor, cx)));
+        }
+    }
+    h_flex()
+        .w_full()
+        .items_start()
+        .pl(rems(LIST_INDENT * depth as f32))
+        .children(markers)
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .when(task == Some(true), |this| this.text_color(muted))
+                .child(text),
+        )
+        .into_any_element()
+}
+
+/// A task's checkbox, ticked or not: a click on it ticks or unticks block
+/// `block`, nothing else.
+fn checkbox(ticked: bool, block: usize, editor: &Entity<LivePreview>, cx: &App) -> Div {
+    let theme = cx.theme();
+    let editor = editor.clone();
+    div()
+        .size(rems(CHECKBOX))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(4.))
+        .border(px(1.5))
+        .border_color(theme.muted_foreground)
+        .cursor_pointer()
+        .when(ticked, |this| {
+            this.bg(theme.link)
+                .border_color(theme.link)
+                .text_color(theme.background)
+                .child(Icon::new(IconName::Check).size(rems(0.75)))
+        })
+        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+            cx.stop_propagation();
+            editor.update(cx, |editor, cx| editor.toggle_task(block, cx));
+        })
+}
+
 impl Render for LivePreview {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // A click on a link is the editor's (see `on_mouse_down`).
         let rcx = RenderContext::from_app(cx).on_link_click(|_, _, _, _| {});
         let (blocks, decorations) = self.render_blocks(cx);
-        let flows: Vec<FlowPosition> = {
-            let refs: Vec<&BlockNode> = blocks.iter().collect();
-            (0..refs.len())
-                .map(|ix| FlowPosition::at(&refs, ix, ix + 1 == refs.len()))
-                .collect()
-        };
+        let flows = self.flows(&blocks);
         let blocks = Rc::new(blocks);
+        let editor = cx.entity();
         // Only the blocks the list lays out (those in view) render.
         let content = list(self.list.clone(), move |ix, window, cx| {
+            let drawn = &blocks[ix];
+            let node = drawn
+                .node
+                .render_with_id(("block", ix), flows[ix], &rcx, window, cx);
+            let body = match &drawn.item {
+                Some(row) => item_row(row, node, &editor, window, cx),
+                None => node,
+            };
             div()
                 .px_6()
                 .when(ix == 0, |this| this.pt_4())
-                .child(blocks[ix].render_with_id(("block", ix), flows[ix], &rcx, window, cx))
+                .child(body)
                 .into_any_element()
         })
         .size_full()

@@ -3,9 +3,11 @@
 //! editor renders as one keyed text leaf. Source outside every leaf (the
 //! blank line between blocks) is never under the caret.
 //!
-//! Paragraphs and headings render; every other block (lists, quotes, code,
-//! tables, rules, front matter) shows its source as typed, nothing
-//! concealed, until its own Live Preview ticket gives it a widget.
+//! Paragraphs, headings, list items and quotes render; every other block
+//! (code, tables, rules, front matter) shows its source as typed, nothing
+//! concealed, until its own Live Preview ticket gives it a widget. Each
+//! list item and quote line is a block of its own, its leaf starting with
+//! the line's marker (`-`, `1.`, `- [ ]`, `>`): see [`Leaf::marker`].
 
 use std::ops::Range;
 
@@ -21,8 +23,42 @@ pub enum Kind {
     Heading(u8),
     /// A blank line the caret can stand on: an empty paragraph.
     Empty,
+    /// One line of a list: its leaf starts at the marker, the indentation
+    /// before it left out (drawn as indent, never as text).
+    ListItem(Item),
+    /// One line of a quote, nested this deep (`> >` is 2).
+    Quote(usize),
     /// A block shown as its source, verbatim: the leaf is all of it.
     Source,
+}
+
+/// A list item's shape.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Item {
+    /// How deep it nests in its list: 0 at the list's left edge.
+    pub depth: usize,
+    /// An ordered item's number, as written.
+    pub number: Option<u32>,
+    /// A task's checkbox: whether it's ticked.
+    pub task: Option<bool>,
+}
+
+/// A list level open while the items below are parsed: where its last
+/// item's marker and text start, in columns.
+struct Level {
+    indent: usize,
+    content: usize,
+}
+
+impl Kind {
+    /// Whether a block of this kind runs straight on into a `next` one, with
+    /// no gap: a list's items, a quote's lines.
+    pub fn runs_into(&self, next: &Kind) -> bool {
+        matches!(
+            (self, next),
+            (Kind::ListItem(_), Kind::ListItem(_)) | (Kind::Quote(_), Kind::Quote(_))
+        )
+    }
 }
 
 /// One block and the leaves it owns (indices into [`Blocks::leaves`]).
@@ -42,6 +78,9 @@ pub struct Leaf {
     pub source: Range<usize>,
     /// Prose conceals its syntax; a [`Kind::Source`] block doesn't.
     pub conceals: bool,
+    /// How many bytes at its start are its line's list or quote marker,
+    /// hidden unless the caret is on the line; 0 for other leaves.
+    pub marker: usize,
 }
 
 /// A note split into blocks and leaves. Rebuilt from the source after
@@ -120,20 +159,100 @@ fn starts_table(line: &str, next: Option<&str>) -> bool {
         && next.is_some_and(|n| is_delimiter_row(n) && cell_count(n) == cell_count(line))
 }
 
-/// A list item's line: a bullet (`-`, `*`, `+`) or a number and `.`, then
-/// a space.
+/// A list item's line, parsed.
+struct ListLine {
+    /// The bytes of indentation before the marker.
+    indent: usize,
+    /// The indentation's width, a tab counting 4.
+    columns: usize,
+    /// The column the item's text starts at, past the bullet or number and
+    /// its space: an item indented this far nests under it.
+    content: usize,
+    /// The marker's bytes, from the bullet or number to the item's text:
+    /// `- `, `12. `, `- [x] `.
+    marker: usize,
+    /// An ordered item's number.
+    number: Option<u32>,
+    /// A task's checkbox: whether it's ticked.
+    task: Option<bool>,
+}
+
+/// The most digits an ordered item's number has, as in CommonMark.
+const MAX_DIGITS: usize = 9;
+
+/// A list item's line: a bullet (`-`, `*`, `+`) or a number and `.` or
+/// `)`, then a space; then maybe a task's `[ ]` or `[x]`.
+fn list_line(text: &str) -> Option<ListLine> {
+    let rest = text.trim_start_matches([' ', '\t']);
+    let indent = text.len() - rest.len();
+    let columns = text[..indent]
+        .chars()
+        .map(|c| if c == '\t' { 4 } else { 1 })
+        .sum();
+    let (number, after) = match ["- ", "* ", "+ "].iter().find_map(|m| rest.strip_prefix(m)) {
+        Some(after) => (None, after),
+        None => {
+            let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+            if !(1..=MAX_DIGITS).contains(&digits) {
+                return None;
+            }
+            let after = [". ", ") "]
+                .iter()
+                .find_map(|m| rest[digits..].strip_prefix(m))?;
+            (Some(rest[..digits].parse().ok()?), after)
+        }
+    };
+    let content = columns + (rest.len() - after.len());
+    let (task, after) = match after.get(..3) {
+        Some(b @ ("[ ]" | "[x]" | "[X]")) if after.len() == 3 || after[3..].starts_with(' ') => {
+            (Some(b != "[ ]"), &after[(after.len()).min(4)..])
+        }
+        _ => (None, after),
+    };
+    Some(ListLine {
+        indent,
+        columns,
+        content,
+        marker: rest.len() - after.len(),
+        number,
+        task,
+    })
+}
+
+/// A list item's line.
 fn is_list_item(text: &str) -> bool {
-    let rest = text.trim_start();
-    if ["- ", "* ", "+ "].iter().any(|m| rest.starts_with(m)) {
-        return true;
+    list_line(text).is_some()
+}
+
+/// A quote's line, parsed.
+struct QuoteLine {
+    /// The marker's bytes: up to 3 spaces, then each `>` and the space
+    /// after it.
+    marker: usize,
+    /// How deep it nests: `> >` is 2.
+    depth: usize,
+}
+
+/// A quote's line.
+fn quote_line(text: &str) -> Option<QuoteLine> {
+    let spaces = text.bytes().take_while(|&b| b == b' ').count();
+    if spaces > 3 || !text[spaces..].starts_with('>') {
+        return None;
     }
-    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
-    digits > 0 && rest[digits..].starts_with(". ")
+    let (mut at, mut depth) = (spaces, 0);
+    while text[at..].starts_with('>') {
+        at += 1;
+        depth += 1;
+        if text[at..].starts_with(' ') {
+            at += 1;
+        }
+    }
+    Some(QuoteLine { marker: at, depth })
 }
 
 /// A quote's line.
 fn is_quote(text: &str) -> bool {
-    text.trim_start().starts_with('>')
+    quote_line(text).is_some()
 }
 
 /// A thematic break: three or more `-`, `*` or `_`, spaces allowed between.
@@ -172,6 +291,9 @@ impl Blocks {
         }
         // A blank line right after a block only separates it from the next.
         let mut after_block = i > 0;
+        // The list levels open: blank lines between items keep them, any
+        // other block closes them.
+        let mut levels = Vec::new();
         while i < lines.len() {
             let line = &lines[i];
             if is_blank(line.text) {
@@ -191,6 +313,9 @@ impl Blocks {
                 continue;
             }
             after_block = true;
+            if !is_list_item(line.text) {
+                levels.clear();
+            }
             let next = lines.get(i + 1).map(|l| l.text);
             // Where a block that runs while `more` holds ends.
             let run_while = |more: &dyn Fn(&str) -> bool| {
@@ -215,12 +340,12 @@ impl Blocks {
                 i = end;
             } else if is_list_item(line.text) {
                 let end = run_while(&is_list_item);
-                doc.push_source(&lines[i..end]);
+                doc.push_list(&lines[i..end], &mut levels);
                 i = end;
-            } else if is_quote(line.text) {
-                let end = run_while(&is_quote);
-                doc.push_source(&lines[i..end]);
-                i = end;
+            } else if let Some(quote) = quote_line(line.text) {
+                let kind = Kind::Quote(quote.depth);
+                doc.push_line(kind, line.start..line.end(), quote.marker);
+                i += 1;
             } else {
                 let end = (i + 1..lines.len())
                     .find(|&j| {
@@ -243,12 +368,65 @@ impl Blocks {
 
     /// Adds a block with one leaf.
     fn push(&mut self, kind: Kind, source: Range<usize>, conceals: bool) {
+        self.push_leaf(
+            kind,
+            Leaf {
+                source,
+                conceals,
+                marker: 0,
+            },
+        );
+    }
+
+    /// Adds a block of one line whose first `marker` bytes are its list or
+    /// quote marker.
+    fn push_line(&mut self, kind: Kind, source: Range<usize>, marker: usize) {
+        let leaf = Leaf {
+            source,
+            conceals: true,
+            marker,
+        };
+        self.push_leaf(kind, leaf);
+    }
+
+    /// Adds a block of one leaf.
+    fn push_leaf(&mut self, kind: Kind, leaf: Leaf) {
         let first = self.leaves.len();
-        self.leaves.push(Leaf { source, conceals });
+        self.leaves.push(leaf);
         self.blocks.push(Block {
             kind,
             leaves: first..first + 1,
         });
+    }
+
+    /// Adds a list's lines, an item each, under the `levels` open. An item
+    /// indented as far as the text of the one above nests under it; one
+    /// indented less goes back out to the level it's within.
+    fn push_list(&mut self, lines: &[Line], levels: &mut Vec<Level>) {
+        for (line, item) in lines.iter().filter_map(|l| Some((l, list_line(l.text)?))) {
+            // Out of each level the item doesn't reach the text of; a
+            // level it starts within is its own, and its last item's.
+            while let Some(level) = levels.last()
+                && item.columns < level.content
+            {
+                let within = item.columns >= level.indent;
+                levels.pop();
+                if within {
+                    break;
+                }
+            }
+            levels.push(Level {
+                indent: item.columns,
+                content: item.content,
+            });
+            let kind = Kind::ListItem(Item {
+                depth: levels.len() - 1,
+                number: item.number,
+                task: item.task,
+            });
+            let start = line.start + item.indent;
+            self.push_line(kind, start..line.end(), item.marker);
+        }
     }
 
     /// Adds a block shown as its source: these lines, verbatim.
