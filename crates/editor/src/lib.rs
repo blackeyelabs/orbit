@@ -29,9 +29,11 @@ use live_preview::blocks::{Align, Block, Item, Kind};
 use live_preview::conceal::{Style, Target};
 use live_preview::{Document, View};
 
+mod callout;
 mod code;
 mod find;
 mod images;
+mod math;
 mod suggest;
 
 pub use suggest::{Links, Suggestion, Suggestions};
@@ -163,6 +165,10 @@ enum Frame {
     Item(ItemRow),
     /// A code block's picker button and shown fence.
     Code(code::CodeFrame),
+    /// A callout line's part of its box.
+    Callout(callout::CalloutFrame),
+    /// A typeset math block, centred on its line.
+    Math,
 }
 
 /// A list item's row: its marker column (a bullet, number or checkbox)
@@ -221,6 +227,8 @@ pub struct LivePreview {
     popup: Option<suggest::Popup>,
     /// The language picker, while it's open.
     picker: Option<code::Picker>,
+    /// Math typeset so far.
+    math: RefCell<math::MathCache>,
 }
 
 impl EventEmitter<LivePreviewEvent> for LivePreview {}
@@ -247,6 +255,7 @@ impl LivePreview {
             find: None,
             popup: None,
             picker: None,
+            math: RefCell::default(),
         };
         this.relayout();
         this
@@ -767,7 +776,9 @@ impl LivePreview {
             let mut p = Paragraph::default();
             let marks = marks(view, marked, &|target| self.links.resolves(target));
             let text = view.display_text();
-            for node in images.inline_nodes(text, marks, view.images(), self.links.as_ref()) {
+            let objects = (view.images(), view.maths());
+            let mut math = self.math.borrow_mut();
+            for node in images.inline_nodes(text, marks, objects, self.links.as_ref(), &mut math) {
                 p.push(node);
             }
             p.with_leaf_key(leaf_key(leaf))
@@ -795,6 +806,10 @@ impl LivePreview {
             decorate(m, match_color);
         }
         decorate(&selection, selection_color);
+        // Whether each leaf's syntax shows, worked out once for the frame.
+        let reveal = self.doc.blocks().reveal_ranges();
+        let anchored = self.doc.anchored_selection();
+        let reveals = |leaf: usize| reveal.get(leaf).is_some_and(|r| anchored.touches(r));
         let blocks = self
             .doc
             .blocks()
@@ -830,22 +845,39 @@ impl LivePreview {
                     // A cell per leaf, row by row; a short row's missing
                     // cells drawn empty, with no leaf.
                     Kind::Table(table) => table_node(table, block.leaves.clone(), &paragraph),
-                    Kind::Paragraph | Kind::Empty | Kind::ListItem(_) | Kind::Source => {
-                        BlockNode::Paragraph(paragraph(leaf))
-                    }
+                    // Drawn as a quote while its source shows.
+                    Kind::Callout(_) if reveals(leaf) => BlockNode::Blockquote {
+                        children: vec![BlockNode::Paragraph(paragraph(leaf))],
+                        span: None,
+                    },
+                    Kind::Paragraph
+                    | Kind::Empty
+                    | Kind::ListItem(_)
+                    | Kind::Callout(_)
+                    | Kind::Math
+                    | Kind::Source => BlockNode::Paragraph(paragraph(leaf)),
                 };
                 let frame = match &block.kind {
                     Kind::ListItem(item) => Frame::Item(ItemRow {
                         item: item.clone(),
                         block: ix,
-                        revealed: self.doc.reveals(leaf),
+                        revealed: reveals(leaf),
                     }),
                     Kind::Code(code) => Frame::Code(code::CodeFrame {
                         block: ix,
                         code: code.clone(),
-                        revealed: self.doc.reveals(leaf),
+                        revealed: reveals(leaf),
                         is_last: ix + 1 == self.doc.blocks().blocks.len(),
                     }),
+                    Kind::Callout(line) if !reveals(leaf) => {
+                        let next = self.doc.blocks().blocks.get(ix + 1);
+                        let last = next.is_none_or(|n| !block.kind.runs_into(&n.kind));
+                        Frame::Callout(callout::CalloutFrame {
+                            line: line.clone(),
+                            last,
+                        })
+                    }
+                    Kind::Math if !reveals(leaf) => Frame::Math,
                     _ => Frame::Plain,
                 };
                 Drawn { node, frame }
@@ -1307,6 +1339,7 @@ impl Render for LivePreview {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // A click on a link is the editor's (see `on_mouse_down`).
         let images = images::FrameImages::default();
+        self.math.borrow_mut().frame(window, cx);
         let (blocks, decorations) = self.render_blocks(&images, cx);
         let rcx = RenderContext::from_app(cx)
             .on_link_click(|_, _, _, _| {})
@@ -1323,6 +1356,12 @@ impl Render for LivePreview {
             let body = match &drawn.frame {
                 Frame::Item(row) => item_row(row, node, &editor, window, cx),
                 Frame::Code(frame) => code::code_frame(frame, node, &editor, cx),
+                Frame::Callout(frame) => callout::callout_frame(frame, node, cx),
+                Frame::Math => h_flex()
+                    .w_full()
+                    .justify_center()
+                    .child(node)
+                    .into_any_element(),
                 Frame::Plain => node,
             };
             div()

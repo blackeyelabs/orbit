@@ -1,7 +1,8 @@
-//! Images in Live Preview: a leaf's text split around the images in it,
-//! each drawn by Kit as an inline image, read from the vault through the
-//! owner ([`crate::Links::image`]). An image the vault doesn't have is a
-//! small grey box, so it can still be seen and clicked.
+//! Images and math in Live Preview: a leaf's text split around the objects
+//! in it, each drawn by Kit as an inline image. Images are read from the
+//! vault through the owner ([`crate::Links::image`]); an image the vault
+//! doesn't have is a small grey box, so it can still be seen and clicked.
+//! Math is typeset ([`crate::math`]).
 
 use std::{
     collections::HashMap,
@@ -11,15 +12,22 @@ use std::{
 
 use gpui_kit::base::text::editor_host::{ImageNode, InlineNode, TextMark};
 use gpui_kit::*;
-use live_preview::conceal::{Image as ImageSpec, OBJECT, Target};
+use live_preview::conceal::{Image as ImageSpec, Math, OBJECT, Target};
 
 use crate::Links;
+use crate::math::MathCache;
 
 /// Where an image read from the vault is, to Kit: this, then its target.
 const VAULT_SCHEME: &str = "orbit-image:";
 
 /// An image the vault doesn't have: a grey box with a border.
 const MISSING: &str = "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='48' height='32'><rect x='0.5' y='0.5' width='47' height='31' rx='4' fill='%23888' fill-opacity='0.15' stroke='%23888' stroke-opacity='0.6'/></svg>";
+
+/// An object in a leaf's text.
+enum Object<'a> {
+    Image(&'a ImageSpec),
+    Math(&'a Math),
+}
 
 /// The images one frame draws, by the address Kit asks for them by.
 #[derive(Clone, Default)]
@@ -59,14 +67,29 @@ impl FrameImages {
         node
     }
 
+    /// Kit's node for `math`, typeset through `cache` (kept for this
+    /// frame).
+    fn math_node(&self, math: &Math, cache: &mut MathCache) -> ImageNode {
+        let typeset = cache.typeset(&math.latex, math.display);
+        let url = format!("orbit-math:{}:{}", math.display, math.latex);
+        let mut images = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        images.insert(url.clone(), typeset.image);
+        let mut node = ImageNode::default();
+        node.url = url.into();
+        node.width = Some(px(typeset.width).into());
+        node.height = Some(px(typeset.height).into());
+        node
+    }
+
     /// A leaf's display `text` as Kit's inline nodes: its runs of text, with
-    /// their `marks`, and its `images` between them.
+    /// their `marks`, and its objects between them, `images` and `maths`.
     pub(crate) fn inline_nodes(
         &self,
         text: &str,
         marks: Vec<(Range<usize>, TextMark)>,
-        images: &[ImageSpec],
+        (images, maths): (&[ImageSpec], &[Math]),
         links: &dyn Links,
+        cache: &mut MathCache,
     ) -> Vec<InlineNode> {
         let mut nodes = Vec::with_capacity(2 * images.len() + 1);
         let mut start = 0;
@@ -84,18 +107,28 @@ impl FrameImages {
                 .collect();
             nodes.push(InlineNode::new(text[range].to_string()).marks(run_marks));
         };
-        for image in images {
-            if start < image.at {
-                text_run(start..image.at, &mut nodes);
+        // The objects in order: each image or formula with where it is.
+        let mut objects: Vec<(usize, Object)> = images
+            .iter()
+            .map(|i| (i.at, Object::Image(i)))
+            .chain(maths.iter().map(|m| (m.at, Object::Math(m))))
+            .collect();
+        objects.sort_by_key(|(at, _)| *at);
+        for (at, object) in objects {
+            if start < at {
+                text_run(start..at, &mut nodes);
             }
-            let mut node = self.node(image, links);
-            // An image in a link is the link's, as its text would be.
+            let mut node = match object {
+                Object::Image(image) => self.node(image, links),
+                Object::Math(math) => self.math_node(math, cache),
+            };
+            // An object in a link is the link's, as its text would be.
             node.link = marks
                 .iter()
-                .find(|(r, mark)| r.contains(&image.at) && mark.link.is_some())
+                .find(|(r, mark)| r.contains(&at) && mark.link.is_some())
                 .and_then(|(_, mark)| mark.link.clone());
             nodes.push(InlineNode::image(node));
-            start = image.at + OBJECT.len();
+            start = at + OBJECT.len();
         }
         if start < text.len() || nodes.is_empty() {
             text_run(start..text.len(), &mut nodes);

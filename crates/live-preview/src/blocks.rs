@@ -30,8 +30,15 @@ pub enum Kind {
     ListItem(Item),
     /// One line of a quote, nested this deep (`> >` is 2).
     Quote(usize),
+    /// One line of a callout: a quote whose first line is `[!type]`. A
+    /// quote nested in it (`> >`) is drawn as one of its lines, its depth
+    /// not shown.
+    Callout(CalloutLine),
     /// A fenced code block.
     Code(Code),
+    /// A `$$` math block: its leaf all of it, typeset unless the caret is in
+    /// it.
+    Math,
     /// A table: a leaf per cell, row by row; its delimiter row has none.
     Table(Table),
     /// A block shown as its source, verbatim: the leaf is all of it.
@@ -47,6 +54,15 @@ pub struct Item {
     pub number: Option<u32>,
     /// A task's checkbox: whether it's ticked.
     pub task: Option<bool>,
+}
+
+/// A callout line's shape.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CalloutLine {
+    /// How the callout looks.
+    pub kind: md_engine::CalloutKind,
+    /// It's the callout's first line, its title.
+    pub title: bool,
 }
 
 /// A fenced code block's shape.
@@ -107,11 +123,16 @@ struct Level {
 
 impl Kind {
     /// Whether a block of this kind runs straight on into a `next` one, with
-    /// no gap: a list's items, a quote's lines.
+    /// no gap: a list's items, a quote's lines, a callout's.
     pub fn runs_into(&self, next: &Kind) -> bool {
         matches!(
             (self, next),
-            (Kind::ListItem(_), Kind::ListItem(_)) | (Kind::Quote(_), Kind::Quote(_))
+            (Kind::ListItem(_), Kind::ListItem(_))
+                | (Kind::Quote(_), Kind::Quote(_))
+                | (
+                    Kind::Callout(_),
+                    Kind::Callout(CalloutLine { title: false, .. })
+                )
         )
     }
 }
@@ -135,14 +156,23 @@ pub struct Leaf {
 }
 
 /// How a leaf shows: what of it is concealed while the caret isn't in it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Shows {
     /// Prose: its inline syntax, and its first `marker` bytes, a list
     /// item's or quote's line marker (0 for other prose).
     Prose { marker: usize },
+    /// A callout's title line: its inline syntax, and its first `marker`
+    /// bytes (its `>` and `[!type]`), `title` shown in their place when it
+    /// has no title of its own.
+    Title {
+        marker: usize,
+        title: Option<String>,
+    },
     /// Code, as typed: only its first `fence` bytes, the opening fence's
     /// line.
     Code { fence: usize },
+    /// A math block: all of it, as one object to typeset.
+    Math,
     /// Nothing: a [`Kind::Source`] block.
     Source,
 }
@@ -245,6 +275,26 @@ impl Fence {
 /// A code fence's opening line.
 fn is_fence(text: &str) -> bool {
     opening_fence(text).is_some()
+}
+
+/// The `$$` math block starting at line `i`, if one does: the index of the
+/// line after its last. It starts with `$$` (indented 3 spaces at most) and
+/// ends on a line that ends with `$$`, its first or one before a blank
+/// line; with no such line it's prose.
+fn math_block_end(lines: &[Line], i: usize) -> Option<usize> {
+    let first = lines[i].text;
+    let indent = first.bytes().take_while(|&b| b == b' ').count();
+    let text = first.trim();
+    if indent > 3 || !text.starts_with("$$") {
+        return None;
+    }
+    if text.len() >= 4 && text.ends_with("$$") {
+        return Some(i + 1);
+    }
+    (i + 1..lines.len())
+        .take_while(|&j| !is_blank(lines[j].text))
+        .find(|&j| lines[j].text.trim().ends_with("$$"))
+        .map(|j| j + 1)
 }
 
 /// A table row: a line that starts with a pipe.
@@ -397,16 +447,16 @@ fn is_list_item(text: &str) -> bool {
 }
 
 /// A quote's line, parsed.
-struct QuoteLine {
+pub(crate) struct QuoteLine {
     /// The marker's bytes: up to 3 spaces, then each `>` and the space
     /// after it.
-    marker: usize,
+    pub(crate) marker: usize,
     /// How deep it nests: `> >` is 2.
     depth: usize,
 }
 
 /// A quote's line.
-fn quote_line(text: &str) -> Option<QuoteLine> {
+pub(crate) fn quote_line(text: &str) -> Option<QuoteLine> {
     let spaces = text.bytes().take_while(|&b| b == b' ').count();
     if spaces > 3 || !text[spaces..].starts_with('>') {
         return None;
@@ -420,6 +470,35 @@ fn quote_line(text: &str) -> Option<QuoteLine> {
         }
     }
     Some(QuoteLine { marker: at, depth })
+}
+
+/// A callout's title line, parsed.
+struct CalloutTitle {
+    /// How it looks.
+    kind: md_engine::CalloutKind,
+    /// The marker's bytes: the `>`, `[!type]`, a fold sign and the spaces
+    /// before the title.
+    marker: usize,
+    /// What it shows if it has no title: its type's name.
+    default: Option<String>,
+}
+
+/// A callout's first line: `> [!type]`, maybe `-` or `+`, then its title.
+fn callout_title(text: &str) -> Option<CalloutTitle> {
+    let quote = quote_line(text).filter(|q| q.depth == 1)?;
+    let callout = md_engine::callout(text)?;
+    let rest = &text[quote.marker..];
+    let close = rest.find(']')? + 1;
+    let after = &rest[close..];
+    let after = after.strip_prefix(['-', '+']).unwrap_or(after);
+    let spaces = after.len() - after.trim_start().len();
+    let marker = text.len() - after.len() + spaces;
+    let untitled = text[marker..].trim().is_empty();
+    Some(CalloutTitle {
+        kind: callout.kind,
+        marker,
+        default: untitled.then_some(callout.title),
+    })
 }
 
 /// A quote's line.
@@ -498,6 +577,16 @@ impl Blocks {
             if let Some(level) = heading_level(line.text) {
                 doc.push(Kind::Heading(level), line.start..line.end());
                 i += 1;
+            } else if let Some(end) = math_block_end(&lines, i) {
+                let source = line.start..lines[end - 1].end();
+                doc.push_leaf(
+                    Kind::Math,
+                    Leaf {
+                        source,
+                        shows: Shows::Math,
+                    },
+                );
+                i = end;
             } else if let Some(fence) = opening_fence(line.text) {
                 let close_ix = (i + 1..lines.len()).find(|&j| fence.closed_by(lines[j].text));
                 let close = close_ix.map(|c| lines[c].text.trim().to_string());
@@ -517,6 +606,12 @@ impl Blocks {
                 let end = run_while(&is_list_item);
                 doc.push_list(&lines[i..end], &mut levels);
                 i = end;
+            } else if let Some(callout) =
+                callout_title(line.text).filter(|_| i == 0 || !is_quote(lines[i - 1].text))
+            {
+                let end = run_while(&is_quote);
+                doc.push_callout(&lines[i..end], callout);
+                i = end;
             } else if let Some(quote) = quote_line(line.text) {
                 let kind = Kind::Quote(quote.depth);
                 doc.push_line(kind, line.start..line.end(), quote.marker);
@@ -527,6 +622,7 @@ impl Blocks {
                         let next = lines.get(j + 1).map(|l| l.text);
                         is_blank(lines[j].text)
                             || starts_block(lines[j].text)
+                            || math_block_end(&lines, j).is_some()
                             || starts_table(lines[j].text, next)
                     })
                     .unwrap_or(lines.len());
@@ -616,6 +712,59 @@ impl Blocks {
             let start = line.start + item.indent;
             self.push_line(kind, start..line.end(), item.marker);
         }
+    }
+
+    /// Adds a callout: its title line and the quote lines after it, a
+    /// block each.
+    fn push_callout(&mut self, lines: &[Line], title: CalloutTitle) {
+        let Some((first, body)) = lines.split_first() else {
+            return;
+        };
+        let kind = title.kind;
+        self.push_leaf(
+            Kind::Callout(CalloutLine { kind, title: true }),
+            Leaf {
+                source: first.start..first.end(),
+                shows: Shows::Title {
+                    marker: title.marker,
+                    title: title.default,
+                },
+            },
+        );
+        for line in body {
+            let marker = quote_line(line.text).map_or(0, |q| q.marker);
+            let kind = Kind::Callout(CalloutLine { kind, title: false });
+            self.push_line(kind, line.start..line.end(), marker);
+        }
+    }
+
+    /// The source each leaf's syntax shows for a selection touching:
+    /// itself, or a callout's line the whole callout.
+    pub fn reveal_ranges(&self) -> Vec<Range<usize>> {
+        let mut ranges: Vec<Range<usize>> = self.leaves.iter().map(|l| l.source.clone()).collect();
+        let mut b = 0;
+        while b < self.blocks.len() {
+            let Kind::Callout(CalloutLine { title: true, .. }) = self.blocks[b].kind else {
+                b += 1;
+                continue;
+            };
+            let end = (b + 1..self.blocks.len())
+                .find(|&e| {
+                    !matches!(
+                        self.blocks[e].kind,
+                        Kind::Callout(CalloutLine { title: false, .. })
+                    )
+                })
+                .unwrap_or(self.blocks.len());
+            let first = self.blocks[b].leaves.start;
+            let last = self.blocks[end - 1].leaves.end - 1;
+            let span = self.leaves[first].source.start..self.leaves[last].source.end;
+            for range in &mut ranges[first..=last] {
+                *range = span.clone();
+            }
+            b = end;
+        }
+        ranges
     }
 
     /// Adds a table: its header row, delimiter row, then rows (`lines`).

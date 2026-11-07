@@ -7,7 +7,9 @@ use ropey::{LineType, Rope};
 use crate::blocks::{
     Block, Blocks, Code, Item, Kind, Shows, next_grapheme, opening_fence, prev_grapheme,
 };
-use crate::conceal::{Layout, Link, Run, Selection, layout_code, layout_line};
+use crate::conceal::{
+    Layout, Link, Run, Selection, layout_code, layout_line, layout_math, layout_titled,
+};
 use crate::undo::{Change, EditKind, History};
 
 /// Where the time comes from, for grouping undo steps.
@@ -350,10 +352,10 @@ impl Document {
             return false;
         };
         let leaf = &self.blocks.leaves[leaves.start];
-        let Shows::Prose { marker } = leaf.shows else {
+        let Shows::Prose { marker } = &leaf.shows else {
             return false;
         };
-        let marker = &self.text[leaf.source.start..leaf.source.start + marker];
+        let marker = &self.text[leaf.source.start..leaf.source.start + *marker];
         let Some(open) = marker.find('[') else {
             return false;
         };
@@ -718,12 +720,13 @@ impl Document {
     }
 
     /// Whether the selection reaches leaf `leaf`, so syntax in it can show:
-    /// a list item's or quote's marker shows anywhere on its line.
+    /// a list item's or quote's marker shows anywhere on its line, and a
+    /// callout's anywhere in the callout.
     pub fn reveals(&self, leaf: usize) -> bool {
         self.blocks
-            .leaves
+            .reveal_ranges()
             .get(leaf)
-            .is_some_and(|l| self.selection.touches(&l.source))
+            .is_some_and(|r| self.selection.touches(r))
     }
 
     /// What each leaf shows for the current selection. A leaf the
@@ -731,13 +734,14 @@ impl Document {
     /// leaf is verbatim.
     pub fn views(&self) -> Vec<View> {
         let selection = self.selection;
+        let reveal = self.blocks.reveal_ranges();
         self.blocks
             .leaves
             .iter()
-            .enumerate()
-            .map(|(ix, leaf)| {
+            .zip(reveal)
+            .map(|(leaf, reveal)| {
                 let text = &self.text[leaf.source.clone()];
-                let local = if self.reveals(ix) {
+                let local = if selection.touches(&reveal) {
                     let rel =
                         |o: usize| o.clamp(leaf.source.start, leaf.source.end) - leaf.source.start;
                     Selection {
@@ -747,9 +751,13 @@ impl Document {
                 } else {
                     NOTHING_REVEALED
                 };
-                match leaf.shows {
-                    Shows::Prose { marker } => View::Concealed(layout_line(text, marker, local)),
-                    Shows::Code { fence } => View::Concealed(layout_code(text, fence, local)),
+                match &leaf.shows {
+                    Shows::Prose { marker } => View::Concealed(layout_line(text, *marker, local)),
+                    Shows::Title { marker, title } => {
+                        View::Concealed(layout_titled(text, *marker, title.as_deref(), local))
+                    }
+                    Shows::Code { fence } => View::Concealed(layout_code(text, *fence, local)),
+                    Shows::Math => View::Concealed(layout_math(text, local)),
                     Shows::Source => View::Verbatim(text.to_string()),
                 }
             })
@@ -810,6 +818,14 @@ impl View {
     pub fn links(&self) -> &[Link] {
         match self {
             View::Concealed(l) => l.links(),
+            View::Verbatim(_) => &[],
+        }
+    }
+
+    /// The math in the text, in display offsets.
+    pub fn maths(&self) -> &[crate::conceal::Math] {
+        match self {
+            View::Concealed(l) => l.maths(),
             View::Verbatim(_) => &[],
         }
     }

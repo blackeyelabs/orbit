@@ -6,7 +6,7 @@
 use std::ops::Range;
 
 use crate::Edited;
-use crate::blocks::{Blocks, Item, Kind, Shows};
+use crate::blocks::{Blocks, Item, Kind, Shows, quote_line};
 use crate::conceal::Selection;
 
 /// How much a level out takes from the start of `line`: a tab, or up to 4
@@ -48,11 +48,12 @@ fn next_marker(marker: &str, item: &Item) -> String {
 pub(crate) fn enter(text: &str, blocks: &Blocks, caret: usize) -> Option<Edited> {
     let leaf_ix = blocks.leaf_at(caret)?;
     let leaf = &blocks.leaves[leaf_ix];
-    let Shows::Prose { marker } = leaf.shows else {
-        return None;
+    let marker = match leaf.shows {
+        Shows::Prose { marker } | Shows::Title { marker, .. } => marker,
+        _ => return None,
     };
     let kind = &blocks.block_of(leaf_ix)?.kind;
-    if !matches!(kind, Kind::ListItem(_) | Kind::Quote(_)) || marker == 0 {
+    if !matches!(kind, Kind::ListItem(_) | Kind::Quote(_) | Kind::Callout(_)) || marker == 0 {
         return None;
     }
     let start = line_start(text, leaf.source.start);
@@ -60,7 +61,9 @@ pub(crate) fn enter(text: &str, blocks: &Blocks, caret: usize) -> Option<Edited>
     if caret < marker_end {
         return None;
     }
-    if text[marker_end..leaf.source.end].trim().is_empty() {
+    // A callout's title line goes on with a plain quote line, never empty.
+    let title = matches!(leaf.shows, Shows::Title { .. });
+    if !title && text[marker_end..leaf.source.end].trim().is_empty() {
         let out = outdent_width(&text[start..]);
         let (cleared, mut caret) = if out > 0 {
             (start..start + out, caret - out)
@@ -80,6 +83,10 @@ pub(crate) fn enter(text: &str, blocks: &Blocks, caret: usize) -> Option<Edited>
     let written = &text[leaf.source.start..marker_end];
     let next = match kind {
         Kind::ListItem(item) => next_marker(written, item),
+        _ if title => {
+            let quote = quote_line(written).map_or(0, |q| q.marker);
+            written[..quote].to_string()
+        }
         _ => written.to_string(),
     };
     let inserted = format!("\n{indent}{next}");

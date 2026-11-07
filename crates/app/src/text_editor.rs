@@ -912,6 +912,32 @@ mod tests {
     }
 
     #[gpui::test]
+    fn math_is_typeset_at_its_size_and_a_click_on_it_shows_its_source(cx: &mut TestAppContext) {
+        let block = "$$\\sum_{i=1}^{n} \\frac{a_i}{b_i}$$";
+        let src = format!("{block}\n\nEnd");
+        let (host, cx) = open(cx, &src);
+        let editor = live(&host, cx);
+        cx.simulate_keystrokes("ctrl-end");
+        cx.run_until_parked();
+        // Typeset, the sum stands well over a line of text from the top
+        // padding (16 px): y = 64 is on it, where `End` would be if it
+        // weren't drawn.
+        cx.simulate_click(
+            gpui::point(gpui::px(30.), gpui::px(64.)),
+            gpui::Modifiers::none(),
+        );
+        cx.run_until_parked();
+        assert_eq!(cx.update(|_, cx| editor.caret(cx)), block.len());
+        cx.simulate_keystrokes("left");
+        cx.run_until_parked();
+        assert_eq!(
+            cx.update(|_, cx| editor.caret(cx)),
+            block.len() - 1,
+            "in its source"
+        );
+    }
+
+    #[gpui::test]
     fn a_click_on_a_web_address_opens_it_and_on_a_note_link_follows_it(cx: &mut TestAppContext) {
         let click = |cx: &mut VisualTestContext| {
             cx.simulate_click(

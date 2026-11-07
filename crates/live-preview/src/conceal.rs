@@ -14,6 +14,7 @@
 //! inside it; the renderer merges them.
 
 use std::{
+    borrow::Cow,
     cell::{Cell, RefCell},
     ops::Range,
     rc::Rc,
@@ -115,13 +116,16 @@ pub struct Link {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Hide {
     range: Range<usize>,
-    shown: &'static str,
+    shown: Cow<'static, str>,
 }
 
 impl Hide {
     /// Hidden, with nothing in its place.
     fn new(range: Range<usize>) -> Self {
-        Hide { range, shown: "" }
+        Hide {
+            range,
+            shown: Cow::Borrowed(""),
+        }
     }
 
     /// How much longer the source is than the display, across it.
@@ -150,6 +154,17 @@ pub struct Image {
     pub height: Option<u32>,
 }
 
+/// Math in the display text, to typeset: inline `$…$`, or a `$$…$$` block.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Math {
+    /// Where its [`OBJECT`] is, in display offsets.
+    pub at: usize,
+    /// Its LaTeX, without the dollars.
+    pub latex: String,
+    /// It's a block (`$$`), set on its own line; else it sits in a line.
+    pub display: bool,
+}
+
 /// What the editor shows for one layout pass.
 #[derive(Debug)]
 pub struct Layout {
@@ -160,6 +175,7 @@ pub struct Layout {
     runs: Vec<Run>,
     links: Vec<Link>,
     images: Vec<Image>,
+    maths: Vec<Math>,
 }
 
 impl Layout {
@@ -181,6 +197,11 @@ impl Layout {
     /// The images in the text, in order.
     pub fn images(&self) -> &[Image] {
         &self.images
+    }
+
+    /// The math in the text, in order.
+    pub fn maths(&self) -> &[Math] {
+        &self.maths
     }
 
     /// Display offset for a source offset. An offset inside hidden syntax
@@ -245,6 +266,7 @@ pub fn layout_code(source: &str, fence: usize, selection: Selection) -> Layout {
         runs: Vec::new(),
         links: Vec::new(),
         images: Vec::new(),
+        maths: Vec::new(),
     }
 }
 
@@ -252,7 +274,19 @@ pub fn layout_code(source: &str, fence: usize, selection: Selection) -> Layout {
 /// its marker: hidden, like a heading's `#`s, unless the selection touches
 /// the line.
 pub fn layout_line(source: &str, marker: usize, selection: Selection) -> Layout {
-    let spans: Vec<(Span, bool)> = parse(source, marker)
+    layout_titled(source, marker, None, selection)
+}
+
+/// Lays out a callout's title line, whose first `marker` bytes (its
+/// quote marker and `[!type]`) are hidden unless the selection touches the
+/// line, `title` shown in their place if it has none of its own.
+pub fn layout_titled(
+    source: &str,
+    marker: usize,
+    title: Option<&str>,
+    selection: Selection,
+) -> Layout {
+    let spans: Vec<(Span, bool)> = parse(source, marker, title)
         .into_iter()
         .map(|s| {
             let revealed = selection.touches(&s.range);
@@ -272,7 +306,7 @@ pub fn layout_line(source: &str, marker: usize, selection: Selection) -> Layout 
     let mut at = 0;
     for h in &hidden {
         display.push_str(&source[at..h.range.start]);
-        display.push_str(h.shown);
+        display.push_str(&h.shown);
         at = h.range.end;
     }
     display.push_str(&source[at..]);
@@ -284,13 +318,22 @@ pub fn layout_line(source: &str, marker: usize, selection: Selection) -> Layout 
         runs: Vec::new(),
         links: Vec::new(),
         images: Vec::new(),
+        maths: Vec::new(),
     };
     let to_display =
         |layout: &Layout, r: &Range<usize>| layout.to_display(r.start)..layout.to_display(r.end);
     let mut runs = Vec::new();
     let mut links = Vec::new();
     let mut images = Vec::new();
+    let mut maths = Vec::new();
     for (span, revealed) in &spans {
+        if let (Some(latex), false) = (&span.math, *revealed) {
+            maths.push(Math {
+                at: layout.to_display(span.range.start),
+                latex: latex.clone(),
+                display: false,
+            });
+        }
         if let (Some(image), false) = (&span.image, *revealed) {
             images.push(Image {
                 at: layout.to_display(span.range.start),
@@ -323,6 +366,29 @@ pub fn layout_line(source: &str, marker: usize, selection: Selection) -> Layout 
     layout.runs = runs;
     layout.links = links;
     layout.images = images;
+    layout.maths = maths;
+    layout
+}
+
+/// Lays out a `$$` math block's leaf: one [`OBJECT`] for its math unless
+/// the selection touches it, when its source shows as typed.
+pub fn layout_math(source: &str, selection: Selection) -> Layout {
+    let mut layout = layout_code(source, 0, selection);
+    if selection.touches(&(0..source.len())) {
+        return layout;
+    }
+    let latex = source.trim().strip_prefix("$$").unwrap_or(source.trim());
+    let latex = latex.strip_suffix("$$").unwrap_or(latex).trim();
+    layout.display = OBJECT.to_string();
+    layout.hidden = vec![Hide {
+        range: 0..source.len(),
+        shown: OBJECT.into(),
+    }];
+    layout.maths = vec![Math {
+        at: 0,
+        latex: latex.to_string(),
+        display: true,
+    }];
     layout
 }
 
@@ -338,6 +404,8 @@ struct Span {
     target: Option<Target>,
     /// It's an image, drawn in place of its source (its `at` unset).
     image: Option<Image>,
+    /// It's inline math, this LaTeX, typeset in place of its source.
+    math: Option<String>,
     /// Inline syntax inside the content is parsed too (emphasis, a
     /// markdown link's text); code and wikilinks are taken as written.
     nests: bool,
@@ -359,6 +427,7 @@ impl Span {
             style,
             target: None,
             image: None,
+            math: None,
             nests: false,
         }
     }
@@ -410,17 +479,16 @@ const PAIRS: &[(&str, Style)] = &[
 /// Every span of syntax in `source`: headings (or the line's `marker`),
 /// then inline spans after it left to right, each followed by the spans
 /// nested in it.
-fn parse(source: &str, marker: usize) -> Vec<Span> {
+fn parse(source: &str, marker: usize, title: Option<&str>) -> Vec<Span> {
     let mut spans = if marker == 0 {
         headings(source)
     } else {
         let line = 0..source.len();
-        vec![Span::new(
-            line,
-            vec![Hide::new(0..marker)],
-            marker..source.len(),
-            None,
-        )]
+        let hide = Hide {
+            range: 0..marker,
+            shown: title.map_or(Cow::Borrowed(""), |t| Cow::Owned(t.to_string())),
+        };
+        vec![Span::new(line, vec![hide], marker..source.len(), None)]
     };
     let parser = Parser {
         source,
@@ -503,6 +571,7 @@ impl Parser<'_> {
             b'[' => wikilink(s, at).or_else(|| self.link(at, false)),
             b'<' => autolink(s, at),
             b'h' => bare_url(s, at),
+            b'$' => inline_math(s, at),
             _ => PAIRS
                 .iter()
                 .find_map(|&(delim, style)| self.emphasis(at, delim, style)),
@@ -698,7 +767,10 @@ fn wikilink(source: &str, at: usize) -> Option<Span> {
                 let range = content.start + i..content.start + i + 1;
                 // A `#` with no heading after it is just hidden.
                 let shown = if range.end == content.end { "" } else { " > " };
-                hidden.push(Hide { range, shown });
+                hidden.push(Hide {
+                    range,
+                    shown: shown.into(),
+                });
             }
             content
         }
@@ -732,7 +804,7 @@ fn is_image(target: &str) -> bool {
 fn image_span(range: Range<usize>, image: Image) -> Span {
     let hide = Hide {
         range: range.clone(),
-        shown: OBJECT,
+        shown: OBJECT.into(),
     };
     Span {
         image: Some(image),
@@ -796,6 +868,41 @@ fn markdown_image(source: &str, at: usize, link: Span) -> Span {
         height: None,
     };
     image_span(at..link.range.end, image)
+}
+
+/// `$…$` from `at`, on one line: the content starts and ends with
+/// something other than a space, and no digit follows the closing `$` (so
+/// prices stay text). `$$` isn't inline math.
+fn inline_math(source: &str, at: usize) -> Option<Span> {
+    let rest = &source[at + 1..];
+    let first = rest.chars().next()?;
+    if first.is_whitespace() || first == '$' {
+        return None;
+    }
+    let bytes = rest.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() && bytes[i] != b'\n' {
+        match bytes[i] {
+            b'\\' => i += 1,
+            b'$' if i > 0 && !bytes[i - 1].is_ascii_whitespace() => {
+                if bytes.get(i + 1).is_some_and(u8::is_ascii_digit) {
+                    return None;
+                }
+                let range = at..at + i + 2;
+                let hide = Hide {
+                    range: range.clone(),
+                    shown: OBJECT.into(),
+                };
+                return Some(Span {
+                    math: Some(rest[..i].to_string()),
+                    ..Span::new(range.clone(), vec![hide], range.end..range.end, None)
+                });
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
 }
 
 /// `<https://…>`: the address, without its angle brackets.
