@@ -20,6 +20,13 @@ pub trait Links {
     /// What to suggest with the caret at `caret` in `text`: nothing unless
     /// it's in a wikilink being typed.
     fn suggest(&self, text: &str, caret: usize) -> Option<Suggestions>;
+
+    /// The image an embed or image link's `target` names in the vault,
+    /// decoded; `None` if the vault hasn't it.
+    fn image(&self, target: &str) -> Option<std::sync::Arc<Image>> {
+        let _ = target;
+        None
+    }
 }
 
 /// The suggestions for a link being typed.

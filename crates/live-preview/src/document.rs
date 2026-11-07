@@ -814,6 +814,14 @@ impl View {
         }
     }
 
+    /// The images in the text, in display offsets.
+    pub fn images(&self) -> &[crate::conceal::Image] {
+        match self {
+            View::Concealed(l) => l.images(),
+            View::Verbatim(_) => &[],
+        }
+    }
+
     /// The display offset for a leaf-relative source offset.
     pub fn to_display(&self, source: usize) -> usize {
         match self {

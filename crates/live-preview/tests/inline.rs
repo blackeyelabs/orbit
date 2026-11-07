@@ -75,9 +75,10 @@ fn wikilinks_show_their_alias_or_their_target_with_headings() {
 fn markdown_links_show_their_text_with_its_own_syntax_concealed() {
     assert_eq!(shown("[**big** news](https://a.b/c)"), "big news");
     assert_eq!(shown("[x](<Other note.md> \"title\")"), "x");
+    // Images are objects in the text (see tests/images.rs).
     assert_eq!(
         shown("![[pic.png]] and ![alt](a.png)"),
-        "![[pic.png]] and ![alt](a.png)"
+        "\u{FFFC} and \u{FFFC}"
     );
 }
 

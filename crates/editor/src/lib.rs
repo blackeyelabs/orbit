@@ -17,7 +17,7 @@ use gpui_kit::base::input::{
     SelectToNextWordEnd, SelectToPreviousWordStart, SelectToStart, SelectToStartOfLine, Undo,
 };
 use gpui_kit::base::text::editor_host::{
-    BlockNode, CodeBlock, ColumnAlign, FlowPosition, InlineNode, LeafGeometry, LinkMark, Paragraph,
+    BlockNode, CodeBlock, ColumnAlign, FlowPosition, LeafGeometry, LinkMark, Paragraph,
     RenderContext, Span, Table as KitTable, TextMark, collect_leaf_geometry,
 };
 use gpui_kit::base::{h_flex, v_flex};
@@ -31,6 +31,7 @@ use live_preview::{Document, View};
 
 mod code;
 mod find;
+mod images;
 mod suggest;
 
 pub use suggest::{Links, Suggestion, Suggestions};
@@ -753,7 +754,7 @@ impl LivePreview {
 
     /// How each block is drawn, and the decorations (the selection, and
     /// find's other matches) per leaf key.
-    fn render_blocks(&self, cx: &App) -> (Vec<Drawn>, Decorations) {
+    fn render_blocks(&self, images: &images::FrameImages, cx: &App) -> (Vec<Drawn>, Decorations) {
         let selection_color = cx.theme().colors.selection.opacity(0.5);
         // As Kit's editor: the other matches in a fainter selection colour.
         let match_color = cx.theme().colors.selection.opacity(0.2);
@@ -765,7 +766,10 @@ impl LivePreview {
                 .and_then(|m| self.display_range(leaf, m));
             let mut p = Paragraph::default();
             let marks = marks(view, marked, &|target| self.links.resolves(target));
-            p.push(InlineNode::new(view.display_text().to_string()).marks(marks));
+            let text = view.display_text();
+            for node in images.inline_nodes(text, marks, view.images(), self.links.as_ref()) {
+                p.push(node);
+            }
             p.with_leaf_key(leaf_key(leaf))
         };
         let selection = self.doc.selection();
@@ -1302,8 +1306,11 @@ fn checkbox(ticked: bool, block: usize, editor: &Entity<LivePreview>, cx: &App) 
 impl Render for LivePreview {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // A click on a link is the editor's (see `on_mouse_down`).
-        let rcx = RenderContext::from_app(cx).on_link_click(|_, _, _, _| {});
-        let (blocks, decorations) = self.render_blocks(cx);
+        let images = images::FrameImages::default();
+        let (blocks, decorations) = self.render_blocks(&images, cx);
+        let rcx = RenderContext::from_app(cx)
+            .on_link_click(|_, _, _, _| {})
+            .with_image_source(move |uri| images.source(uri));
         let flows = self.flows(&blocks);
         let blocks = Rc::new(blocks);
         let editor = cx.entity();

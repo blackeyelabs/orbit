@@ -1,15 +1,16 @@
 //! Wikilink autocomplete: typing after `[[` suggests notes, and the last
 //! row offers to create one by the typed name. The rows are worked out
 //! once, here, for both editors: Kit's source editor (as a completion
-//! provider) and Live Preview (as its [`Links`]).
+//! provider) and Live Preview (as its [`Links`]), which also reads the
+//! images it shows through it.
 
-use std::{cell::RefCell, rc::Rc, sync::Arc};
+use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
 
 use editor::{Links, Suggestion, Suggestions};
 use gpui_kit::component::input::{
     CompletionHighlighter, CompletionProvider, Rope, RopeExt as _, highlight_characters,
 };
-use gpui_kit::{App, Result, Task, Window};
+use gpui_kit::{App, Image, ImageFormat, Result, Task, Window};
 use lsp_types::{
     CompletionContext, CompletionItem, CompletionResponse, CompletionTextEdit, TextEdit,
 };
@@ -26,6 +27,10 @@ pub struct LinkCompletions {
     note: RefCell<VaultPath>,
     /// The "Create …" row the menu shows now, if it does.
     offered: RefCell<Option<Offer>>,
+    /// Image link → the image it names, decoded, or `None` if the vault
+    /// hasn't it, so a frame doesn't read the disk per image. Forgotten
+    /// when the vault changes ([`Self::forget_images`]).
+    images: RefCell<HashMap<String, Option<Arc<Image>>>>,
 }
 
 /// A "Create …" row on offer.
@@ -43,11 +48,19 @@ impl LinkCompletions {
             vault,
             note: RefCell::new(note),
             offered: RefCell::new(None),
+            images: RefCell::default(),
         }
+    }
+
+    /// Forgets the images read: the vault changed, so they may have too.
+    pub fn forget_images(&self) {
+        self.images.borrow_mut().clear();
     }
 
     pub fn set_note(&self, note: VaultPath) {
         *self.note.borrow_mut() = note;
+        // Links resolve from the note, so its images may be others now.
+        self.images.borrow_mut().clear();
     }
 
     /// The suggestions with the caret at `caret`, the line it's on starting
@@ -135,6 +148,23 @@ impl Links for LinkCompletions {
         path.is_empty() || self.vault.resolve(&self.note.borrow(), path).is_some()
     }
 
+    /// The image `target` names, read through the vault once.
+    fn image(&self, target: &str) -> Option<Arc<Image>> {
+        if let Some(image) = self.images.borrow().get(target) {
+            return image.clone();
+        }
+        let image = image_format(target).and_then(|format| {
+            let bytes = self
+                .vault
+                .read_linked_attachment(&self.note.borrow(), target)?;
+            Some(Arc::new(Image::from_bytes(format, bytes)))
+        });
+        self.images
+            .borrow_mut()
+            .insert(target.to_string(), image.clone());
+        image
+    }
+
     /// What Source mode would suggest with the caret at `caret`.
     fn suggest(&self, text: &str, caret: usize) -> Option<Suggestions> {
         let line_start = text[..caret].rfind('\n').map_or(0, |n| n + 1);
@@ -209,4 +239,19 @@ fn link_end(after: &str, caret: usize) -> usize {
         (Some(close), open) if open.is_none_or(|open| close < open) => caret + close + 2,
         _ => caret,
     }
+}
+
+/// The image format a link's extension names.
+fn image_format(link: &str) -> Option<ImageFormat> {
+    Some(
+        match live_preview::conceal::image_extension(link)?.as_str() {
+            "png" => ImageFormat::Png,
+            "jpg" | "jpeg" => ImageFormat::Jpeg,
+            "webp" => ImageFormat::Webp,
+            "gif" => ImageFormat::Gif,
+            "svg" => ImageFormat::Svg,
+            "bmp" => ImageFormat::Bmp,
+            _ => ImageFormat::Tiff,
+        },
+    )
 }

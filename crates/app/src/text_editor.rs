@@ -252,8 +252,9 @@ impl TextEditor {
     }
 
     /// Draws Live Preview again, as something it shows changed outside
-    /// the text (which links resolve).
+    /// the text: which links resolve, the images it reads.
     pub fn redraw(&self, cx: &mut App) {
+        self.views.read(cx).links.forget_images();
         if let Some(live) = self.views.read(cx).live.clone() {
             live.update(cx, |_, cx| cx.notify());
         }
@@ -884,6 +885,30 @@ mod tests {
         assert_eq!(caret(cx), 23, "the end of c, above e");
         cx.simulate_keystrokes("shift-tab");
         assert_eq!(caret(cx), 7, "back a cell, to the end of b");
+    }
+
+    #[gpui::test]
+    fn an_image_is_drawn_at_its_size_and_a_click_on_it_shows_its_source(cx: &mut TestAppContext) {
+        let src = "![[pic.png|200x100]]\n\nEnd";
+        let (host, cx) = open_among(cx, src, &["pic.png"]);
+        let editor = live(&host, cx);
+        cx.simulate_keystrokes("ctrl-end");
+        cx.run_until_parked();
+        // The image is 100 px tall from the editor's top padding (16 px):
+        // y = 80 is on it, well below a line of text.
+        cx.simulate_click(
+            gpui::point(gpui::px(100.), gpui::px(80.)),
+            gpui::Modifiers::none(),
+        );
+        cx.run_until_parked();
+        // The caret goes to the embed's end, revealing its source: Left
+        // steps into the source, not past an image.
+        let embed = "![[pic.png|200x100]]".len();
+        assert_eq!(cx.update(|_, cx| editor.caret(cx)), embed);
+        cx.simulate_keystrokes("left");
+        cx.run_until_parked();
+        assert_eq!(cx.update(|_, cx| editor.caret(cx)), embed - 1);
+        assert_eq!(cx.update(|_, cx| editor.text(cx)), src);
     }
 
     #[gpui::test]

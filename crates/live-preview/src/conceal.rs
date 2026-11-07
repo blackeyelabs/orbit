@@ -130,6 +130,26 @@ impl Hide {
     }
 }
 
+/// The character an image stands as in the display text: an object, as Kit
+/// draws an inline image.
+pub const OBJECT: &str = "\u{FFFC}";
+
+/// An image in the display text: `![[pic.png]]` or `![alt](pic.png)`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Image {
+    /// Where its [`OBJECT`] is, in display offsets.
+    pub at: usize,
+    /// The image: an attachment in the vault, or a web address.
+    pub target: Target,
+    /// What it shows as text: a markdown image's text, or an embed's
+    /// alias when that isn't a size.
+    pub alt: String,
+    /// Its width in pixels, from an embed's `|300` or `|300x200`.
+    pub width: Option<u32>,
+    /// Its height in pixels, from an embed's `|300x200`.
+    pub height: Option<u32>,
+}
+
 /// What the editor shows for one layout pass.
 #[derive(Debug)]
 pub struct Layout {
@@ -139,6 +159,7 @@ pub struct Layout {
     hidden: Vec<Hide>,
     runs: Vec<Run>,
     links: Vec<Link>,
+    images: Vec<Image>,
 }
 
 impl Layout {
@@ -155,6 +176,11 @@ impl Layout {
     /// The links in the text, in order.
     pub fn links(&self) -> &[Link] {
         &self.links
+    }
+
+    /// The images in the text, in order.
+    pub fn images(&self) -> &[Image] {
+        &self.images
     }
 
     /// Display offset for a source offset. An offset inside hidden syntax
@@ -218,6 +244,7 @@ pub fn layout_code(source: &str, fence: usize, selection: Selection) -> Layout {
         hidden,
         runs: Vec::new(),
         links: Vec::new(),
+        images: Vec::new(),
     }
 }
 
@@ -256,12 +283,20 @@ pub fn layout_line(source: &str, marker: usize, selection: Selection) -> Layout 
         hidden,
         runs: Vec::new(),
         links: Vec::new(),
+        images: Vec::new(),
     };
     let to_display =
         |layout: &Layout, r: &Range<usize>| layout.to_display(r.start)..layout.to_display(r.end);
     let mut runs = Vec::new();
     let mut links = Vec::new();
+    let mut images = Vec::new();
     for (span, revealed) in &spans {
+        if let (Some(image), false) = (&span.image, *revealed) {
+            images.push(Image {
+                at: layout.to_display(span.range.start),
+                ..image.clone()
+            });
+        }
         if *revealed {
             runs.extend(span.hidden.iter().map(|h| Run {
                 range: to_display(&layout, &h.range),
@@ -287,6 +322,7 @@ pub fn layout_line(source: &str, marker: usize, selection: Selection) -> Layout 
     links.sort_by_key(|l| l.range.start);
     layout.runs = runs;
     layout.links = links;
+    layout.images = images;
     layout
 }
 
@@ -300,6 +336,8 @@ struct Span {
     content: Range<usize>,
     style: Option<Style>,
     target: Option<Target>,
+    /// It's an image, drawn in place of its source (its `at` unset).
+    image: Option<Image>,
     /// Inline syntax inside the content is parsed too (emphasis, a
     /// markdown link's text); code and wikilinks are taken as written.
     nests: bool,
@@ -320,6 +358,7 @@ impl Span {
             content,
             style,
             target: None,
+            image: None,
             nests: false,
         }
     }
@@ -457,11 +496,11 @@ impl Parser<'_> {
         match rest.as_bytes().first()? {
             b'\\' => escape(s, at),
             b'`' => code(s, at),
-            b'!' if rest[1..].starts_with('[') => {
-                let link = wikilink(s, at + 1).or_else(|| self.link(at + 1))?;
-                Some(Span::literal(at..link.range.end))
-            }
-            b'[' => wikilink(s, at).or_else(|| self.link(at)),
+            b'!' if rest[1..].starts_with('[') => match wikilink(s, at + 1) {
+                Some(link) => Some(embed(s, at, link)),
+                None => Some(markdown_image(s, at, self.link(at + 1, true)?)),
+            },
+            b'[' => wikilink(s, at).or_else(|| self.link(at, false)),
             b'<' => autolink(s, at),
             b'h' => bare_url(s, at),
             _ => PAIRS
@@ -516,7 +555,7 @@ impl Parser<'_> {
 
     /// `[text](destination)` from `at`: shows only the text, which may hold
     /// more inline syntax.
-    fn link(&self, at: usize) -> Option<Span> {
+    fn link(&self, at: usize, empty_text: bool) -> Option<Span> {
         let s = self.source;
         let bytes = s.as_bytes();
         // The text: brackets nest, code inside is skipped, one line.
@@ -538,7 +577,7 @@ impl Parser<'_> {
             }
             i += 1;
         };
-        if text_end == at + 1 || bytes.get(text_end + 1) != Some(&b'(') {
+        if (text_end == at + 1 && !empty_text) || bytes.get(text_end + 1) != Some(&b'(') {
             return None;
         }
         // The destination: parentheses nest, one line.
@@ -668,6 +707,95 @@ fn wikilink(source: &str, at: usize) -> Option<Span> {
     hidden.push(Hide::new(content.end..close.end));
     let target = Target::Note(target.to_string());
     Some(Span::new(at..close.end, hidden, content, Some(Style::Link)).to(target))
+}
+
+/// The image extensions drawn as images.
+const IMAGE_EXTENSIONS: [&str; 9] = [
+    "png", "jpg", "jpeg", "webp", "gif", "svg", "bmp", "tif", "tiff",
+];
+
+/// The image extension a link's target ends with, lower case: `None` if
+/// it doesn't name an image.
+pub fn image_extension(target: &str) -> Option<String> {
+    let path = target.split(['#', '?']).next()?;
+    let ext = path.rsplit_once('.')?.1.to_ascii_lowercase();
+    IMAGE_EXTENSIONS.contains(&ext.as_str()).then_some(ext)
+}
+
+/// Whether a link's target names an image, by its extension.
+fn is_image(target: &str) -> bool {
+    image_extension(target).is_some()
+}
+
+/// A span of `range` drawn as `image`: all of it hidden, an [`OBJECT`] in
+/// its place.
+fn image_span(range: Range<usize>, image: Image) -> Span {
+    let hide = Hide {
+        range: range.clone(),
+        shown: OBJECT,
+    };
+    Span {
+        image: Some(image),
+        ..Span::new(range.clone(), vec![hide], range.end..range.end, None)
+    }
+}
+
+/// `![[…]]` from `at`, given the wikilink after its `!`: an image if it
+/// names one (its alias a size or alt text), else a link to the note it
+/// embeds, shown as the wikilink is.
+fn embed(source: &str, at: usize, link: Span) -> Span {
+    let inner = &source[link.range.start + 2..link.range.end - 2];
+    let (target, alias) = match inner.split_once('|') {
+        Some((target, alias)) => (target.strip_suffix('\\').unwrap_or(target), alias),
+        None => (inner, ""),
+    };
+    if !is_image(target) {
+        // The `!` is hidden with the opening brackets.
+        let mut link = link;
+        link.range.start = at;
+        link.hidden[0].range.start = at;
+        return link;
+    }
+    let size = |text: &str| -> Option<(u32, Option<u32>)> {
+        match text.split_once('x') {
+            Some((w, h)) => Some((w.parse().ok()?, Some(h.parse().ok()?))),
+            None => Some((text.parse().ok()?, None)),
+        }
+    };
+    let (width, height, alt) = match size(alias) {
+        Some((w, h)) => (Some(w), h, String::new()),
+        None => (None, None, alias.to_string()),
+    };
+    let image = Image {
+        at: 0,
+        target: Target::Note(target.to_string()),
+        alt,
+        width,
+        height,
+    };
+    image_span(at..link.range.end, image)
+}
+
+/// `![alt](src)` from `at`, given the markdown link after its `!`: an
+/// image, unless it names a vault file that isn't one (a note), which is
+/// a link to it, shown as the markdown link is.
+fn markdown_image(source: &str, at: usize, link: Span) -> Span {
+    if let Some(Target::Note(target)) = &link.target
+        && !is_image(target)
+    {
+        let mut link = link;
+        link.range.start = at;
+        link.hidden[0].range.start = at;
+        return link;
+    }
+    let image = Image {
+        at: 0,
+        target: link.target.clone().unwrap_or(Target::Url(String::new())),
+        alt: source[link.content.clone()].to_string(),
+        width: None,
+        height: None,
+    };
+    image_span(at..link.range.end, image)
 }
 
 /// `<https://…>`: the address, without its angle brackets.
