@@ -855,6 +855,38 @@ mod tests {
     }
 
     #[gpui::test]
+    fn arrows_and_tab_move_between_a_table_s_cells_as_drawn(cx: &mut TestAppContext) {
+        // a at 2, b at 6; the delimiter row; c at 22, d at 26.
+        let (host, cx) = open(cx, "| a | b |\n|---|---|\n| c | d |\n\nEnd");
+        let editor = live(&host, cx);
+        let caret = |cx: &mut VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|_, cx| editor.caret(cx))
+        };
+        cx.simulate_keystrokes("ctrl-home");
+        assert_eq!(caret(cx), 2, "in the first cell");
+        cx.simulate_keystrokes("right right");
+        assert_eq!(caret(cx), 6, "on into the next cell");
+        cx.simulate_keystrokes("down");
+        assert_eq!(caret(cx), 26, "the cell below, not beside");
+        cx.simulate_keystrokes("left");
+        assert_eq!(caret(cx), 23, "back to the cell before");
+        // Tab in the last cell adds a row; typing goes into its first cell.
+        cx.simulate_keystrokes("right right tab");
+        cx.simulate_input("e");
+        cx.run_until_parked();
+        assert_eq!(
+            cx.update(|_, cx| editor.text(cx)),
+            "| a | b |\n|---|---|\n| c | d |\n| e |  |\n\nEnd"
+        );
+        // Drawn again after the edit: Up finds the cell above it.
+        cx.simulate_keystrokes("up");
+        assert_eq!(caret(cx), 23, "the end of c, above e");
+        cx.simulate_keystrokes("shift-tab");
+        assert_eq!(caret(cx), 7, "back a cell, to the end of b");
+    }
+
+    #[gpui::test]
     fn a_click_on_a_web_address_opens_it_and_on_a_note_link_follows_it(cx: &mut TestAppContext) {
         let click = |cx: &mut VisualTestContext| {
             cx.simulate_click(

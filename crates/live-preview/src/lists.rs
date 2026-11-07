@@ -5,16 +5,9 @@
 
 use std::ops::Range;
 
+use crate::Edited;
 use crate::blocks::{Blocks, Item, Kind, Shows};
 use crate::conceal::Selection;
-
-/// A list edit's outcome.
-pub(crate) struct Edited {
-    /// The whole new text.
-    pub text: String,
-    /// The selection in it.
-    pub selection: Selection,
-}
 
 /// How much a level out takes from the start of `line`: a tab, or up to 4
 /// spaces.

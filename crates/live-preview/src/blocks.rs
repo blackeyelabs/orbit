@@ -32,6 +32,8 @@ pub enum Kind {
     Quote(usize),
     /// A fenced code block.
     Code(Code),
+    /// A table: a leaf per cell, row by row; its delimiter row has none.
+    Table(Table),
     /// A block shown as its source, verbatim: the leaf is all of it.
     Source,
 }
@@ -55,6 +57,45 @@ pub struct Code {
     /// Its closing fence's line, as written (trimmed); without one it runs
     /// to the note's end.
     pub close: Option<String>,
+}
+
+/// A table's shape.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Table {
+    /// Each column's alignment: as many as the header row has cells.
+    pub align: Vec<Align>,
+    /// How many cells (leaves) each row has, the header first. A long row
+    /// is cut to the header's width; a short one has fewer, the rest
+    /// drawn empty, where the caret can't stand.
+    pub rows: Vec<usize>,
+}
+
+/// How a table column's text is aligned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Align {
+    /// `---`: as the renderer has it, left.
+    None,
+    /// `:--`.
+    Left,
+    /// `:-:`.
+    Center,
+    /// `--:`.
+    Right,
+}
+
+impl Table {
+    /// Each row's cells, as leaf indices, header first, for a table whose
+    /// cells are the leaves `leaves`.
+    pub fn row_leaves(&self, leaves: Range<usize>) -> Vec<Range<usize>> {
+        let mut at = leaves.start;
+        self.rows
+            .iter()
+            .map(|&count| {
+                at += count;
+                at - count..at
+            })
+            .collect()
+    }
 }
 
 /// A list level open while the items below are parsed: where its last
@@ -207,7 +248,7 @@ fn is_fence(text: &str) -> bool {
 }
 
 /// A table row: a line that starts with a pipe.
-fn is_table_row(text: &str) -> bool {
+pub(crate) fn is_table_row(text: &str) -> bool {
     text.trim_start().starts_with('|')
 }
 
@@ -219,15 +260,74 @@ fn is_delimiter_row(text: &str) -> bool {
             .all(|c| matches!(c, '|' | '-' | ':' | ' ' | '\t'))
 }
 
-/// How many cells a table row has: the gaps between its pipes.
+/// The cells of a table row, as ranges of `text`: each cell's text inside
+/// one padding space each side (any more space, one just typed at a cell's
+/// end, is the cell's). An empty cell is an empty range just inside its
+/// padding, so the caret can stand in it. An escaped `\|` is in a cell; a
+/// row needn't end with a pipe.
+pub(crate) fn cells(text: &str) -> Vec<Range<usize>> {
+    let bytes = text.as_bytes();
+    // A pipe after an odd run of backslashes is escaped.
+    let escaped = |i: usize| bytes[..i].iter().rev().take_while(|&&b| b == b'\\').count() % 2 == 1;
+    // Where each cell starts and ends: just past a pipe and at the next,
+    // a row with no pipe first or last having one there all the same.
+    let pipes: Vec<usize> = (0..bytes.len())
+        .filter(|&i| bytes[i] == b'|' && !escaped(i))
+        .collect();
+    let first = text.len() - text.trim_start().len();
+    let end = text.trim_end().len();
+    let mut starts: Vec<usize> = pipes.iter().map(|&p| p + 1).collect();
+    let mut ends = pipes.clone();
+    if pipes.first() != Some(&first) {
+        starts.insert(0, first);
+    } else {
+        ends.remove(0);
+    }
+    if pipes.last().is_none_or(|&p| p + 1 != end) {
+        ends.push(end);
+    } else {
+        starts.pop();
+    }
+    starts
+        .into_iter()
+        .zip(ends)
+        .filter(|(start, end)| start <= end)
+        .map(|(start, end)| {
+            let inner = &text[start..end];
+            let lead = usize::from(inner.starts_with(' '));
+            let trail = usize::from(inner.len() > lead && inner.ends_with(' '));
+            start + lead..end - trail
+        })
+        .collect()
+}
+
+/// How many cells a table row has.
 fn cell_count(text: &str) -> usize {
-    text.matches('|').count().saturating_sub(1)
+    cells(text).len()
+}
+
+/// A delimiter row's column alignments: `:--` left, `--:` right, `:-:`
+/// centre.
+fn alignments(text: &str) -> Vec<Align> {
+    cells(text)
+        .into_iter()
+        .map(|cell| {
+            let cell = text[cell].trim();
+            match (cell.starts_with(':'), cell.ends_with(':')) {
+                (true, true) => Align::Center,
+                (true, false) => Align::Left,
+                (false, true) => Align::Right,
+                (false, false) => Align::None,
+            }
+        })
+        .collect()
 }
 
 /// A table starts here: a row, then a delimiter row with a cell per
 /// header cell (as in GFM, so a half-typed `|-` isn't one yet).
 fn starts_table(line: &str, next: Option<&str>) -> bool {
     is_table_row(line)
+        && cell_count(line) > 0
         && next.is_some_and(|n| is_delimiter_row(n) && cell_count(n) == cell_count(line))
 }
 
@@ -407,8 +507,11 @@ impl Blocks {
                 doc.push_source(&lines[i..i + 1]);
                 i += 1;
             } else if starts_table(line.text, next) {
-                let end = run_while(&is_table_row);
-                doc.push_source(&lines[i..end]);
+                // Its header and delimiter rows, then the rows after.
+                let end = (i + 2..lines.len())
+                    .find(|&j| !is_table_row(lines[j].text))
+                    .unwrap_or(lines.len());
+                doc.push_table(&lines[i..end]);
                 i = end;
             } else if is_list_item(line.text) {
                 let end = run_while(&is_list_item);
@@ -513,6 +616,33 @@ impl Blocks {
             let start = line.start + item.indent;
             self.push_line(kind, start..line.end(), item.marker);
         }
+    }
+
+    /// Adds a table: its header row, delimiter row, then rows (`lines`).
+    fn push_table(&mut self, lines: &[Line]) {
+        let Some(delimiter) = lines.get(1) else {
+            return;
+        };
+        let align = alignments(delimiter.text);
+        let columns = align.len();
+        let rows: Vec<&Line> = lines.iter().take(1).chain(lines.iter().skip(2)).collect();
+        let first = self.leaves.len();
+        let mut counts = Vec::with_capacity(rows.len());
+        for row in rows {
+            let cells: Vec<Range<usize>> = cells(row.text).into_iter().take(columns).collect();
+            counts.push(cells.len());
+            self.leaves.extend(cells.into_iter().map(|cell| Leaf {
+                source: row.start + cell.start..row.start + cell.end,
+                shows: Shows::Prose { marker: 0 },
+            }));
+        }
+        self.blocks.push(Block {
+            kind: Kind::Table(Table {
+                align,
+                rows: counts,
+            }),
+            leaves: first..self.leaves.len(),
+        });
     }
 
     /// Adds a block shown as its source: these lines, verbatim.

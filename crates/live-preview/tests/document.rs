@@ -271,14 +271,6 @@ fn backspace_and_delete_remove_one_character_or_the_selection() {
 }
 
 #[test]
-fn tables_show_as_their_source() {
-    let note = "| a | b |\n|---|---|\n| **c** | d |";
-    let (mut d, _) = doc(note);
-    d.move_doc_end(false);
-    assert_eq!(shown(&d), ["| a | b |\n|---|---|\n| **c** | d |"]);
-}
-
-#[test]
 fn front_matter_is_shown_as_its_source_and_never_a_rule() {
     let (d, _) = doc("---\ncreated: 2026-11-05T14:32\ntags: []\n---\nBody **b**");
     assert_eq!(

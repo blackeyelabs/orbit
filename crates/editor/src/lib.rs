@@ -17,15 +17,15 @@ use gpui_kit::base::input::{
     SelectToNextWordEnd, SelectToPreviousWordStart, SelectToStart, SelectToStartOfLine, Undo,
 };
 use gpui_kit::base::text::editor_host::{
-    BlockNode, CodeBlock, FlowPosition, InlineNode, LeafGeometry, LinkMark, Paragraph,
-    RenderContext, Span, TextMark, collect_leaf_geometry,
+    BlockNode, CodeBlock, ColumnAlign, FlowPosition, InlineNode, LeafGeometry, LinkMark, Paragraph,
+    RenderContext, Span, Table as KitTable, TextMark, collect_leaf_geometry,
 };
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::input::{Replace, Search};
 use gpui_kit::component::{ActiveTheme as _, Icon};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use live_preview::blocks::{Block, Item, Kind};
+use live_preview::blocks::{Align, Block, Item, Kind};
 use live_preview::conceal::{Style, Target};
 use live_preview::{Document, View};
 
@@ -823,6 +823,9 @@ impl LivePreview {
                         )
                         .with_leaf_key(leaf_key(leaf)),
                     ),
+                    // A cell per leaf, row by row; a short row's missing
+                    // cells drawn empty, with no leaf.
+                    Kind::Table(table) => table_node(table, block.leaves.clone(), &paragraph),
                     Kind::Paragraph | Kind::Empty | Kind::ListItem(_) | Kind::Source => {
                         BlockNode::Paragraph(paragraph(leaf))
                     }
@@ -871,6 +874,37 @@ impl LivePreview {
         self.edited(cx, |doc| {
             doc.toggle_task(block);
         });
+    }
+}
+
+/// Kit's table for a table whose cells are the leaves `leaves`, each drawn
+/// by `cell`; a short row's missing cells are drawn empty, with no leaf.
+fn table_node(
+    table: &live_preview::blocks::Table,
+    leaves: Range<usize>,
+    cell: &dyn Fn(usize) -> Paragraph,
+) -> BlockNode {
+    let columns = table.align.len();
+    let rows = table
+        .row_leaves(leaves)
+        .into_iter()
+        .map(|row| {
+            let mut row: Vec<Paragraph> = row.map(cell).collect();
+            row.resize_with(columns, Paragraph::default);
+            row
+        })
+        .collect();
+    let align = table.align.iter().map(|&a| column_align(a)).collect();
+    BlockNode::Table(KitTable::new(rows, align))
+}
+
+/// Kit's alignment for a column's.
+fn column_align(align: Align) -> ColumnAlign {
+    match align {
+        Align::None => ColumnAlign::None,
+        Align::Left => ColumnAlign::Left,
+        Align::Center => ColumnAlign::Center,
+        Align::Right => ColumnAlign::Right,
     }
 }
 
@@ -1335,7 +1369,7 @@ impl Render for LivePreview {
                 .on_action(cx.listener(|this, _: &InsertTab, _, cx| {
                     if !this.accept_chosen_suggestion(cx) {
                         this.edited(cx, |doc| {
-                            if !doc.indent() {
+                            if !doc.tab_in_table(false) && !doc.indent() {
                                 doc.type_text("\t")
                             }
                         })
@@ -1343,7 +1377,9 @@ impl Render for LivePreview {
                 }))
                 .on_action(cx.listener(|this, _: &Outdent, _, cx| {
                     this.edited(cx, |doc| {
-                        doc.outdent();
+                        if !doc.tab_in_table(true) {
+                            doc.outdent();
+                        }
                     })
                 }))
                 .on_action(cx.listener(|this, _: &Dismiss, _, cx| {

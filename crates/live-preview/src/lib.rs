@@ -9,9 +9,19 @@ pub mod blocks;
 pub mod conceal;
 mod document;
 mod lists;
+mod tables;
 pub mod undo;
 
 pub use document::{Clock, Document, View};
+
+/// An edit worked out on the whole text (a list or table key): the new
+/// text, and the selection in it. The facade applies the part that changed.
+pub(crate) struct Edited {
+    /// The whole new text.
+    pub text: String,
+    /// The selection in it.
+    pub selection: conceal::Selection,
+}
 
 /// Where `old` and `new` differ: the range of `old` to replace, and what
 /// replaces it, trimmed of the text they start and end with alike.

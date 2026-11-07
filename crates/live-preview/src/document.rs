@@ -122,6 +122,8 @@ impl Document {
     /// block, it goes on a line of its own.
     pub fn type_text(&mut self, text: &str) {
         let range = self.selection.range();
+        let in_cell = crate::tables::cell_text(&self.blocks, range.clone(), text);
+        let text = in_cell.as_deref().unwrap_or(text);
         let before = if range.is_empty() && !text.is_empty() {
             self.line_break_before(range.start)
         } else {
@@ -146,11 +148,39 @@ impl Document {
                 self.edit(caret..caret, &inserted, EditKind::Typing, after);
             }
             _ => {
-                if !self.continue_list() {
+                if !self.move_in_table(crate::tables::enter) && !self.continue_list() {
                     self.type_text("\n");
                 }
             }
         }
+    }
+
+    /// Tab (or Shift+Tab, `back`) in a table cell: the caret goes to the
+    /// end of the next cell (or the previous one), row after row; Tab in
+    /// the last cell adds a row (one undo step) and goes into it. Says
+    /// whether the caret was in a table.
+    pub fn tab_in_table(&mut self, back: bool) -> bool {
+        self.move_in_table(|text, blocks, caret| crate::tables::tab(text, blocks, caret, back))
+    }
+
+    /// Makes the move `to` works out from the caret in a table cell, with
+    /// no selection; says whether there was one.
+    fn move_in_table(
+        &mut self,
+        to: impl FnOnce(&str, &Blocks, usize) -> Option<crate::tables::CellMove>,
+    ) -> bool {
+        if !self.selection.range().is_empty() {
+            return false;
+        }
+        match to(&self.text, &self.blocks, self.caret()) {
+            Some(crate::tables::CellMove::To(offset)) => self.set_caret(offset),
+            Some(crate::tables::CellMove::AddRow { text, caret }) => {
+                let selection = Selection::caret(caret);
+                self.take_edit(crate::Edited { text, selection }, EditKind::Other);
+            }
+            None => return false,
+        }
+        true
     }
 
     /// Enter in a list item or quote line, with no selection: the next item
@@ -197,7 +227,7 @@ impl Document {
 
     /// Makes a list edit: the part of the text that changed, as one edit
     /// of `kind`, then its selection.
-    fn take_edit(&mut self, edited: crate::lists::Edited, kind: EditKind) {
+    fn take_edit(&mut self, edited: crate::Edited, kind: EditKind) {
         let (range, inserted) = crate::differing(&self.text, &edited.text);
         let inserted = inserted.to_string();
         self.edit(range, &inserted, kind, edited.selection);
@@ -227,6 +257,8 @@ impl Document {
     /// Pastes `text` over the selection: an undo step of its own.
     pub fn paste(&mut self, text: &str) {
         let range = self.selection.range();
+        let in_cell = crate::tables::cell_text(&self.blocks, range.clone(), text);
+        let text = in_cell.as_deref().unwrap_or(text);
         let caret = range.start + text.len();
         self.edit(range, text, EditKind::Other, Selection::caret(caret));
     }
@@ -259,6 +291,11 @@ impl Document {
             let caret = self.caret();
             let end = to(self, caret);
             range = caret.min(end)..caret.max(end);
+            // In a table cell, never past its edges: that would take a
+            // pipe and merge two cells.
+            if let Some(cell) = crate::tables::cell_source(&self.blocks, caret) {
+                range = range.start.max(cell.start)..range.end.min(cell.end);
+            }
         }
         if range.is_empty() {
             return;
@@ -361,6 +398,8 @@ impl Document {
 
     /// Replaces `range` with `text` as typing, putting the caret after it.
     pub fn replace_typing(&mut self, range: Range<usize>, text: &str) {
+        let in_cell = crate::tables::cell_text(&self.blocks, range.clone(), text);
+        let text = in_cell.as_deref().unwrap_or(text);
         let caret = range.start + text.len();
         self.edit(range, text, EditKind::Typing, Selection::caret(caret));
     }
@@ -369,6 +408,8 @@ impl Document {
     /// far) with `text`, the caret after it. From the first preedit to the
     /// commit, a composition is one undo step.
     pub fn compose(&mut self, range: Range<usize>, text: &str) {
+        let in_cell = crate::tables::cell_text(&self.blocks, range.clone(), text);
+        let text = in_cell.as_deref().unwrap_or(text);
         let caret = range.start + text.len();
         self.edit(range, text, EditKind::Composing, Selection::caret(caret));
     }
