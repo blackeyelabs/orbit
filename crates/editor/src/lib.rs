@@ -19,12 +19,16 @@ use gpui_kit::base::text::editor_host::{
     BlockNode, FlowPosition, InlineNode, LeafGeometry, LinkMark, Paragraph, RenderContext,
     TextMark, collect_leaf_geometry,
 };
+use gpui_kit::base::v_flex;
 use gpui_kit::component::ActiveTheme as _;
+use gpui_kit::component::input::{Replace, Search};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use live_preview::blocks::{Block, Kind};
 use live_preview::conceal::{Style, Target};
 use live_preview::{Document, View};
+
+mod find;
 
 actions!(
     live_preview,
@@ -84,7 +88,10 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-c", Copy, context),
         KeyBinding::new("ctrl-x", Cut, context),
         KeyBinding::new("ctrl-v", Paste, context),
+        KeyBinding::new("ctrl-f", Search, context),
+        KeyBinding::new("ctrl-h", Replace, context),
     ]);
+    find::init(cx);
 }
 
 /// Revealed syntax can't be dimmed: `TextMark` has no text colour
@@ -156,6 +163,8 @@ pub struct LivePreview {
     wrap_next: bool,
     /// Which link targets resolve: those that don't are drawn apart.
     resolves: LinkResolver,
+    /// The find bar, while it's open.
+    find: Option<find::Find>,
 }
 
 impl EventEmitter<LivePreviewEvent> for LivePreview {}
@@ -178,6 +187,7 @@ impl LivePreview {
             reveal_caret: false,
             wrap_next: false,
             resolves,
+            find: None,
         };
         this.relayout();
         this
@@ -213,6 +223,7 @@ impl LivePreview {
     pub fn load(&mut self, text: &str, cx: &mut Context<Self>) {
         self.doc.load(text);
         self.reset_list();
+        self.refresh_find(cx);
         self.after_move(cx);
     }
 
@@ -222,6 +233,7 @@ impl LivePreview {
         if text != self.doc.text() {
             self.doc.take_text(text);
             self.reset_list();
+            self.refresh_find(cx);
             self.after_move(cx);
         }
     }
@@ -293,6 +305,7 @@ impl LivePreview {
             self.list
                 .splice(prefix..before.len() - suffix, after.len() - prefix - suffix);
             cx.emit(LivePreviewEvent::Edited);
+            self.refresh_find(cx);
         }
         self.after_move(cx);
     }
@@ -670,9 +683,11 @@ impl LivePreview {
     }
 
     /// The Kit block node for each block, and the decorations (the
-    /// selection) per leaf key.
+    /// selection, and find's other matches) per leaf key.
     fn render_blocks(&self, cx: &App) -> (Vec<BlockNode>, Decorations) {
         let selection_color = cx.theme().colors.selection.opacity(0.5);
+        // As Kit's editor: the other matches in a fainter selection colour.
+        let match_color = cx.theme().colors.selection.opacity(0.2);
         let paragraph = |leaf: usize| -> Paragraph {
             let view = &self.views[leaf];
             let marked = self
@@ -685,12 +700,28 @@ impl LivePreview {
             p.with_leaf_key(leaf_key(leaf))
         };
         let selection = self.doc.selection();
-        let decorations = (0..self.views.len())
-            .filter_map(|leaf| {
-                let range = self.display_range(leaf, &selection)?;
-                Some((leaf_key(leaf), vec![(range, selection_color)]))
-            })
-            .collect();
+        let mut decorations = Decorations::default();
+        let mut decorate = |range: &Range<usize>, color: Hsla| {
+            // From the first leaf the range reaches: it may start between
+            // leaves (on a blank line).
+            let leaves = &self.doc.blocks().leaves;
+            let first = leaves.partition_point(|l| l.source.end < range.start);
+            for leaf in first..self.views.len() {
+                if self.doc.blocks().leaves[leaf].source.start > range.end {
+                    break;
+                }
+                if let Some(shown) = self.display_range(leaf, range) {
+                    decorations
+                        .entry(leaf_key(leaf))
+                        .or_default()
+                        .push((shown, color));
+                }
+            }
+        };
+        for m in self.find.iter().flat_map(|f| f.other_matches()) {
+            decorate(m, match_color);
+        }
+        decorate(&selection, selection_color);
         let blocks = self
             .doc
             .blocks()
@@ -1039,102 +1070,112 @@ impl Render for LivePreview {
         })
         .size_full()
         .into_any_element();
-        div()
-            .size_full()
-            .key_context(KEY_CONTEXT)
-            .track_focus(&self.focus_handle)
-            .cursor(CursorStyle::IBeam)
-            .on_action(
-                cx.listener(|this, _: &Backspace, _, cx| this.edited(cx, Document::backspace)),
-            )
-            .on_action(cx.listener(|this, _: &Delete, _, cx| this.edited(cx, Document::delete)))
-            .on_action(cx.listener(|this, _: &DeleteToPreviousWordStart, _, cx| {
-                this.edited(cx, Document::backspace_word)
-            }))
-            .on_action(cx.listener(|this, _: &DeleteToNextWordEnd, _, cx| {
-                this.edited(cx, Document::delete_word)
-            }))
-            .on_action(cx.listener(|this, _: &Newline, _, cx| this.edited(cx, Document::newline)))
-            .on_action(cx.listener(|this, _: &Undo, _, cx| {
-                this.edited(cx, |doc| {
-                    doc.undo();
-                })
-            }))
-            .on_action(cx.listener(|this, _: &Redo, _, cx| {
-                this.edited(cx, |doc| {
-                    doc.redo();
-                })
-            }))
-            .on_action(
-                cx.listener(|this, _: &MoveLeft, _, cx| this.moved(cx, |doc| doc.move_left(false))),
-            )
-            .on_action(
-                cx.listener(|this, _: &MoveRight, _, cx| {
+        let find = self.render_find(cx);
+        let editor =
+            div()
+                .flex_1()
+                .min_h_0()
+                .key_context(KEY_CONTEXT)
+                .track_focus(&self.focus_handle)
+                .on_action(
+                    cx.listener(|this, _: &Search, window, cx| this.open_find(false, window, cx)),
+                )
+                .on_action(
+                    cx.listener(|this, _: &Replace, window, cx| this.open_find(true, window, cx)),
+                )
+                .cursor(CursorStyle::IBeam)
+                .on_action(
+                    cx.listener(|this, _: &Backspace, _, cx| this.edited(cx, Document::backspace)),
+                )
+                .on_action(cx.listener(|this, _: &Delete, _, cx| this.edited(cx, Document::delete)))
+                .on_action(cx.listener(|this, _: &DeleteToPreviousWordStart, _, cx| {
+                    this.edited(cx, Document::backspace_word)
+                }))
+                .on_action(cx.listener(|this, _: &DeleteToNextWordEnd, _, cx| {
+                    this.edited(cx, Document::delete_word)
+                }))
+                .on_action(
+                    cx.listener(|this, _: &Newline, _, cx| this.edited(cx, Document::newline)),
+                )
+                .on_action(cx.listener(|this, _: &Undo, _, cx| {
+                    this.edited(cx, |doc| {
+                        doc.undo();
+                    })
+                }))
+                .on_action(cx.listener(|this, _: &Redo, _, cx| {
+                    this.edited(cx, |doc| {
+                        doc.redo();
+                    })
+                }))
+                .on_action(cx.listener(|this, _: &MoveLeft, _, cx| {
+                    this.moved(cx, |doc| doc.move_left(false))
+                }))
+                .on_action(cx.listener(|this, _: &MoveRight, _, cx| {
                     this.moved(cx, |doc| doc.move_right(false))
-                }),
-            )
-            .on_action(
-                cx.listener(|this, _: &SelectLeft, _, cx| {
+                }))
+                .on_action(cx.listener(|this, _: &SelectLeft, _, cx| {
                     this.moved(cx, |doc| doc.move_left(true))
-                }),
-            )
-            .on_action(cx.listener(|this, _: &SelectRight, _, cx| {
-                this.moved(cx, |doc| doc.move_right(true))
-            }))
-            .on_action(cx.listener(|this, _: &MoveUp, _, cx| this.vertical(false, false, cx)))
-            .on_action(cx.listener(|this, _: &MoveDown, _, cx| this.vertical(true, false, cx)))
-            .on_action(cx.listener(|this, _: &SelectUp, _, cx| this.vertical(false, true, cx)))
-            .on_action(cx.listener(|this, _: &SelectDown, _, cx| this.vertical(true, true, cx)))
-            .on_action(cx.listener(|this, _: &MoveToPreviousWord, _, cx| {
-                this.moved(cx, |doc| doc.move_word_left(false))
-            }))
-            .on_action(cx.listener(|this, _: &MoveToNextWord, _, cx| {
-                this.moved(cx, |doc| doc.move_word_right(false))
-            }))
-            .on_action(cx.listener(|this, _: &SelectToPreviousWordStart, _, cx| {
-                this.moved(cx, |doc| doc.move_word_left(true))
-            }))
-            .on_action(cx.listener(|this, _: &SelectToNextWordEnd, _, cx| {
-                this.moved(cx, |doc| doc.move_word_right(true))
-            }))
-            .on_action(cx.listener(|this, _: &MoveHome, _, cx| {
-                this.moved(cx, |doc| doc.move_line_start(false))
-            }))
-            .on_action(cx.listener(|this, _: &MoveEnd, _, cx| {
-                this.moved(cx, |doc| doc.move_line_end(false))
-            }))
-            .on_action(cx.listener(|this, _: &SelectToStartOfLine, _, cx| {
-                this.moved(cx, |doc| doc.move_line_start(true))
-            }))
-            .on_action(cx.listener(|this, _: &SelectToEndOfLine, _, cx| {
-                this.moved(cx, |doc| doc.move_line_end(true))
-            }))
-            .on_action(cx.listener(|this, _: &MoveToStart, _, cx| {
-                this.moved(cx, |doc| doc.move_doc_start(false))
-            }))
-            .on_action(cx.listener(|this, _: &MoveToEnd, _, cx| {
-                this.moved(cx, |doc| doc.move_doc_end(false))
-            }))
-            .on_action(cx.listener(|this, _: &SelectToStart, _, cx| {
-                this.moved(cx, |doc| doc.move_doc_start(true))
-            }))
-            .on_action(cx.listener(|this, _: &SelectToEnd, _, cx| {
-                this.moved(cx, |doc| doc.move_doc_end(true))
-            }))
-            .on_action(
-                cx.listener(|this, _: &SelectAll, _, cx| this.moved(cx, Document::select_all)),
-            )
-            .on_action(cx.listener(Self::copy))
-            .on_action(cx.listener(Self::cut))
-            .on_action(cx.listener(Self::paste))
-            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
-            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
-            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
-            .on_mouse_move(cx.listener(Self::on_mouse_move))
-            .child(HostElement {
-                editor: cx.entity(),
-                child: Some(content),
-                decorations,
-            })
+                }))
+                .on_action(cx.listener(|this, _: &SelectRight, _, cx| {
+                    this.moved(cx, |doc| doc.move_right(true))
+                }))
+                .on_action(cx.listener(|this, _: &MoveUp, _, cx| this.vertical(false, false, cx)))
+                .on_action(cx.listener(|this, _: &MoveDown, _, cx| this.vertical(true, false, cx)))
+                .on_action(cx.listener(|this, _: &SelectUp, _, cx| this.vertical(false, true, cx)))
+                .on_action(cx.listener(|this, _: &SelectDown, _, cx| this.vertical(true, true, cx)))
+                .on_action(cx.listener(|this, _: &MoveToPreviousWord, _, cx| {
+                    this.moved(cx, |doc| doc.move_word_left(false))
+                }))
+                .on_action(cx.listener(|this, _: &MoveToNextWord, _, cx| {
+                    this.moved(cx, |doc| doc.move_word_right(false))
+                }))
+                .on_action(cx.listener(|this, _: &SelectToPreviousWordStart, _, cx| {
+                    this.moved(cx, |doc| doc.move_word_left(true))
+                }))
+                .on_action(cx.listener(|this, _: &SelectToNextWordEnd, _, cx| {
+                    this.moved(cx, |doc| doc.move_word_right(true))
+                }))
+                .on_action(cx.listener(|this, _: &MoveHome, _, cx| {
+                    this.moved(cx, |doc| doc.move_line_start(false))
+                }))
+                .on_action(cx.listener(|this, _: &MoveEnd, _, cx| {
+                    this.moved(cx, |doc| doc.move_line_end(false))
+                }))
+                .on_action(cx.listener(|this, _: &SelectToStartOfLine, _, cx| {
+                    this.moved(cx, |doc| doc.move_line_start(true))
+                }))
+                .on_action(cx.listener(|this, _: &SelectToEndOfLine, _, cx| {
+                    this.moved(cx, |doc| doc.move_line_end(true))
+                }))
+                .on_action(cx.listener(|this, _: &MoveToStart, _, cx| {
+                    this.moved(cx, |doc| doc.move_doc_start(false))
+                }))
+                .on_action(cx.listener(|this, _: &MoveToEnd, _, cx| {
+                    this.moved(cx, |doc| doc.move_doc_end(false))
+                }))
+                .on_action(cx.listener(|this, _: &SelectToStart, _, cx| {
+                    this.moved(cx, |doc| doc.move_doc_start(true))
+                }))
+                .on_action(cx.listener(|this, _: &SelectToEnd, _, cx| {
+                    this.moved(cx, |doc| doc.move_doc_end(true))
+                }))
+                .on_action(
+                    cx.listener(|this, _: &SelectAll, _, cx| this.moved(cx, Document::select_all)),
+                )
+                .on_action(cx.listener(Self::copy))
+                .on_action(cx.listener(Self::cut))
+                .on_action(cx.listener(Self::paste))
+                .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+                .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
+                .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
+                .on_mouse_move(cx.listener(Self::on_mouse_move))
+                .child(HostElement {
+                    editor: cx.entity(),
+                    child: Some(content),
+                    decorations,
+                });
+        // The bar sits outside the editor's key context, so typing in it
+        // never reaches the note.
+        v_flex().size_full().children(find).child(editor)
     }
 }

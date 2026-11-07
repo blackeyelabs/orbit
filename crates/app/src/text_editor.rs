@@ -663,4 +663,71 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(cx.update(|_, cx| editor.scroll(cx)), Some(place));
     }
+
+    #[gpui::test]
+    fn ctrl_f_finds_in_live_preview_and_enter_steps_through_the_matches(cx: &mut TestAppContext) {
+        let (host, cx) = open(cx, "Plan the plan.\n\nA PLAN, **planned**");
+        let editor = live(&host, cx);
+        cx.simulate_keystrokes("ctrl-f");
+        cx.simulate_input("plan");
+        cx.run_until_parked();
+        let selection = |cx: &mut VisualTestContext| cx.update(|_, cx| editor.selection(cx));
+        // The match nearest the caret (at the note's start) is selected.
+        assert_eq!(selection(cx), 0..4);
+        cx.simulate_keystrokes("enter");
+        assert_eq!(selection(cx), 9..13);
+        cx.simulate_keystrokes("enter enter");
+        // Inside the bold: selected, so its markers show.
+        assert_eq!(selection(cx), 26..30);
+        cx.simulate_keystrokes("enter");
+        assert_eq!(selection(cx), 0..4, "wraps");
+        cx.simulate_keystrokes("shift-enter");
+        assert_eq!(selection(cx), 26..30);
+        // Escape goes back to the note, the match still selected.
+        cx.simulate_keystrokes("escape");
+        cx.simulate_input("X");
+        cx.run_until_parked();
+        assert_eq!(
+            cx.update(|_, cx| editor.text(cx)),
+            "Plan the plan.\n\nA PLAN, **Xned**"
+        );
+    }
+
+    #[gpui::test]
+    fn ctrl_h_replaces_one_match_with_enter_and_all_at_once(cx: &mut TestAppContext) {
+        let (host, cx) = open(cx, "plan, plan and plan");
+        let editor = live(&host, cx);
+        cx.simulate_keystrokes("ctrl-h");
+        cx.simulate_input("plan");
+        cx.simulate_keystrokes("tab");
+        cx.simulate_input("trip");
+        // Enter in the replace field: the current match, then the next is
+        // current.
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(cx.update(|_, cx| editor.text(cx)), "trip, plan and plan");
+        assert_eq!(cx.update(|_, cx| editor.selection(cx)), 6..10);
+        cx.simulate_keystrokes("ctrl-alt-enter");
+        cx.run_until_parked();
+        assert_eq!(cx.update(|_, cx| editor.text(cx)), "trip, trip and trip");
+        // Replace all is one undo step.
+        cx.simulate_keystrokes("escape ctrl-z");
+        cx.run_until_parked();
+        assert_eq!(cx.update(|_, cx| editor.text(cx)), "trip, plan and plan");
+    }
+
+    #[gpui::test]
+    fn the_find_bar_finds_afresh_when_the_note_reloads(cx: &mut TestAppContext) {
+        let (host, cx) = open(cx, "Plan the plan, a long plan");
+        let editor = live(&host, cx);
+        cx.simulate_keystrokes("ctrl-h");
+        cx.simulate_input("plan");
+        cx.simulate_keystrokes("tab");
+        cx.simulate_input("trip");
+        cx.update(|window, cx| editor.load("a plan".into(), window, cx));
+        cx.run_until_parked();
+        cx.simulate_keystrokes("ctrl-alt-enter");
+        cx.run_until_parked();
+        assert_eq!(cx.update(|_, cx| editor.text(cx)), "a trip");
+    }
 }

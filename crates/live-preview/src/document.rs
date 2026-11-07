@@ -184,6 +184,32 @@ impl Document {
         self.edit(range, text, EditKind::Other, Selection::spanning(selection));
     }
 
+    /// Replaces every one of `matches` (in order, not overlapping, as
+    /// [`Self::find`] gives them) with `text`, as one undo step: one
+    /// change from the first match to the last. The caret ends after the
+    /// last replacement. Matches the text no longer has (found before it
+    /// changed) are left alone.
+    pub fn replace_all(&mut self, matches: &[Range<usize>], text: &str) {
+        let fits = |m: &Range<usize>| self.text.get(m.clone()).is_some();
+        let in_order = matches.windows(2).all(|w| w[0].end <= w[1].start);
+        if !in_order || !matches.iter().all(fits) {
+            return;
+        }
+        let (Some(first), Some(last)) = (matches.first(), matches.last()) else {
+            return;
+        };
+        let span = first.start..last.end;
+        let mut replaced = String::with_capacity(span.len());
+        let mut at = span.start;
+        for m in matches {
+            replaced.push_str(&self.text[at..m.start]);
+            replaced.push_str(text);
+            at = m.end;
+        }
+        let caret = span.start + replaced.len();
+        self.edit(span, &replaced, EditKind::Other, Selection::caret(caret));
+    }
+
     /// Replaces `range` with `text` as typing, putting the caret after it.
     pub fn replace_typing(&mut self, range: Range<usize>, text: &str) {
         let caret = range.start + text.len();
@@ -480,6 +506,27 @@ impl Document {
             .utf16_to_byte_idx(offset.min(self.rope.len_utf16()))
     }
 
+    /// Every match of `query` in the source, in order and not overlapping;
+    /// case is ignored unless `match_case`. An empty query matches nothing.
+    pub fn find(&self, query: &str, match_case: bool) -> Vec<Range<usize>> {
+        let mut found = Vec::new();
+        if query.is_empty() {
+            return found;
+        }
+        let text = &self.text;
+        let mut at = 0;
+        while at < text.len() {
+            match match_len(&text[at..], query, match_case) {
+                Some(len) => {
+                    found.push(at..at + len);
+                    at += len;
+                }
+                None => at += text[at..].chars().next().map_or(1, char::len_utf8),
+            }
+        }
+        found
+    }
+
     /// What each leaf shows for the current selection. A leaf the
     /// selection doesn't reach lays out fully concealed; a source block's
     /// leaf is verbatim.
@@ -507,6 +554,20 @@ impl Document {
             })
             .collect()
     }
+}
+
+/// How long the match of `query` at the start of `text` is, if there is
+/// one: character by character, case ignored unless `match_case`.
+fn match_len(text: &str, query: &str, match_case: bool) -> Option<usize> {
+    let mut chars = text.char_indices();
+    for q in query.chars() {
+        let (_, c) = chars.next()?;
+        let same = c == q || (!match_case && c.to_lowercase().eq(q.to_lowercase()));
+        if !same {
+            return None;
+        }
+    }
+    Some(chars.next().map_or(text.len(), |(i, _)| i))
 }
 
 /// Whether the grapheme at `at` is part of a word: a letter, digit or `_`.

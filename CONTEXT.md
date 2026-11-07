@@ -58,6 +58,10 @@ _Avoid_: label, category, keyword
 The default editor mode. Markdown renders in place, and its syntax shows only where the caret or selection touches it.
 _Avoid_: WYSIWYG mode, rich mode
 
+**Find bar**:
+Find and replace within the open note (Ctrl+F, Ctrl+H).
+_Avoid_: search (that's Vault search)
+
 **Source mode**:
 The editor mode that shows every markdown mark exactly as stored.
 _Avoid_: raw mode, plain mode, code view
@@ -90,7 +94,7 @@ _Avoid_: action menu
 
 **Vault search**:
 Full-text search across the vault's notes, shown as a panel with filters.
-_Avoid_: find, global search
+_Avoid_: find (that's the Find bar), global search
 
 ### Protection
 
