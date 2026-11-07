@@ -29,6 +29,9 @@ use live_preview::conceal::{Style, Target};
 use live_preview::{Document, View};
 
 mod find;
+mod suggest;
+
+pub use suggest::{Links, Suggestion, Suggestions};
 
 actions!(
     live_preview,
@@ -42,7 +45,11 @@ actions!(
         /// Shift+Down.
         SelectDown,
         /// Enter.
-        Newline
+        Newline,
+        /// Tab: accepts a suggestion, else types a tab.
+        InsertTab,
+        /// Escape: closes the suggestions.
+        Dismiss
     ]
 );
 
@@ -88,6 +95,8 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-c", Copy, context),
         KeyBinding::new("ctrl-x", Cut, context),
         KeyBinding::new("ctrl-v", Paste, context),
+        KeyBinding::new("tab", InsertTab, context),
+        KeyBinding::new("escape", Dismiss, context),
         KeyBinding::new("ctrl-f", Search, context),
         KeyBinding::new("ctrl-h", Replace, context),
     ]);
@@ -110,10 +119,6 @@ const HIGHLIGHT: Hsla = Hsla {
     l: 0.5,
     a: 0.35,
 };
-
-/// Whether a link's target (a note, maybe with a `#heading`) resolves in
-/// the vault.
-pub type LinkResolver = Rc<dyn Fn(&str) -> bool>;
 
 /// The line height assumed for a leaf not laid out yet.
 const FALLBACK_LINE_HEIGHT: Pixels = px(20.);
@@ -161,18 +166,22 @@ pub struct LivePreview {
     /// line: Kit's `LeafGeometry` has no affinity, so it would draw it at
     /// the end of the upper one (see `source_for_point`).
     wrap_next: bool,
-    /// Which link targets resolve: those that don't are drawn apart.
-    resolves: LinkResolver,
+    /// Which link targets resolve, and what to suggest in a link being
+    /// typed.
+    links: Rc<dyn Links>,
     /// The find bar, while it's open.
     find: Option<find::Find>,
+    /// The suggestions pop-up, while it's open.
+    popup: Option<suggest::Popup>,
 }
 
 impl EventEmitter<LivePreviewEvent> for LivePreview {}
 
 impl LivePreview {
-    /// An editor over a note's `text`, the caret at its start; links whose
-    /// target `resolves` are drawn as links, the others as unresolved.
-    pub fn new(text: &str, resolves: LinkResolver, cx: &mut Context<Self>) -> Self {
+    /// An editor over a note's `text`, the caret at its start; `links`
+    /// says which links resolve (the others are drawn as unresolved) and
+    /// what to suggest as one is typed.
+    pub fn new(text: &str, links: Rc<dyn Links>, cx: &mut Context<Self>) -> Self {
         let doc = Document::new(text);
         let blocks = doc.blocks().blocks.len();
         let mut this = LivePreview {
@@ -186,8 +195,9 @@ impl LivePreview {
             goal_x: None,
             reveal_caret: false,
             wrap_next: false,
-            resolves,
+            links,
             find: None,
+            popup: None,
         };
         this.relayout();
         this
@@ -222,6 +232,7 @@ impl LivePreview {
     /// nothing to undo before it.
     pub fn load(&mut self, text: &str, cx: &mut Context<Self>) {
         self.doc.load(text);
+        self.popup = None;
         self.reset_list();
         self.refresh_find(cx);
         self.after_move(cx);
@@ -232,6 +243,7 @@ impl LivePreview {
     pub fn take_text(&mut self, text: &str, cx: &mut Context<Self>) {
         if text != self.doc.text() {
             self.doc.take_text(text);
+            self.popup = None;
             self.reset_list();
             self.refresh_find(cx);
             self.after_move(cx);
@@ -284,6 +296,8 @@ impl LivePreview {
 
     /// Makes an edit, then re-lays out what changed and tells the owner.
     fn edited(&mut self, cx: &mut Context<Self>, edit: impl FnOnce(&mut Document)) {
+        // Typing opens it again (see `update_suggestions`).
+        self.popup = None;
         let before: Vec<(Kind, String)> = self.block_texts();
         let text_before = self.doc.text().len();
         edit(&mut self.doc);
@@ -515,6 +529,7 @@ impl LivePreview {
     /// Moves (or extends the selection) one visual line up or down. The
     /// goal x is kept across consecutive vertical moves.
     fn vertical(&mut self, down: bool, extend: bool, cx: &mut Context<Self>) {
+        self.popup = None;
         let Some(x) = self
             .goal_x
             .or_else(|| self.point_for_source(self.doc.caret()).map(|p| p.x))
@@ -531,6 +546,7 @@ impl LivePreview {
 
     /// Runs a move on the document, then re-lays out what it revealed.
     fn moved(&mut self, cx: &mut Context<Self>, move_: impl FnOnce(&mut Document)) {
+        self.popup = None;
         move_(&mut self.doc);
         self.after_move(cx);
     }
@@ -566,6 +582,8 @@ impl LivePreview {
     fn paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
             self.edited(cx, |doc| doc.paste(&text));
+            // As Source mode: pasting part of a name after `[[` suggests.
+            self.update_suggestions(cx);
         }
     }
 
@@ -579,6 +597,7 @@ impl LivePreview {
         cx: &mut Context<Self>,
     ) {
         window.focus(&self.focus_handle, cx);
+        self.close_suggestions(cx);
         if event.click_count == 1
             && !event.modifiers.shift
             && let Some(target) = self.link_at_point(event.position)
@@ -695,7 +714,7 @@ impl LivePreview {
                 .as_ref()
                 .and_then(|m| self.display_range(leaf, m));
             let mut p = Paragraph::default();
-            let marks = marks(view, marked, &*self.resolves);
+            let marks = marks(view, marked, &|target| self.links.resolves(target));
             p.push(InlineNode::new(view.display_text().to_string()).marks(marks));
             p.with_leaf_key(leaf_key(leaf))
         };
@@ -874,6 +893,7 @@ impl EntityInputHandler for LivePreview {
         } else {
             self.edited(cx, |doc| doc.replace_typing(range, new_text));
         }
+        self.update_suggestions(cx);
     }
 
     fn replace_and_mark_text_in_range(
@@ -894,6 +914,8 @@ impl EntityInputHandler for LivePreview {
             let end = range.start + utf16_to_utf8(new_text, sel.end);
             self.moved(cx, |doc| doc.select(start..end));
         }
+        // The preedit counts as typed: it refilters the pop-up.
+        self.update_suggestions(cx);
     }
 
     fn bounds_for_range(
@@ -1049,7 +1071,7 @@ impl Element for HostElement {
 }
 
 impl Render for LivePreview {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // A click on a link is the editor's (see `on_mouse_down`).
         let rcx = RenderContext::from_app(cx).on_link_click(|_, _, _, _| {});
         let (blocks, decorations) = self.render_blocks(cx);
@@ -1071,6 +1093,11 @@ impl Render for LivePreview {
         .size_full()
         .into_any_element();
         let find = self.render_find(cx);
+        // Focus gone (to the find bar, say), the pop-up goes too.
+        if !self.focus_handle.is_focused(window) {
+            self.popup = None;
+        }
+        let suggestions = self.render_suggestions(cx);
         let editor =
             div()
                 .flex_1()
@@ -1084,9 +1111,14 @@ impl Render for LivePreview {
                     cx.listener(|this, _: &Replace, window, cx| this.open_find(true, window, cx)),
                 )
                 .cursor(CursorStyle::IBeam)
-                .on_action(
-                    cx.listener(|this, _: &Backspace, _, cx| this.edited(cx, Document::backspace)),
-                )
+                .on_action(cx.listener(|this, _: &Backspace, _, cx| {
+                    // If the pop-up is open, backspacing refilters it.
+                    let suggesting = this.popup.is_some();
+                    this.edited(cx, Document::backspace);
+                    if suggesting {
+                        this.update_suggestions(cx);
+                    }
+                }))
                 .on_action(cx.listener(|this, _: &Delete, _, cx| this.edited(cx, Document::delete)))
                 .on_action(cx.listener(|this, _: &DeleteToPreviousWordStart, _, cx| {
                     this.edited(cx, Document::backspace_word)
@@ -1094,9 +1126,21 @@ impl Render for LivePreview {
                 .on_action(cx.listener(|this, _: &DeleteToNextWordEnd, _, cx| {
                     this.edited(cx, Document::delete_word)
                 }))
-                .on_action(
-                    cx.listener(|this, _: &Newline, _, cx| this.edited(cx, Document::newline)),
-                )
+                .on_action(cx.listener(|this, _: &Newline, _, cx| {
+                    if !this.accept_chosen_suggestion(cx) {
+                        this.edited(cx, Document::newline)
+                    }
+                }))
+                .on_action(cx.listener(|this, _: &InsertTab, _, cx| {
+                    if !this.accept_chosen_suggestion(cx) {
+                        this.edited(cx, |doc| doc.type_text("\t"))
+                    }
+                }))
+                .on_action(cx.listener(|this, _: &Dismiss, _, cx| {
+                    if !this.close_suggestions(cx) {
+                        cx.propagate();
+                    }
+                }))
                 .on_action(cx.listener(|this, _: &Undo, _, cx| {
                     this.edited(cx, |doc| {
                         doc.undo();
@@ -1119,8 +1163,16 @@ impl Render for LivePreview {
                 .on_action(cx.listener(|this, _: &SelectRight, _, cx| {
                     this.moved(cx, |doc| doc.move_right(true))
                 }))
-                .on_action(cx.listener(|this, _: &MoveUp, _, cx| this.vertical(false, false, cx)))
-                .on_action(cx.listener(|this, _: &MoveDown, _, cx| this.vertical(true, false, cx)))
+                .on_action(cx.listener(|this, _: &MoveUp, _, cx| {
+                    if !this.step_suggestion(false, cx) {
+                        this.vertical(false, false, cx)
+                    }
+                }))
+                .on_action(cx.listener(|this, _: &MoveDown, _, cx| {
+                    if !this.step_suggestion(true, cx) {
+                        this.vertical(true, false, cx)
+                    }
+                }))
                 .on_action(cx.listener(|this, _: &SelectUp, _, cx| this.vertical(false, true, cx)))
                 .on_action(cx.listener(|this, _: &SelectDown, _, cx| this.vertical(true, true, cx)))
                 .on_action(cx.listener(|this, _: &MoveToPreviousWord, _, cx| {
@@ -1169,6 +1221,10 @@ impl Render for LivePreview {
                 .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
                 .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
                 .on_mouse_move(cx.listener(Self::on_mouse_move))
+                // The pop-up stays at the caret, so scrolling closes it.
+                .on_scroll_wheel(cx.listener(|this, _, _, cx| {
+                    this.close_suggestions(cx);
+                }))
                 .child(HostElement {
                     editor: cx.entity(),
                     child: Some(content),
@@ -1176,6 +1232,10 @@ impl Render for LivePreview {
                 });
         // The bar sits outside the editor's key context, so typing in it
         // never reaches the note.
-        v_flex().size_full().children(find).child(editor)
+        v_flex()
+            .size_full()
+            .children(find)
+            .child(editor)
+            .children(suggestions)
     }
 }

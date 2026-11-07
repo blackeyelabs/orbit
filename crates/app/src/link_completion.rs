@@ -1,8 +1,11 @@
-//! Wikilink autocomplete in the source editor: typing after `[[` suggests
-//! notes, and the last row offers to create one by the typed name.
+//! Wikilink autocomplete: typing after `[[` suggests notes, and the last
+//! row offers to create one by the typed name. The rows are worked out
+//! once, here, for both editors: Kit's source editor (as a completion
+//! provider) and Live Preview (as its [`Links`]).
 
 use std::{cell::RefCell, rc::Rc, sync::Arc};
 
+use editor::{Links, Suggestion, Suggestions};
 use gpui_kit::component::input::{
     CompletionHighlighter, CompletionProvider, Rope, RopeExt as _, highlight_characters,
 };
@@ -47,11 +50,53 @@ impl LinkCompletions {
         *self.note.borrow_mut() = note;
     }
 
-    /// Whether a link's `target` (`Note#Heading`) resolves from the note:
-    /// a link to a heading in the note itself always does.
-    pub fn resolves(&self, target: &str) -> bool {
-        let (path, _) = md_engine::split_target(target);
-        path.is_empty() || self.vault.resolve(&self.note.borrow(), path).is_some()
+    /// The suggestions with the caret at `caret`, the line it's on starting
+    /// at `line_start`: `before` is that line up to the caret, `after` the
+    /// rest of it (only its first `MAX_LINK` characters are looked at).
+    /// Nothing unless the caret's in a wikilink being typed.
+    /// Offering the "Create …" row remembers it (see `accepted_create`).
+    fn suggest_in_line(
+        &self,
+        line_start: usize,
+        before: &str,
+        after: &str,
+        caret: usize,
+    ) -> Option<Suggestions> {
+        *self.offered.borrow_mut() = None;
+        let start = line_start + md_engine::typed_link(before)?;
+        let name = &before[start - line_start..];
+        let row = |label: String, detail: Option<String>, link: &str| Suggestion {
+            label,
+            detail,
+            insert: format!("{link}]]"),
+        };
+        let found = self
+            .vault
+            .link_suggestions(&self.note.borrow(), name, LIMIT);
+        let mut rows: Vec<Suggestion> = found
+            .notes
+            .into_iter()
+            .map(|note| {
+                let title = note_title(&note.path).to_string();
+                let folder = note.path.parent();
+                let (label, detail) = match &note.alias {
+                    // An alias, then the note it's for, where it is.
+                    Some(alias) if folder.is_root() => (alias.clone(), Some(title)),
+                    Some(alias) => (alias.clone(), Some(format!("{folder}/{title}"))),
+                    None => (title, (!folder.is_root()).then(|| folder.to_string())),
+                };
+                row(label, detail, &note.text())
+            })
+            .collect();
+        if let Some(name) = found.new_note {
+            rows.push(row(format!("Create “{name}” as a new note"), None, &name));
+            *self.offered.borrow_mut() = Some(Offer { start, name, caret });
+        }
+        Some(Suggestions {
+            replace: start..link_end(after, caret),
+
+            rows,
+        })
     }
 
     /// After an edit: the name whose "Create …" row was just accepted, if it
@@ -82,6 +127,27 @@ impl LinkCompletions {
     }
 }
 
+impl Links for LinkCompletions {
+    /// Whether a link's `target` (`Note#Heading`) resolves from the note:
+    /// a link to a heading in the note itself always does.
+    fn resolves(&self, target: &str) -> bool {
+        let (path, _) = md_engine::split_target(target);
+        path.is_empty() || self.vault.resolve(&self.note.borrow(), path).is_some()
+    }
+
+    /// What Source mode would suggest with the caret at `caret`.
+    fn suggest(&self, text: &str, caret: usize) -> Option<Suggestions> {
+        let line_start = text[..caret].rfind('\n').map_or(0, |n| n + 1);
+        let line_end = text[caret..].find('\n').map_or(text.len(), |n| caret + n);
+        self.suggest_in_line(
+            line_start,
+            &text[line_start..caret],
+            &text[caret..line_end],
+            caret,
+        )
+    }
+}
+
 impl CompletionProvider for LinkCompletions {
     fn completions(
         &self,
@@ -91,56 +157,34 @@ impl CompletionProvider for LinkCompletions {
         _: &mut Window,
         _: &mut App,
     ) -> Task<Result<CompletionResponse>> {
-        *self.offered.borrow_mut() = None;
         let line_start = text.line_start_offset(text.offset_to_position(offset).line as usize);
         let before = text.slice(line_start..offset).to_string();
-        let Some(start) = md_engine::typed_link(&before).map(|start| line_start + start) else {
+        // The rest of the line, as far as a link is looked for.
+        let after: String = text
+            .chars_at(offset)
+            .take_while(|&c| c != '\n')
+            .take(MAX_LINK)
+            .collect();
+        let Some(suggested) = self.suggest_in_line(line_start, &before, &after, offset) else {
             return Task::ready(Ok(CompletionResponse::Array(Vec::new())));
         };
-        let name = text.slice(start..offset).to_string();
         let range = lsp_types::Range::new(
-            text.offset_to_position(start),
-            text.offset_to_position(link_end(text, offset)),
+            text.offset_to_position(suggested.replace.start),
+            text.offset_to_position(suggested.replace.end),
         );
-        let item = |label: String, detail: Option<String>, link: String| CompletionItem {
-            label,
-            detail,
-            text_edit: Some(CompletionTextEdit::Edit(TextEdit {
-                range,
-                new_text: format!("{link}]]"),
-            })),
-            ..Default::default()
-        };
-        let found = self
-            .vault
-            .link_suggestions(&self.note.borrow(), &name, LIMIT);
-        let mut items: Vec<CompletionItem> = found
-            .notes
+        let items = suggested
+            .rows
             .into_iter()
-            .map(|note| {
-                let title = note_title(&note.path).to_string();
-                let folder = note.path.parent();
-                let (label, detail) = match &note.alias {
-                    // An alias, then the note it's for, where it is.
-                    Some(alias) if folder.is_root() => (alias.clone(), Some(title)),
-                    Some(alias) => (alias.clone(), Some(format!("{folder}/{title}"))),
-                    None => (title, (!folder.is_root()).then(|| folder.to_string())),
-                };
-                item(label, detail, note.text())
+            .map(|row| CompletionItem {
+                label: row.label,
+                detail: row.detail,
+                text_edit: Some(CompletionTextEdit::Edit(TextEdit {
+                    range,
+                    new_text: row.insert,
+                })),
+                ..Default::default()
             })
             .collect();
-        if let Some(name) = found.new_note {
-            items.push(item(
-                format!("Create “{name}” as a new note"),
-                None,
-                name.clone(),
-            ));
-            *self.offered.borrow_mut() = Some(Offer {
-                start,
-                name,
-                caret: offset,
-            });
-        }
         Task::ready(Ok(CompletionResponse::Array(items)))
     }
 
@@ -151,17 +195,18 @@ impl CompletionProvider for LinkCompletions {
     }
 }
 
-/// Where the link the caret is in ends: past its `]]` if it's already
-/// closed on this line (the editor may close it), else at the caret. A
-/// suggestion replaces the rest of the link.
-fn link_end(text: &Rope, offset: usize) -> usize {
-    let after: String = text
-        .chars_at(offset)
-        .take_while(|&c| c != '\n')
-        .take(MAX_LINK)
-        .collect();
+/// Where the link the caret (at `caret`) is in ends, given `after`, the
+/// rest of its line: past its `]]` if it's already closed (the editor may
+/// close it), else at the caret. A suggestion replaces the rest of the
+/// link.
+fn link_end(after: &str, caret: usize) -> usize {
+    let cap = after
+        .char_indices()
+        .nth(MAX_LINK)
+        .map_or(after.len(), |(i, _)| i);
+    let after = &after[..cap];
     match (after.find("]]"), after.find("[[")) {
-        (Some(close), open) if open.is_none_or(|open| close < open) => offset + close + 2,
-        _ => offset,
+        (Some(close), open) if open.is_none_or(|open| close < open) => caret + close + 2,
+        _ => caret,
     }
 }

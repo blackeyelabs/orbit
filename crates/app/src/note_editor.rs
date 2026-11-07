@@ -1202,4 +1202,27 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(held(cx).unwrap_or_default(), "", "cleared");
     }
+
+    #[gpui::test]
+    fn accepting_the_create_row_in_live_preview_asks_for_the_note(cx: &mut TestAppContext) {
+        let (editor, cx, _dir) = open(cx, "Note.md", "");
+        let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = asked.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&editor, move |_, event: &super::NoteEditorEvent, _| {
+                if let super::NoteEditorEvent::CreateLinkedNote(link) = event {
+                    seen.borrow_mut().push(link.clone());
+                }
+            })
+            .detach();
+        });
+        cx.simulate_input("[[Brand new");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(
+            cx.update(|_, cx| editor.read(cx).source.text(cx)),
+            "[[Brand new]]"
+        );
+        assert_eq!(*asked.borrow(), ["Brand new"]);
+    }
 }

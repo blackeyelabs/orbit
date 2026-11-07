@@ -106,8 +106,7 @@ impl TextEditor {
                     Some(live) => live.update(cx, |live, cx| live.take_text(&text, cx)),
                     None => {
                         let links = self.views.read(cx).links.clone();
-                        let resolves = Rc::new(move |target: &str| links.resolves(target));
-                        let live = cx.new(|cx| LivePreview::new(&text, resolves, cx));
+                        let live = cx.new(|cx| LivePreview::new(&text, links, cx));
                         self.views.update(cx, |views, cx| {
                             views._live_events =
                                 Some(cx.subscribe(&live, |_, _, event: &LivePreviewEvent, cx| {
@@ -362,11 +361,23 @@ mod tests {
         cx: &'a mut TestAppContext,
         text: &str,
     ) -> (Entity<Host>, &'a mut VisualTestContext) {
+        open_among(cx, text, &[])
+    }
+
+    /// As [`open`], in a vault that also holds the notes `others`.
+    fn open_among<'a>(
+        cx: &'a mut TestAppContext,
+        text: &str,
+        others: &[&str],
+    ) -> (Entity<Host>, &'a mut VisualTestContext) {
         cx.update(|cx| {
             gpui_kit::init(cx);
             editor::init(cx);
         });
         let dir = tempfile::tempdir().expect("a temporary vault");
+        for name in others {
+            std::fs::write(dir.path().join(name), "").unwrap();
+        }
         let vault = Arc::new(Vault::open(dir.path()).expect("the vault opens"));
         let links = Rc::new(LinkCompletions::new(
             vault,
@@ -729,5 +740,63 @@ mod tests {
         cx.simulate_keystrokes("ctrl-alt-enter");
         cx.run_until_parked();
         assert_eq!(cx.update(|_, cx| editor.text(cx)), "a trip");
+    }
+
+    /// Notes for the link tests: typing `[[orbit r` suggests the first,
+    /// then offers to create "orbit r".
+    const NOTES: &[&str] = &["Orbit roadmap.md", "Recipes.md"];
+
+    #[gpui::test]
+    fn typing_a_wikilink_in_live_preview_suggests_notes_and_enter_accepts(cx: &mut TestAppContext) {
+        let (host, cx) = open_among(cx, "", NOTES);
+        let editor = live(&host, cx);
+        cx.simulate_input("See [[orbit r");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(cx.update(|_, cx| editor.text(cx)), "See [[Orbit roadmap]]");
+        assert_eq!(cx.update(|_, cx| editor.caret(cx)), 21);
+    }
+
+    #[gpui::test]
+    fn the_create_row_writes_the_typed_name_as_the_link(cx: &mut TestAppContext) {
+        let (host, cx) = open_among(cx, "", NOTES);
+        let editor = live(&host, cx);
+        cx.simulate_input("[[orbit r");
+        cx.simulate_keystrokes("down tab");
+        cx.run_until_parked();
+        assert_eq!(cx.update(|_, cx| editor.text(cx)), "[[orbit r]]");
+    }
+
+    #[gpui::test]
+    fn escape_closes_the_suggestions_so_enter_breaks_the_line(cx: &mut TestAppContext) {
+        let (host, cx) = open_among(cx, "", NOTES);
+        let editor = live(&host, cx);
+        cx.simulate_input("[[orbit r");
+        cx.simulate_keystrokes("escape enter");
+        cx.run_until_parked();
+        assert_eq!(cx.update(|_, cx| editor.text(cx)), "[[orbit r\n");
+    }
+
+    #[gpui::test]
+    fn the_suggestions_refilter_as_you_type_and_backspace(cx: &mut TestAppContext) {
+        let (host, cx) = open_among(cx, "", NOTES);
+        let editor = live(&host, cx);
+        cx.simulate_input("[[orbit");
+        cx.simulate_keystrokes("backspace backspace backspace backspace backspace");
+        cx.simulate_input("rec");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(cx.update(|_, cx| editor.text(cx)), "[[Recipes]]");
+    }
+
+    #[gpui::test]
+    fn pasting_part_of_a_name_suggests_too(cx: &mut TestAppContext) {
+        let (host, cx) = open_among(cx, "", NOTES);
+        let editor = live(&host, cx);
+        cx.simulate_input("[[");
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string("recip".into()));
+        cx.simulate_keystrokes("ctrl-v enter");
+        cx.run_until_parked();
+        assert_eq!(cx.update(|_, cx| editor.text(cx)), "[[Recipes]]");
     }
 }

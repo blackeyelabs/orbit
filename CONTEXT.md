@@ -62,6 +62,10 @@ _Avoid_: WYSIWYG mode, rich mode
 Find and replace within the open note (Ctrl+F, Ctrl+H).
 _Avoid_: search (that's Vault search)
 
+**Link suggestions**:
+The pop-up that typing `[[` opens: notes to link to, best first, and a last row to create one by the typed name.
+_Avoid_: autocomplete menu, completions
+
 **Source mode**:
 The editor mode that shows every markdown mark exactly as stored.
 _Avoid_: raw mode, plain mode, code view
