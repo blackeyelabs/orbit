@@ -17,8 +17,8 @@ use gpui_kit::base::input::{
     SelectToNextWordEnd, SelectToPreviousWordStart, SelectToStart, SelectToStartOfLine, Undo,
 };
 use gpui_kit::base::text::editor_host::{
-    BlockNode, FlowPosition, InlineNode, LeafGeometry, LinkMark, Paragraph, RenderContext,
-    TextMark, collect_leaf_geometry,
+    BlockNode, CodeBlock, FlowPosition, InlineNode, LeafGeometry, LinkMark, Paragraph,
+    RenderContext, Span, TextMark, collect_leaf_geometry,
 };
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::input::{Replace, Search};
@@ -29,6 +29,7 @@ use live_preview::blocks::{Block, Item, Kind};
 use live_preview::conceal::{Style, Target};
 use live_preview::{Document, View};
 
+mod code;
 mod find;
 mod suggest;
 
@@ -102,6 +103,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-h", Replace, context),
     ]);
     find::init(cx);
+    code::init(cx);
 }
 
 /// Revealed syntax can't be dimmed: `TextMark` has no text colour
@@ -142,11 +144,20 @@ const CHECKBOX: f32 = 0.9375;
 /// Bullets, by how deep the item nests, as Kit's preview draws them.
 const BULLETS: [&str; 3] = ["•", "◦", "▪"];
 
-/// A block as drawn: its Kit node, and the row around it if it's a list
-/// item.
+/// A block as drawn: its Kit node, and what the editor draws around it.
 struct Drawn {
     node: BlockNode,
-    item: Option<ItemRow>,
+    frame: Frame,
+}
+
+/// What the editor draws around a block's Kit node.
+enum Frame {
+    /// Nothing.
+    Plain,
+    /// A list item's row.
+    Item(ItemRow),
+    /// A code block's picker button and shown fence.
+    Code(code::CodeFrame),
 }
 
 /// A list item's row: its marker column (a bullet, number or checkbox)
@@ -203,6 +214,8 @@ pub struct LivePreview {
     find: Option<find::Find>,
     /// The suggestions pop-up, while it's open.
     popup: Option<suggest::Popup>,
+    /// The language picker, while it's open.
+    picker: Option<code::Picker>,
 }
 
 impl EventEmitter<LivePreviewEvent> for LivePreview {}
@@ -228,6 +241,7 @@ impl LivePreview {
             links,
             find: None,
             popup: None,
+            picker: None,
         };
         this.relayout();
         this
@@ -263,6 +277,7 @@ impl LivePreview {
     pub fn load(&mut self, text: &str, cx: &mut Context<Self>) {
         self.doc.load(text);
         self.popup = None;
+        self.picker_text_replaced();
         self.reset_list();
         self.refresh_find(cx);
         self.after_move(cx);
@@ -274,6 +289,7 @@ impl LivePreview {
         if text != self.doc.text() {
             self.doc.take_text(text);
             self.popup = None;
+            self.picker_text_replaced();
             self.reset_list();
             self.refresh_find(cx);
             self.after_move(cx);
@@ -794,19 +810,34 @@ impl LivePreview {
                             }
                         })
                     }
+                    // Kit highlights it by its language.
+                    Kind::Code(code) => BlockNode::CodeBlock(
+                        CodeBlock::new(
+                            self.views[leaf].display_text().to_string().into(),
+                            code.lang.clone().map(SharedString::from),
+                            None::<Span>,
+                        )
+                        .with_leaf_key(leaf_key(leaf)),
+                    ),
                     Kind::Paragraph | Kind::Empty | Kind::ListItem(_) | Kind::Source => {
                         BlockNode::Paragraph(paragraph(leaf))
                     }
                 };
-                let item = match &block.kind {
-                    Kind::ListItem(item) => Some(ItemRow {
+                let frame = match &block.kind {
+                    Kind::ListItem(item) => Frame::Item(ItemRow {
                         item: item.clone(),
                         block: ix,
                         revealed: self.doc.reveals(leaf),
                     }),
-                    _ => None,
+                    Kind::Code(code) => Frame::Code(code::CodeFrame {
+                        block: ix,
+                        code: code.clone(),
+                        revealed: self.doc.reveals(leaf),
+                        is_last: ix + 1 == self.doc.blocks().blocks.len(),
+                    }),
+                    _ => Frame::Plain,
                 };
-                Drawn { node, item }
+                Drawn { node, frame }
             })
             .collect();
         (blocks, decorations)
@@ -818,10 +849,12 @@ impl LivePreview {
     /// item or quote line goes on into the next, with no gap between.
     fn flows(&self, blocks: &[Drawn]) -> Vec<FlowPosition> {
         let kinds = &self.doc.blocks().blocks;
+        // A shown closing fence comes under the code, and the gap under it.
         let goes_on = |ix: usize| {
-            kinds
-                .get(ix + 1)
-                .is_some_and(|next| kinds[ix].kind.runs_into(&next.kind))
+            matches!(&blocks[ix].frame, Frame::Code(c) if c.closing_fence().is_some())
+                || kinds
+                    .get(ix + 1)
+                    .is_some_and(|next| kinds[ix].kind.runs_into(&next.kind))
         };
         let refs: Vec<&BlockNode> = blocks.iter().map(|d| &d.node).collect();
         (0..refs.len())
@@ -1242,9 +1275,10 @@ impl Render for LivePreview {
             let node = drawn
                 .node
                 .render_with_id(("block", ix), flows[ix], &rcx, window, cx);
-            let body = match &drawn.item {
-                Some(row) => item_row(row, node, &editor, window, cx),
-                None => node,
+            let body = match &drawn.frame {
+                Frame::Item(row) => item_row(row, node, &editor, window, cx),
+                Frame::Code(frame) => code::code_frame(frame, node, &editor, cx),
+                Frame::Plain => node,
             };
             div()
                 .px_6()
@@ -1260,6 +1294,7 @@ impl Render for LivePreview {
             self.popup = None;
         }
         let suggestions = self.render_suggestions(cx);
+        let picker = self.render_picker(window, cx);
         let editor =
             div()
                 .flex_1()
@@ -1399,5 +1434,6 @@ impl Render for LivePreview {
             .children(find)
             .child(editor)
             .children(suggestions)
+            .children(picker)
     }
 }

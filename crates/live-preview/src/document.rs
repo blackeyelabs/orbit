@@ -4,8 +4,10 @@ use std::{ops::Range, time::Instant};
 
 use ropey::{LineType, Rope};
 
-use crate::blocks::{Block, Blocks, Item, Kind, next_grapheme, prev_grapheme};
-use crate::conceal::{Layout, Link, Run, Selection, layout_line};
+use crate::blocks::{
+    Block, Blocks, Code, Item, Kind, Shows, next_grapheme, opening_fence, prev_grapheme,
+};
+use crate::conceal::{Layout, Link, Run, Selection, layout_code, layout_line};
 use crate::undo::{Change, EditKind, History};
 
 /// Where the time comes from, for grouping undo steps.
@@ -130,9 +132,42 @@ impl Document {
         self.edit(range, &inserted, EditKind::Typing, Selection::caret(caret));
     }
 
-    /// Enter: a line break over the selection.
+    /// Enter: a line break over the selection. At the end of a code
+    /// block's opening fence that nothing closes yet (```` ``` ```` just
+    /// typed), it closes the block, naming its language `txt` if none is,
+    /// and puts the caret on the empty line inside.
     pub fn newline(&mut self) {
-        self.type_text("\n");
+        let caret = self.caret();
+        match self.opening_fence_ended_at(caret) {
+            Some(code) if self.selection.range().is_empty() => {
+                let named = if code.lang.is_some() { "" } else { "txt" };
+                let inserted = format!("{named}\n\n```");
+                let after = Selection::caret(caret + named.len() + 1);
+                self.edit(caret..caret, &inserted, EditKind::Typing, after);
+            }
+            _ => self.type_text("\n"),
+        }
+    }
+
+    /// The code block whose opening fence ends at `offset`, if it's one
+    /// just typed: nothing closes it, or only the closing fence of a block
+    /// below (its body holds that block's opening fence).
+    fn opening_fence_ended_at(&self, offset: usize) -> Option<&Code> {
+        let leaf = self.blocks.leaf_at(offset)?;
+        let Some(Block {
+            kind: Kind::Code(code),
+            ..
+        }) = self.blocks.block_of(leaf)
+        else {
+            return None;
+        };
+        let source = &self.blocks.leaves[leaf].source;
+        let text = &self.text[source.clone()];
+        let mut lines = text.split('\n');
+        let fence = lines.next().unwrap_or_default();
+        let swallowed = lines.any(|line| opening_fence(line).is_some_and(|f| !f.lang.is_empty()));
+        let new = code.close.is_none() || swallowed;
+        (new && offset == source.start + fence.len()).then_some(code)
     }
 
     /// Pastes `text` over the selection: an undo step of its own.
@@ -224,13 +259,49 @@ impl Document {
             return false;
         };
         let leaf = &self.blocks.leaves[leaves.start];
-        let marker = &self.text[leaf.source.start..leaf.source.start + leaf.marker];
+        let Shows::Prose { marker } = leaf.shows else {
+            return false;
+        };
+        let marker = &self.text[leaf.source.start..leaf.source.start + marker];
         let Some(open) = marker.find('[') else {
             return false;
         };
         let at = leaf.source.start + open + 1;
         let mark = if *ticked { " " } else { "x" };
         self.edit(at..at + 1, mark, EditKind::Other, self.selection);
+        true
+    }
+
+    /// Names block `block`'s language `lang` (the language picker): the
+    /// first word after its opening fence becomes `lang`, an undo step of
+    /// its own, the selection staying on the same text. Says whether the
+    /// block is code.
+    pub fn set_code_language(&mut self, block: usize, lang: &str) -> bool {
+        let Some(Block {
+            kind: Kind::Code(_),
+            leaves,
+        }) = self.blocks.blocks.get(block)
+        else {
+            return false;
+        };
+        let start = self.blocks.leaves[leaves.start].source.start;
+        let line = self.text[start..].split('\n').next().unwrap_or_default();
+        let Some(fence) = opening_fence(line) else {
+            return false;
+        };
+        let range = start + fence.lang.start..start + fence.lang.end;
+        let shift = |o: usize| {
+            if o >= range.end {
+                o - range.len() + lang.len()
+            } else {
+                o
+            }
+        };
+        let after = Selection {
+            anchor: shift(self.selection.anchor),
+            head: shift(self.selection.head),
+        };
+        self.edit(range, lang, EditKind::Other, after);
         true
     }
 
@@ -571,9 +642,6 @@ impl Document {
             .enumerate()
             .map(|(ix, leaf)| {
                 let text = &self.text[leaf.source.clone()];
-                if !leaf.conceals {
-                    return View::Verbatim(text.to_string());
-                }
                 let local = if self.reveals(ix) {
                     let rel =
                         |o: usize| o.clamp(leaf.source.start, leaf.source.end) - leaf.source.start;
@@ -584,7 +652,11 @@ impl Document {
                 } else {
                     NOTHING_REVEALED
                 };
-                View::Concealed(layout_line(text, leaf.marker, local))
+                match leaf.shows {
+                    Shows::Prose { marker } => View::Concealed(layout_line(text, marker, local)),
+                    Shows::Code { fence } => View::Concealed(layout_code(text, fence, local)),
+                    Shows::Source => View::Verbatim(text.to_string()),
+                }
             })
             .collect()
     }

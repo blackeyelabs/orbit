@@ -62,6 +62,10 @@ _Avoid_: WYSIWYG mode, rich mode
 Find and replace within the open note (Ctrl+F, Ctrl+H).
 _Avoid_: search (that's Vault search)
 
+**Language picker**:
+The button above a code block in Live Preview that names its language, and the searchable list it opens.
+_Avoid_: language dropdown, syntax selector
+
 **Link suggestions**:
 The pop-up that typing `[[` opens: notes to link to, best first, and a last row to create one by the typed name.
 _Avoid_: autocomplete menu, completions

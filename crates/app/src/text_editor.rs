@@ -644,6 +644,108 @@ mod tests {
     }
 
     #[gpui::test]
+    fn up_and_down_step_through_a_code_block_that_ends_the_note(cx: &mut TestAppContext) {
+        let (host, cx) = open(cx, "Intro\n\n```\none\ntwo\n```");
+        let editor = live(&host, cx);
+        let line = |cx: &mut VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|_, cx| editor.caret_line_column(cx))
+        };
+        cx.simulate_keystrokes("down");
+        assert_eq!(line(cx), (3, 0), "into the code's first line");
+        cx.simulate_keystrokes("down");
+        assert_eq!(line(cx), (4, 0));
+        // Past the closing fence: the empty line that ends the note.
+        cx.simulate_keystrokes("down");
+        assert_eq!(cx.update(|_, cx| editor.caret(cx)), 22);
+        cx.simulate_input("x");
+        cx.run_until_parked();
+        assert_eq!(
+            cx.update(|_, cx| editor.text(cx)),
+            "Intro\n\n```\none\ntwo\n```\nx"
+        );
+        cx.simulate_keystrokes("up");
+        assert_eq!(line(cx).0, 4, "back into the code");
+        cx.simulate_keystrokes("up up");
+        assert_eq!(line(cx), (2, 0), "the opening fence, shown");
+    }
+
+    #[gpui::test]
+    fn the_language_picker_writes_the_language_chosen(cx: &mut TestAppContext) {
+        let (host, cx) = open(cx, "```rust\nlet x = 1;\n```\n\nEnd");
+        let editor = live(&host, cx);
+        cx.simulate_keystrokes("ctrl-end");
+        cx.run_until_parked();
+        // The button sits over the block's top-left corner, past the
+        // editor's padding (24 px left, 16 top).
+        let open_picker = |cx: &mut VisualTestContext| {
+            cx.simulate_click(
+                gpui::point(gpui::px(30.), gpui::px(24.)),
+                gpui::Modifiers::none(),
+            );
+            cx.run_until_parked();
+        };
+        let text = |cx: &mut VisualTestContext| cx.update(|_, cx| editor.text(cx));
+        open_picker(cx);
+        cx.simulate_input("pyth");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(text(cx), "```python\nlet x = 1;\n```\n\nEnd");
+        assert_eq!(host.read_with(cx, |h, _| h.edits), 1);
+        // A name not in the list, as typed.
+        open_picker(cx);
+        cx.simulate_input("mylang");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(text(cx), "```mylang\nlet x = 1;\n```\n\nEnd");
+        // A custom name runs to 20 characters; a longer one isn't offered.
+        open_picker(cx);
+        cx.simulate_input("abcdefghijklmnopqrstu");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(text(cx), "```mylang\nlet x = 1;\n```\n\nEnd");
+        open_picker(cx);
+        cx.simulate_input("abcdefghijklmnopqrst");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(text(cx), "```abcdefghijklmnopqrst\nlet x = 1;\n```\n\nEnd");
+        // Down steps through the list: txt, javascript, python.
+        open_picker(cx);
+        cx.simulate_keystrokes("down down enter");
+        cx.run_until_parked();
+        assert_eq!(text(cx), "```python\nlet x = 1;\n```\n\nEnd");
+        // Escape changes nothing, and typing goes to the note again.
+        open_picker(cx);
+        cx.simulate_keystrokes("escape");
+        cx.simulate_input("!");
+        cx.run_until_parked();
+        assert_eq!(text(cx), "```python\nlet x = 1;\n```\n\nEnd!");
+    }
+
+    #[gpui::test]
+    fn a_reload_under_an_open_picker_leaves_the_new_text_alone(cx: &mut TestAppContext) {
+        let (host, cx) = open(cx, "```rust\nx\n```\n\nEnd");
+        let editor = live(&host, cx);
+        cx.simulate_keystrokes("ctrl-end");
+        cx.run_until_parked();
+        cx.simulate_click(
+            gpui::point(gpui::px(30.), gpui::px(24.)),
+            gpui::Modifiers::none(),
+        );
+        cx.run_until_parked();
+        cx.simulate_input("go");
+        // From disk, another code block where that one was.
+        let new = "```py\ny\n```\n\n```rust\nx\n```";
+        cx.update(|window, cx| editor.load(new.into(), window, cx));
+        // It closes: Enter goes to the note, and the language isn't written.
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        let text = cx.update(|_, cx| editor.text(cx));
+        assert!(text.starts_with("```py\ny\n```"), "{text:?}");
+        assert!(!text.contains("go"), "{text:?}");
+    }
+
+    #[gpui::test]
     fn a_click_on_a_web_address_opens_it_and_on_a_note_link_follows_it(cx: &mut TestAppContext) {
         let click = |cx: &mut VisualTestContext| {
             cx.simulate_click(

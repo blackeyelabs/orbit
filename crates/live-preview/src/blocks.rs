@@ -3,11 +3,13 @@
 //! editor renders as one keyed text leaf. Source outside every leaf (the
 //! blank line between blocks) is never under the caret.
 //!
-//! Paragraphs, headings, list items and quotes render; every other block
-//! (code, tables, rules, front matter) shows its source as typed, nothing
-//! concealed, until its own Live Preview ticket gives it a widget. Each
-//! list item and quote line is a block of its own, its leaf starting with
-//! the line's marker (`-`, `1.`, `- [ ]`, `>`): see [`Leaf::marker`].
+//! Paragraphs, headings, list items, quotes and code blocks render; every
+//! other block (tables, rules, front matter) shows its source as typed,
+//! nothing concealed, until its own Live Preview ticket gives it a widget.
+//! Each list item and quote line is a block of its own, its leaf starting
+//! with the line's marker (`-`, `1.`, `- [ ]`, `>`); a code block's leaf
+//! starts with its opening fence, the closing fence left out (see
+//! [`Shows`]).
 
 use std::ops::Range;
 
@@ -28,6 +30,8 @@ pub enum Kind {
     ListItem(Item),
     /// One line of a quote, nested this deep (`> >` is 2).
     Quote(usize),
+    /// A fenced code block.
+    Code(Code),
     /// A block shown as its source, verbatim: the leaf is all of it.
     Source,
 }
@@ -41,6 +45,16 @@ pub struct Item {
     pub number: Option<u32>,
     /// A task's checkbox: whether it's ticked.
     pub task: Option<bool>,
+}
+
+/// A fenced code block's shape.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Code {
+    /// The language named after the opening fence, if one is.
+    pub lang: Option<String>,
+    /// Its closing fence's line, as written (trimmed); without one it runs
+    /// to the note's end.
+    pub close: Option<String>,
 }
 
 /// A list level open while the items below are parsed: where its last
@@ -70,17 +84,26 @@ pub struct Block {
     pub leaves: Range<usize>,
 }
 
-/// A keyed text leaf: where its text is in the source, and whether inline
-/// syntax in it is concealed.
+/// A keyed text leaf: where its text is in the source, and how it shows.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Leaf {
     /// The leaf's text, as a source range.
     pub source: Range<usize>,
-    /// Prose conceals its syntax; a [`Kind::Source`] block doesn't.
-    pub conceals: bool,
-    /// How many bytes at its start are its line's list or quote marker,
-    /// hidden unless the caret is on the line; 0 for other leaves.
-    pub marker: usize,
+    /// What of it is concealed.
+    pub shows: Shows,
+}
+
+/// How a leaf shows: what of it is concealed while the caret isn't in it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Shows {
+    /// Prose: its inline syntax, and its first `marker` bytes, a list
+    /// item's or quote's line marker (0 for other prose).
+    Prose { marker: usize },
+    /// Code, as typed: only its first `fence` bytes, the opening fence's
+    /// line.
+    Code { fence: usize },
+    /// Nothing: a [`Kind::Source`] block.
+    Source,
 }
 
 /// A note split into blocks and leaves. Rebuilt from the source after
@@ -129,9 +152,58 @@ fn heading_level(text: &str) -> Option<u8> {
     ((1..=6).contains(&hashes) && rest.starts_with(' ')).then_some(hashes as u8)
 }
 
-/// A code fence's opening or closing line.
+/// A code block's opening fence, parsed.
+pub(crate) struct Fence {
+    /// The fence's mark, `` ` `` or `~`.
+    mark: u8,
+    /// How many marks it has: a closing fence has at least as many.
+    len: usize,
+    /// Where the language is (or would go) on the line: the first word
+    /// after the marks, empty if there's none.
+    pub(crate) lang: Range<usize>,
+}
+
+/// An opening fence: up to 3 spaces, then three or more `` ` `` or `~`,
+/// then the info string (no backtick in it after backticks), as in
+/// CommonMark.
+pub(crate) fn opening_fence(text: &str) -> Option<Fence> {
+    let indent = text.bytes().take_while(|&b| b == b' ').count();
+    let mark = *text
+        .as_bytes()
+        .get(indent)
+        .filter(|&&b| b == b'`' || b == b'~')?;
+    let len = text[indent..].bytes().take_while(|&b| b == mark).count();
+    let info = &text[indent + len..];
+    if indent > 3 || len < 3 || (mark == b'`' && info.contains('`')) {
+        return None;
+    }
+    let start = indent + len + (info.len() - info.trim_start().len());
+    let word = text[start..]
+        .find(char::is_whitespace)
+        .unwrap_or(text.len() - start);
+    Some(Fence {
+        mark,
+        len,
+        lang: start..start + word,
+    })
+}
+
+impl Fence {
+    /// Whether `text` closes this fence: up to 3 spaces, as many of its
+    /// marks or more, then nothing but spaces.
+    fn closed_by(&self, text: &str) -> bool {
+        let indent = text.bytes().take_while(|&b| b == b' ').count();
+        let marks = text[indent..]
+            .bytes()
+            .take_while(|&b| b == self.mark)
+            .count();
+        indent <= 3 && marks >= self.len && text[indent + marks..].trim().is_empty()
+    }
+}
+
+/// A code fence's opening line.
 fn is_fence(text: &str) -> bool {
-    text.trim_start().starts_with("```")
+    opening_fence(text).is_some()
 }
 
 /// A table row: a line that starts with a pipe.
@@ -306,7 +378,7 @@ impl Blocks {
                     .count();
                 let separators = usize::from(after_block);
                 for line in &lines[i..i + run - separators.min(run)] {
-                    doc.push(Kind::Empty, line.start..line.start, true);
+                    doc.push(Kind::Empty, line.start..line.start);
                 }
                 after_block = false;
                 i += run;
@@ -324,13 +396,13 @@ impl Blocks {
                     .unwrap_or(lines.len())
             };
             if let Some(level) = heading_level(line.text) {
-                doc.push(Kind::Heading(level), line.start..line.end(), true);
+                doc.push(Kind::Heading(level), line.start..line.end());
                 i += 1;
-            } else if is_fence(line.text) {
-                let close = (i + 1..lines.len()).find(|&j| is_fence(lines[j].text));
-                let end = close.map_or(lines.len(), |c| c + 1);
-                doc.push_source(&lines[i..end]);
-                i = end;
+            } else if let Some(fence) = opening_fence(line.text) {
+                let close_ix = (i + 1..lines.len()).find(|&j| fence.closed_by(lines[j].text));
+                let close = close_ix.map(|c| lines[c].text.trim().to_string());
+                doc.push_code(&lines[i..close_ix.unwrap_or(lines.len())], &fence, close);
+                i = close_ix.map_or(lines.len(), |c| c + 1);
             } else if is_rule(line.text) {
                 doc.push_source(&lines[i..i + 1]);
                 i += 1;
@@ -355,38 +427,52 @@ impl Blocks {
                             || starts_table(lines[j].text, next)
                     })
                     .unwrap_or(lines.len());
-                doc.push(Kind::Paragraph, line.start..lines[end - 1].end(), true);
+                doc.push(Kind::Paragraph, line.start..lines[end - 1].end());
                 i = end;
             }
         }
         // The note's end is always somewhere to stand.
         if doc.leaf_at(source.len()).is_none() {
-            doc.push(Kind::Empty, source.len()..source.len(), true);
+            doc.push(Kind::Empty, source.len()..source.len());
         }
         doc
     }
 
-    /// Adds a block with one leaf.
-    fn push(&mut self, kind: Kind, source: Range<usize>, conceals: bool) {
-        self.push_leaf(
-            kind,
-            Leaf {
-                source,
-                conceals,
-                marker: 0,
-            },
-        );
+    /// Adds a block of prose with one leaf.
+    fn push(&mut self, kind: Kind, source: Range<usize>) {
+        let shows = Shows::Prose { marker: 0 };
+        self.push_leaf(kind, Leaf { source, shows });
     }
 
     /// Adds a block of one line whose first `marker` bytes are its list or
     /// quote marker.
     fn push_line(&mut self, kind: Kind, source: Range<usize>, marker: usize) {
-        let leaf = Leaf {
-            source,
-            conceals: true,
-            marker,
+        let shows = Shows::Prose { marker };
+        self.push_leaf(kind, Leaf { source, shows });
+    }
+
+    /// Adds a code block: its opening fence's line and the code after it
+    /// (`lines`), a leaf; its closing fence's line, `close` if it has one,
+    /// is left out, so the caret never stands on it.
+    fn push_code(&mut self, lines: &[Line], fence: &Fence, close: Option<String>) {
+        let (Some(open), Some(last)) = (lines.first(), lines.last()) else {
+            return;
         };
-        self.push_leaf(kind, leaf);
+        let lang = &open.text[fence.lang.clone()];
+        let kind = Kind::Code(Code {
+            lang: (!lang.is_empty()).then(|| lang.to_string()),
+            close,
+        });
+        // The fence's line break goes with it, when code follows.
+        let fence = open.text.len() + usize::from(lines.len() > 1);
+        let shows = Shows::Code { fence };
+        self.push_leaf(
+            kind,
+            Leaf {
+                source: open.start..last.end(),
+                shows,
+            },
+        );
     }
 
     /// Adds a block of one leaf.
@@ -434,7 +520,14 @@ impl Blocks {
         let (Some(first), Some(last)) = (lines.first(), lines.last()) else {
             return;
         };
-        self.push(Kind::Source, first.start..last.end(), false);
+        let shows = Shows::Source;
+        self.push_leaf(
+            Kind::Source,
+            Leaf {
+                source: first.start..last.end(),
+                shows,
+            },
+        );
     }
 
     /// The source offset block `ix` starts at: its first leaf's start.

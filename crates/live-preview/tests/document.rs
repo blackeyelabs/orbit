@@ -271,17 +271,11 @@ fn backspace_and_delete_remove_one_character_or_the_selection() {
 }
 
 #[test]
-fn code_and_tables_show_as_their_source() {
-    let note = "```\nlet **x** = 1;\n```\n\n| a | b |\n|---|---|\n| c | d |";
+fn tables_show_as_their_source() {
+    let note = "| a | b |\n|---|---|\n| **c** | d |";
     let (mut d, _) = doc(note);
     d.move_doc_end(false);
-    assert_eq!(
-        shown(&d),
-        [
-            "```\nlet **x** = 1;\n```",
-            "| a | b |\n|---|---|\n| c | d |",
-        ]
-    );
+    assert_eq!(shown(&d), ["| a | b |\n|---|---|\n| **c** | d |"]);
 }
 
 #[test]

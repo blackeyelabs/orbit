@@ -199,6 +199,28 @@ pub fn layout(source: &str, selection: Selection) -> Layout {
     layout_line(source, 0, selection)
 }
 
+/// Lays out a code block's leaf: its code as typed, nothing parsed, and its
+/// first `fence` bytes (the opening fence's line) hidden unless the
+/// selection touches the leaf.
+pub fn layout_code(source: &str, fence: usize, selection: Selection) -> Layout {
+    let shown_from = if selection.touches(&(0..source.len())) {
+        0
+    } else {
+        fence
+    };
+    let hidden = (shown_from > 0)
+        .then(|| Hide::new(0..fence))
+        .into_iter()
+        .collect();
+    Layout {
+        display: source[shown_from..].to_string(),
+        source_len: source.len(),
+        hidden,
+        runs: Vec::new(),
+        links: Vec::new(),
+    }
+}
+
 /// Lays out a list item's or quote's line, whose first `marker` bytes are
 /// its marker: hidden, like a heading's `#`s, unless the selection touches
 /// the line.
