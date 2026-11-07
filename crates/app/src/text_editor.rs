@@ -937,6 +937,104 @@ mod tests {
         );
     }
 
+    /// What Live Preview's diagram in block `block` shows once `pending`
+    /// says it's done, waiting (up to 10 s) for the background renderer.
+    fn diagram_when(
+        editor: &TextEditor,
+        block: usize,
+        cx: &mut VisualTestContext,
+        pending: impl Fn(&Option<editor::DiagramShows>) -> bool,
+    ) -> Option<editor::DiagramShows> {
+        let live = cx.update(|_, cx| editor.views.read(cx).live.clone().expect("Live Preview"));
+        for _ in 0..500 {
+            // The editor looks again for a drawing on a timer.
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(100));
+            cx.run_until_parked();
+            let shows = cx.update(|_, cx| live.read(cx).diagram(block, cx));
+            if !pending(&shows) {
+                return shows;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        panic!("the diagram wasn't drawn");
+    }
+
+    #[gpui::test]
+    fn a_mermaid_block_shows_its_diagram_until_the_caret_is_in_it(cx: &mut TestAppContext) {
+        let src = "```mermaid\nflowchart TD\n  A --> B\n```\n\nEnd";
+        let (host, cx) = open(cx, src);
+        let editor = live(&host, cx);
+        cx.simulate_keystrokes("ctrl-end");
+        let drawing = |s: &Option<editor::DiagramShows>| *s == Some(editor::DiagramShows::Drawing);
+        let Some(editor::DiagramShows::Drawn { height, .. }) =
+            diagram_when(&editor, 0, cx, drawing)
+        else {
+            panic!("drawn");
+        };
+        // A click on it puts the caret into its source, which shows.
+        cx.simulate_click(
+            gpui::point(gpui::px(60.), gpui::px(40.)),
+            gpui::Modifiers::none(),
+        );
+        cx.run_until_parked();
+        assert_eq!(cx.update(|_, cx| editor.caret(cx)), "```mermaid\n".len());
+        assert_eq!(diagram_when(&editor, 0, cx, |_| false), None, "its source");
+        // Edited, then left: the new drawing replaces the old once it lands.
+        cx.simulate_keystrokes("down end");
+        cx.simulate_input("\n  B --> C");
+        cx.simulate_keystrokes("ctrl-end");
+        let taller = diagram_when(
+            &editor,
+            0,
+            cx,
+            |s| !matches!(s, Some(editor::DiagramShows::Drawn { height: h, .. }) if *h > height),
+        );
+        assert!(matches!(taller, Some(editor::DiagramShows::Drawn { .. })));
+        // Up from the line below goes into its source too.
+        cx.simulate_keystrokes("up");
+        cx.run_until_parked();
+        assert_eq!(diagram_when(&editor, 0, cx, |_| false), None, "its source");
+        let (line, _) = cx.update(|_, cx| editor.caret_line_column(cx));
+        assert!((1..=3).contains(&line), "in its body: line {line}");
+    }
+
+    #[gpui::test]
+    fn up_and_down_go_into_a_diagram_s_source(cx: &mut TestAppContext) {
+        let src = "Intro\n\n```mermaid\nflowchart TD\n  A --> B\n```\n\nEnd";
+        let (host, cx) = open(cx, src);
+        let editor = live(&host, cx);
+        cx.simulate_keystrokes("ctrl-end");
+        let drawing = |s: &Option<editor::DiagramShows>| *s == Some(editor::DiagramShows::Drawing);
+        assert!(diagram_when(&editor, 1, cx, drawing).is_some());
+        // Up from the line below: into its source, which shows.
+        cx.simulate_keystrokes("up");
+        cx.run_until_parked();
+        assert_eq!(diagram_when(&editor, 1, cx, |_| false), None);
+        assert_eq!(cx.update(|_, cx| editor.caret_line_column(cx)).0, 3);
+        // Down from the line above, once it's drawn again.
+        cx.simulate_keystrokes("ctrl-home");
+        assert!(diagram_when(&editor, 1, cx, drawing).is_some());
+        cx.simulate_keystrokes("down");
+        cx.run_until_parked();
+        assert_eq!(diagram_when(&editor, 1, cx, |_| false), None);
+        assert_eq!(cx.update(|_, cx| editor.caret_line_column(cx)).0, 3);
+    }
+
+    #[gpui::test]
+    fn a_click_on_an_empty_diagram_shows_its_source(cx: &mut TestAppContext) {
+        let (host, cx) = open(cx, "```mermaid\n```\n\nEnd");
+        let editor = live(&host, cx);
+        cx.simulate_keystrokes("ctrl-end");
+        cx.run_until_parked();
+        cx.simulate_click(
+            gpui::point(gpui::px(60.), gpui::px(30.)),
+            gpui::Modifiers::none(),
+        );
+        cx.run_until_parked();
+        assert_eq!(cx.update(|_, cx| editor.caret(cx)), "```mermaid".len());
+    }
+
     #[gpui::test]
     fn a_click_on_a_web_address_opens_it_and_on_a_note_link_follows_it(cx: &mut TestAppContext) {
         let click = |cx: &mut VisualTestContext| {

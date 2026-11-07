@@ -31,11 +31,13 @@ use live_preview::{Document, View};
 
 mod callout;
 mod code;
+mod diagram;
 mod find;
 mod images;
 mod math;
 mod suggest;
 
+pub use diagram::DiagramShows;
 pub use suggest::{Links, Suggestion, Suggestions};
 
 actions!(
@@ -111,6 +113,7 @@ pub fn init(cx: &mut App) {
     ]);
     find::init(cx);
     code::init(cx);
+    diagram::init(cx);
 }
 
 /// Revealed syntax can't be dimmed: `TextMark` has no text colour
@@ -169,6 +172,8 @@ enum Frame {
     Callout(callout::CalloutFrame),
     /// A typeset math block, centred on its line.
     Math,
+    /// A Mermaid block's diagram, in place of its code.
+    Diagram(diagram::DiagramFrame),
 }
 
 /// A list item's row: its marker column (a bullet, number or checkbox)
@@ -229,6 +234,10 @@ pub struct LivePreview {
     picker: Option<code::Picker>,
     /// Math typeset so far.
     math: RefCell<math::MathCache>,
+    /// Each diagram's last good drawing.
+    diagrams: diagram::LastDrawn,
+    /// Looks again soon, while a diagram shown is still being drawn.
+    diagram_poll: Option<Task<()>>,
 }
 
 impl EventEmitter<LivePreviewEvent> for LivePreview {}
@@ -256,6 +265,8 @@ impl LivePreview {
             popup: None,
             picker: None,
             math: RefCell::default(),
+            diagrams: diagram::LastDrawn::default(),
+            diagram_poll: None,
         };
         this.relayout();
         this
@@ -834,6 +845,11 @@ impl LivePreview {
                         })
                     }
                     // Kit highlights it by its language.
+                    // Drawn as its diagram: its leaf is an empty line over
+                    // the diagram's top, unseen, for Up and Down to find.
+                    kind if diagram::is_diagram(kind) && !reveals(leaf) => {
+                        BlockNode::Paragraph(Paragraph::default().with_leaf_key(leaf_key(leaf)))
+                    }
                     Kind::Code(code) => BlockNode::CodeBlock(
                         CodeBlock::new(
                             self.views[leaf].display_text().to_string().into(),
@@ -863,6 +879,10 @@ impl LivePreview {
                         block: ix,
                         revealed: reveals(leaf),
                     }),
+                    // A diagram, until the caret shows its source.
+                    kind if diagram::is_diagram(kind) && !reveals(leaf) => {
+                        Frame::Diagram(self.diagram_frame(ix))
+                    }
                     Kind::Code(code) => Frame::Code(code::CodeFrame {
                         block: ix,
                         code: code.clone(),
@@ -878,6 +898,7 @@ impl LivePreview {
                         })
                     }
                     Kind::Math if !reveals(leaf) => Frame::Math,
+
                     _ => Frame::Plain,
                 };
                 Drawn { node, frame }
@@ -903,6 +924,74 @@ impl LivePreview {
         (0..refs.len())
             .map(|ix| FlowPosition::at(&refs, ix, ix + 1 == refs.len() || goes_on(ix)))
             .collect()
+    }
+
+    /// While a diagram shown is still being drawn, draws again in a while
+    /// to show it once it is.
+    fn poll_diagrams(&mut self, blocks: &[Drawn], cx: &mut Context<Self>) {
+        let pending = blocks
+            .iter()
+            .any(|d| matches!(&d.frame, Frame::Diagram(f) if diagram::pending(&f.source, cx)));
+        if pending && self.diagram_poll.is_none() {
+            self.diagram_poll = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(diagram::POLL).await;
+                this.update(cx, |this, cx| {
+                    this.diagram_poll = None;
+                    cx.notify();
+                })
+                .ok();
+            }));
+        }
+    }
+
+    /// The diagram frame for diagram block `block`.
+    fn diagram_frame(&self, block: usize) -> diagram::DiagramFrame {
+        let blocks = &self.doc.blocks().blocks;
+        let place = blocks[..block]
+            .iter()
+            .filter(|b| diagram::is_diagram(&b.kind))
+            .count();
+        let body = self.code_body(block);
+        diagram::DiagramFrame {
+            block,
+            place,
+            source: self.doc.text()[body].to_string(),
+        }
+    }
+
+    /// The code of code block `block`: its leaf past its opening fence's
+    /// line.
+    fn code_body(&self, block: usize) -> Range<usize> {
+        let blocks = self.doc.blocks();
+        let leaf = &blocks.leaves[blocks.blocks[block].leaves.start];
+        let fence = match leaf.shows {
+            live_preview::blocks::Shows::Code { fence } => fence,
+            _ => 0,
+        };
+        (leaf.source.start + fence).min(leaf.source.end)..leaf.source.end
+    }
+
+    /// A click on a diagram: the caret goes to its code's start (the end
+    /// of its fence, if it has none), and its source shows.
+    pub(crate) fn show_source(
+        &mut self,
+        block: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.focus(&self.focus_handle, cx);
+        let body = self.code_body(block).start;
+        self.moved(cx, |doc| doc.set_caret(body));
+    }
+
+    /// What the diagram in block `block` shows now, if it's a diagram shown
+    /// as one (its source isn't).
+    pub fn diagram(&self, block: usize, cx: &App) -> Option<DiagramShows> {
+        let shown = self.doc.blocks().blocks.get(block)?;
+        if !diagram::is_diagram(&shown.kind) || self.doc.reveals(shown.leaves.start) {
+            return None;
+        }
+        Some(self.diagrams.shows(&self.diagram_frame(block), cx))
     }
 
     /// A click on a task's checkbox: ticks or unticks it.
@@ -1347,6 +1436,8 @@ impl Render for LivePreview {
         let flows = self.flows(&blocks);
         let blocks = Rc::new(blocks);
         let editor = cx.entity();
+        let diagrams = self.diagrams.clone();
+        self.poll_diagrams(&blocks, cx);
         // Only the blocks the list lays out (those in view) render.
         let content = list(self.list.clone(), move |ix, window, cx| {
             let drawn = &blocks[ix];
@@ -1357,6 +1448,7 @@ impl Render for LivePreview {
                 Frame::Item(row) => item_row(row, node, &editor, window, cx),
                 Frame::Code(frame) => code::code_frame(frame, node, &editor, cx),
                 Frame::Callout(frame) => callout::callout_frame(frame, node, cx),
+                Frame::Diagram(frame) => diagrams.render(frame, node, &editor, cx),
                 Frame::Math => h_flex()
                     .w_full()
                     .justify_center()
