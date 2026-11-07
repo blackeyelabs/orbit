@@ -238,6 +238,25 @@ impl LivePreview {
         self.edited(cx, |doc| doc.replace(range, text, selection));
     }
 
+    /// Where the view is scrolled: the source offset the block at its top
+    /// starts at, and how far into that block. (Blocks out of view aren't
+    /// measured, so pixels from the top wouldn't come back right.)
+    pub fn scroll_top(&self) -> (usize, Pixels) {
+        let top = self.list.logical_scroll_top();
+        let start = self.doc.blocks().block_start(top.item_ix);
+        (start.unwrap_or(self.doc.text().len()), top.offset_in_item)
+    }
+
+    /// Scrolls the block holding source offset `top` to the top of the
+    /// view, `within` pixels into it.
+    pub fn scroll_to_top(&mut self, top: usize, within: Pixels, cx: &mut Context<Self>) {
+        self.list.scroll_to(ListOffset {
+            item_ix: self.doc.blocks().block_at(top),
+            offset_in_item: within,
+        });
+        cx.notify();
+    }
+
     /// Puts the caret at the start of `line` (from zero), scrolled into
     /// view.
     pub fn go_to_line(&mut self, line: u32, cx: &mut Context<Self>) {

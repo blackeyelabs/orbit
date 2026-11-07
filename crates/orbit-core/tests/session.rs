@@ -3,7 +3,7 @@
 
 use std::fs;
 
-use orbit_core::{Error, RecentVaults, Session, SessionTab, Vault, VaultPath};
+use orbit_core::{Error, RecentVaults, Scroll, Session, SessionTab, Vault, VaultPath};
 
 fn p(path: &str) -> VaultPath {
     VaultPath::new(path).unwrap()
@@ -12,7 +12,7 @@ fn p(path: &str) -> VaultPath {
 fn tab(path: &str, scroll: f32) -> SessionTab {
     SessionTab {
         path: p(path),
-        scroll,
+        scroll: Scroll::Source(scroll),
     }
 }
 
@@ -54,6 +54,42 @@ fn tabs_the_active_note_and_scroll_positions_come_back_next_time() {
     // The session lives with the vault, out of the tree.
     assert!(dir.path().join(".vault").is_dir());
     assert!(reopened.tree().unwrap().iter().all(|n| n.name != ".vault"));
+}
+
+#[test]
+fn where_live_preview_was_scrolled_comes_back_too() {
+    let dir = vault_with(&["a.md", "b.md"]);
+    let session = Session {
+        tabs: vec![
+            SessionTab {
+                path: p("a.md"),
+                scroll: Scroll::LivePreview {
+                    top: 1240,
+                    within: 18.5,
+                },
+            },
+            tab("b.md", 64.0),
+        ],
+        active: Some(0),
+    };
+    Vault::open(dir.path())
+        .unwrap()
+        .save_session(&session)
+        .unwrap();
+    assert_eq!(Vault::open(dir.path()).unwrap().session(), session);
+}
+
+#[test]
+fn a_session_saved_before_live_preview_reads_as_source_scrolls() {
+    let dir = vault_with(&["a.md"]);
+    fs::create_dir_all(dir.path().join(".vault")).unwrap();
+    fs::write(
+        dir.path().join(".vault/session.json"),
+        r#"{"tabs":[{"path":"a.md","scroll":96.0}],"active":0}"#,
+    )
+    .unwrap();
+    let session = Vault::open(dir.path()).unwrap().session();
+    assert_eq!(session.tabs, [tab("a.md", 96.0)]);
 }
 
 #[test]

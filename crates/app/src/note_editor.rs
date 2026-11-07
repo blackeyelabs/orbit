@@ -24,7 +24,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use md_engine::{Format, Heading, format_edit, headings, word_count};
 use orbit_core::{
-    DiskCheck, EntryKind, OpenNote, Trouble, Vault, VaultPath, Zeroizing, is_large_note,
+    DiskCheck, EntryKind, OpenNote, Scroll, Trouble, Vault, VaultPath, Zeroizing, is_large_note,
     is_plain_text_note,
 };
 
@@ -227,7 +227,7 @@ pub struct NoteEditor {
     /// since when they've been behind.
     catching_up: Option<(Task<()>, std::time::Instant)>,
     /// The scroll restored from the session, until the editor is laid out.
-    restored_scroll: Option<f32>,
+    restored_scroll: Option<Scroll>,
     /// The note's size, while it's opened as source for being very large.
     large: Option<usize>,
     /// While a Copy or Cut agreed to in a protected note runs: it goes
@@ -456,7 +456,8 @@ impl NoteEditor {
             .filter(|&&b| b == b'\n')
             .count() as u32;
         self.source.go_to_line(line, window, cx);
-        NoteEditor::focus(&cx.entity(), window, cx);
+        // Not `NoteEditor::focus`: that reads this editor, mid-update here.
+        self.source.focus_handle(cx).focus(window, cx);
     }
 
     /// Puts the caret at the start of the note's last line (in a new note,
@@ -519,18 +520,18 @@ impl NoteEditor {
         .into()
     }
 
-    /// How far the source is scrolled, in pixels from the top.
-    pub fn scroll(&self, cx: &App) -> f32 {
-        // Before its first layout (a restored tab never shown), the editor
-        // hasn't taken the scroll it was given yet.
+    /// Where the note is scrolled.
+    pub fn scroll(&self, cx: &App) -> Scroll {
+        // Before its first layout (a restored tab never shown), the source
+        // editor hasn't taken the scroll it was given yet.
         self.source
             .scroll(cx)
             .or(self.restored_scroll)
-            .unwrap_or(0.)
+            .unwrap_or_default()
     }
 
-    /// Scrolls the source, from the next layout on.
-    pub fn set_scroll(&mut self, scroll: f32, cx: &mut Context<Self>) {
+    /// Scrolls the note, from the next layout on.
+    pub fn set_scroll(&mut self, scroll: Scroll, cx: &mut Context<Self>) {
         self.restored_scroll = Some(scroll);
         self.source.set_scroll(scroll, cx);
     }
@@ -1032,7 +1033,7 @@ mod tests {
 
     // Named, not globbed: Kit's glob brings gpui's `test` macro, which then
     // shadows `#[test]` inside `#[gpui::test]`.
-    use gpui::{Entity, TestAppContext, VisualTestContext};
+    use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext};
     use orbit_core::{Vault, VaultPath};
 
     use super::NoteEditor;
@@ -1040,28 +1041,51 @@ mod tests {
 
     /// Opens `name` (holding `text`) in a note editor in a headless window,
     /// its text focused.
-    fn open<'a>(
-        cx: &'a mut TestAppContext,
-        name: &str,
-        text: &str,
-    ) -> (
+    fn open<'a>(cx: &'a mut TestAppContext, name: &str, text: &str) -> Opened<'a> {
+        open_with(cx, name, text, |_| {}, |_| {})
+    }
+
+    /// A note editor in a headless window, and the vault's folder.
+    type Opened<'a> = (
         Entity<NoteEditor>,
         &'a mut VisualTestContext,
         tempfile::TempDir,
-    ) {
+    );
+
+    /// As [`open`], with the settings changed by `settings` and the vault
+    /// by `vault_setup` first.
+    fn open_with<'a>(
+        cx: &'a mut TestAppContext,
+        name: &str,
+        text: &str,
+        settings: impl FnOnce(&mut orbit_core::Settings),
+        vault_setup: impl FnOnce(&Vault),
+    ) -> Opened<'a> {
         cx.update(|cx| {
             gpui_kit::init(cx);
             editor::init(cx);
             super::init(cx);
-            cx.set_global(AppSettings::for_tests());
+            let mut app = AppSettings::for_tests();
+            settings(&mut app.settings);
+            cx.set_global(app);
         });
         let dir = tempfile::tempdir().expect("a temporary vault");
-        std::fs::write(dir.path().join(name), text).unwrap();
+        let file = dir.path().join(name);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, text).unwrap();
         let vault = Arc::new(Vault::open(dir.path()).expect("the vault opens"));
+        vault_setup(&vault);
         let path = VaultPath::new(name).unwrap();
         let (note, text) = vault.open_note(&path).expect("the note opens");
-        let (editor, cx) =
-            cx.add_window_view(|window, cx| NoteEditor::new(vault, note, text, window, cx));
+        // Under Kit's root, as in the app, so dialogs can open.
+        let editor = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let held = editor.clone();
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let editor = cx.new(|cx| NoteEditor::new(vault, note, text, window, cx));
+            *held.borrow_mut() = Some(editor.clone());
+            gpui_kit::component::Root::new(editor, window, cx)
+        });
+        let editor = editor.take().expect("the window made the editor");
         cx.update(|window, cx| NoteEditor::focus(&editor, window, cx));
         cx.run_until_parked();
         (editor, cx, dir)
@@ -1099,5 +1123,83 @@ mod tests {
         cx.simulate_keystrokes("ctrl-e");
         cx.run_until_parked();
         assert_eq!(mode(&editor, cx), "Source mode");
+    }
+
+    #[gpui::test]
+    fn go_to_heading_puts_the_caret_on_it_in_live_preview(cx: &mut TestAppContext) {
+        let text = "# Top\n\nIntro\n\n## Part two\n\nMore";
+        let (editor, cx, _dir) = open(cx, "Note.md", text);
+        cx.update(|window, cx| editor.update(cx, |e, cx| e.go_to_heading("Part two", window, cx)));
+        cx.run_until_parked();
+        let caret = cx.update(|_, cx| editor.read(cx).source.caret(cx));
+        assert_eq!(caret, text.find("## Part two").unwrap());
+        assert_eq!(mode(&editor, cx), "Live Preview");
+    }
+
+    #[gpui::test]
+    fn copying_from_a_protected_note_in_live_preview_is_cleared_later(cx: &mut TestAppContext) {
+        // Agreed to for good: copying goes straight on.
+        let (editor, cx, _dir) = open_protected(cx, |s| {
+            s.ask_before_protected_copy = false;
+            s.clear_clipboard_seconds = 5;
+        });
+        assert_eq!(mode(&editor, cx), "Live Preview");
+        cx.simulate_keystrokes("ctrl-a ctrl-c");
+        cx.run_until_parked();
+        let held = |cx: &mut VisualTestContext| cx.read_from_clipboard().and_then(|c| c.text());
+        assert_eq!(held(cx).as_deref(), Some("the zeppelin plan"));
+        // The guard clears what it let through.
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(6));
+        cx.run_until_parked();
+        assert_eq!(held(cx).unwrap_or_default(), "", "cleared");
+    }
+
+    /// A note in a protected folder, `Secret/Plan.md`, opened with the
+    /// settings changed by `settings`.
+    fn open_protected<'a>(
+        cx: &'a mut TestAppContext,
+        settings: impl FnOnce(&mut orbit_core::Settings),
+    ) -> Opened<'a> {
+        open_with(
+            cx,
+            "Secret/Plan.md",
+            "the zeppelin plan",
+            settings,
+            |vault| {
+                vault.set_kdf_params(orbit_crypto::KdfParams::INSECURE_TEST);
+                let keys = vault.prepare_protection("pass").unwrap();
+                let folder = VaultPath::new("Secret").unwrap();
+                vault.protect_folder(&folder, keys).unwrap();
+            },
+        )
+    }
+
+    #[gpui::test]
+    fn copying_from_a_protected_note_in_live_preview_asks_first(cx: &mut TestAppContext) {
+        use gpui_kit::component::WindowExt as _;
+        let (editor, cx, _dir) = open_protected(cx, |_| {});
+        assert_eq!(mode(&editor, cx), "Live Preview");
+        cx.simulate_keystrokes("ctrl-a ctrl-c");
+        cx.run_until_parked();
+        assert!(cx.update(|window, cx| window.has_active_dialog(cx)));
+        assert_eq!(cx.read_from_clipboard().and_then(|c| c.text()), None);
+    }
+
+    #[gpui::test]
+    fn cutting_from_a_protected_note_in_live_preview_is_cleared_later(cx: &mut TestAppContext) {
+        let (editor, cx, _dir) = open_protected(cx, |s| {
+            s.ask_before_protected_copy = false;
+            s.clear_clipboard_seconds = 5;
+        });
+        cx.simulate_keystrokes("ctrl-a ctrl-x");
+        cx.run_until_parked();
+        assert_eq!(cx.update(|_, cx| editor.read(cx).source.text(cx)), "");
+        let held = |cx: &mut VisualTestContext| cx.read_from_clipboard().and_then(|c| c.text());
+        assert_eq!(held(cx).as_deref(), Some("the zeppelin plan"));
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(6));
+        cx.run_until_parked();
+        assert_eq!(held(cx).unwrap_or_default(), "", "cleared");
     }
 }

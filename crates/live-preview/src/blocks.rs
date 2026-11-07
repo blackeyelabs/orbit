@@ -259,6 +259,22 @@ impl Blocks {
         self.push(Kind::Source, first.start..last.end(), false);
     }
 
+    /// The source offset block `ix` starts at: its first leaf's start.
+    /// (Every block has a leaf.)
+    pub fn block_start(&self, ix: usize) -> Option<usize> {
+        let block = self.blocks.get(ix)?;
+        Some(self.leaves[block.leaves.start].source.start)
+    }
+
+    /// The block holding source offset `offset`: the last to start at or
+    /// before it.
+    pub fn block_at(&self, offset: usize) -> usize {
+        let after = self
+            .blocks
+            .partition_point(|b| self.leaves[b.leaves.start].source.start <= offset);
+        after.saturating_sub(1)
+    }
+
     /// The block a leaf belongs to.
     pub fn block_of(&self, leaf: usize) -> Option<&Block> {
         self.blocks.get(self.block_index_of(leaf)?)

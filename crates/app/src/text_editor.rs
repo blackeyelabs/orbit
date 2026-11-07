@@ -12,6 +12,7 @@ use editor::{LivePreview, LivePreviewEvent};
 use gpui_kit::component::input::{Editor, EditorState, InputEvent, Position};
 use gpui_kit::*;
 use md_engine::TextEdit;
+use orbit_core::Scroll;
 
 use crate::clipboard_guard::Copying;
 use crate::link_completion::LinkCompletions;
@@ -253,25 +254,38 @@ impl TextEditor {
         });
     }
 
-    /// How far the source editor is scrolled, in pixels from the top;
-    /// `None` before it's first laid out, when it hasn't taken a scroll it
-    /// was given yet, or while Live Preview shows (its scroll isn't kept
-    /// yet, #54).
-    pub fn scroll(&self, cx: &App) -> Option<f32> {
-        if self.views.read(cx).live_shown().is_some() {
-            return None;
+    /// Where the shown editor is scrolled; `None` for the source editor
+    /// before it's first laid out, when it hasn't taken a scroll it was
+    /// given yet.
+    pub fn scroll(&self, cx: &App) -> Option<Scroll> {
+        if let Some(live) = self.views.read(cx).live_shown() {
+            let (top, within) = live.read(cx).scroll_top();
+            let within = f32::from(within);
+            return Some(Scroll::LivePreview { top, within });
         }
         let state = self.state.read(cx);
         state.line_height()?;
         // Offsets grow negative downwards; `+ 0.` turns -0 into 0.
-        Some(f32::max(0., -f32::from(state.scroll_offset().y)) + 0.)
+        let pixels = f32::max(0., -f32::from(state.scroll_offset().y)) + 0.;
+        Some(Scroll::Source(pixels))
     }
 
-    /// Scrolls the source editor, from the next layout on.
-    pub fn set_scroll(&self, scroll: f32, cx: &mut App) {
-        self.state.update(cx, |state, cx| {
-            state.set_scroll_offset(point(px(0.), px(-scroll)), cx)
-        });
+    /// Scrolls the editor `scroll` came from: Live Preview, or the source
+    /// editor from its next layout on. Live Preview's scroll is dropped
+    /// if it was never shown (the note now opens as source only), and a
+    /// source scroll doesn't carry over to Live Preview: until a note
+    /// reopens in the view it was left in (#54), it opens at the top.
+    pub fn set_scroll(&self, scroll: Scroll, cx: &mut App) {
+        match scroll {
+            Scroll::LivePreview { top, within } => {
+                if let Some(live) = self.views.read(cx).live.clone() {
+                    live.update(cx, |live, cx| live.scroll_to_top(top, px(within), cx));
+                }
+            }
+            Scroll::Source(pixels) => self.state.update(cx, |state, cx| {
+                state.set_scroll_offset(point(px(0.), px(-pixels)), cx)
+            }),
+        }
     }
 
     /// The handle that has focus while the text is being edited.
@@ -320,7 +334,7 @@ mod tests {
         TestAppContext, VisualTestContext, Window, div,
     };
     use md_engine::{Format, format_edit};
-    use orbit_core::{Vault, VaultPath};
+    use orbit_core::{Scroll, Vault, VaultPath};
 
     use super::{Shown, TextEditor};
     use crate::link_completion::LinkCompletions;
@@ -618,5 +632,35 @@ mod tests {
             host.read_with(cx, |h, _| h.followed.clone()),
             ["Other note.md#Top"]
         );
+    }
+
+    #[gpui::test]
+    fn live_preview_says_where_it_s_scrolled_and_comes_back_there(cx: &mut TestAppContext) {
+        let text: Vec<String> = (0..300).map(|i| format!("Paragraph {i}")).collect();
+        let text = text.join("\n\n");
+        let (host, cx) = open(cx, &text);
+        let editor = live(&host, cx);
+        assert_eq!(
+            cx.update(|_, cx| editor.scroll(cx)),
+            Some(Scroll::LivePreview { top: 0, within: 0. })
+        );
+        // The wheel scrolls it down.
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: gpui::point(gpui::px(100.), gpui::px(100.)),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.), gpui::px(-600.))),
+            ..Default::default()
+        });
+        cx.run_until_parked();
+        let scrolled = cx.update(|_, cx| editor.scroll(cx));
+        assert!(
+            matches!(scrolled, Some(Scroll::LivePreview { top, .. }) if top > 0),
+            "{scrolled:?}"
+        );
+        // Given a place (Paragraph 150's block, 3 px in), it's there.
+        let top = text.find("Paragraph 150").unwrap();
+        let place = Scroll::LivePreview { top, within: 3. };
+        cx.update(|_, cx| editor.set_scroll(place, cx));
+        cx.run_until_parked();
+        assert_eq!(cx.update(|_, cx| editor.scroll(cx)), Some(place));
     }
 }

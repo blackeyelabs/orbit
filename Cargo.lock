@@ -235,6 +235,7 @@ dependencies = [
  "lsp-types",
  "md-engine",
  "orbit-core",
+ "orbit-crypto",
  "orbit-fs",
  "rustix",
  "serde_json",

@@ -335,7 +335,7 @@ fn a_session_never_keeps_a_protected_note() {
     let note = p("Zanzibar Diary/otter-confession.md");
     let tab = |path: &VaultPath| SessionTab {
         path: path.clone(),
-        scroll: 0.,
+        scroll: Default::default(),
     };
     // Open before it was protected, then while it's unlocked.
     vault

@@ -34,6 +34,8 @@ chrono = { workspace = true, features = ["clock"] }
 gpui = { workspace = true, features = ["test-support"] }
 # A vault for the tests to open.
 tempfile.workspace = true
+# Fast keys for the tests' protected folders.
+orbit-crypto = { workspace = true, features = ["insecure-test-kdf"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Turning off core dumps.

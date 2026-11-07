@@ -132,7 +132,7 @@ fn nothing_of_a_locked_folder_is_restorable() {
     let (dir, vault) = protected();
     let tab = |path: &str| SessionTab {
         path: p(path),
-        scroll: 0.,
+        scroll: Default::default(),
     };
     vault
         .save_session(&Session {

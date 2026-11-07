@@ -29,7 +29,7 @@ pub use fuzzy::{CommandMatch, NoteMatch, command_query, match_commands};
 pub use index::{Backlink, Mention};
 pub use recent::{RecentVault, RecentVaults};
 pub use search::{IndexingProgress, SearchResult, SearchResults};
-pub use session::{Session, SessionTab};
+pub use session::{Scroll, Session, SessionTab};
 pub use settings::{Settings, ThemeChoice, default_config_dir, default_state_dir};
 pub use suggest::{LinkSuggestion, LinkSuggestions};
 pub use tags::{TagCount, same_tag};

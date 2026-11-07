@@ -398,3 +398,16 @@ fn two_compositions_are_two_undo_steps() {
     d.undo();
     assert_eq!(d.text(), "二");
 }
+
+#[test]
+fn a_block_is_found_by_where_it_starts() {
+    // Blocks: "# Title" at 0, "Some **bold** text" at 9, "End" at 29.
+    let (d, _) = doc(NOTE);
+    let blocks = d.blocks();
+    assert_eq!(blocks.block_start(1), Some(9));
+    assert_eq!(blocks.block_start(9), None);
+    assert_eq!(blocks.block_at(0), 0);
+    assert_eq!(blocks.block_at(12), 1);
+    assert_eq!(blocks.block_at(29), 2);
+    assert_eq!(blocks.block_at(1000), 2);
+}
