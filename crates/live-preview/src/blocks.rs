@@ -530,15 +530,15 @@ impl Blocks {
         let lines = lines(source);
         let mut doc = Blocks::default();
         let mut i = 0;
-        // Front matter, from a `---` first line to the next `---`.
-        let front = source.len() - md_engine::without_front_matter(source).len();
+        // Front matter, from a `---` first line to the next `---`, isn't
+        // shown: the properties panel edits it. With no leaf, no caret
+        // stands in it.
+        let front = md_engine::front_matter(source).len();
         if front > 0 {
-            let end = lines
+            i = lines
                 .iter()
                 .position(|l| l.start >= front)
                 .unwrap_or(lines.len());
-            doc.push_source(&lines[0..end]);
-            i = end;
         }
         // A blank line right after a block only separates it from the next.
         let mut after_block = i > 0;

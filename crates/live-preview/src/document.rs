@@ -706,7 +706,8 @@ impl Document {
             return found;
         }
         let text = &self.text;
-        let mut at = 0;
+        // Not in the front matter, which isn't shown.
+        let mut at = md_engine::front_matter(text).len();
         while at < text.len() {
             match match_len(&text[at..], query, match_case) {
                 Some(len) => {

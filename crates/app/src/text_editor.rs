@@ -201,21 +201,30 @@ impl TextEditor {
     /// Loading text ([`Self::load`]) isn't an edit.
     pub fn on_edit<T: 'static>(
         &self,
+        window: &mut Window,
         cx: &mut Context<T>,
-        edited: impl FnMut(&mut T, &mut Context<T>) + 'static,
+        edited: impl FnMut(&mut T, &mut Window, &mut Context<T>) + 'static,
     ) -> Subscription {
         let edited = Rc::new(std::cell::RefCell::new(edited));
         let in_source = edited.clone();
-        let source = cx.subscribe(&self.state, move |this, _, event: &InputEvent, cx| {
-            if let InputEvent::Change = event {
-                (in_source.borrow_mut())(this, cx);
-            }
-        });
-        let live = cx.subscribe(&self.views, move |this, _, event: &LivePreviewEvent, cx| {
-            if let LivePreviewEvent::Edited = event {
-                (edited.borrow_mut())(this, cx);
-            }
-        });
+        let source = cx.subscribe_in(
+            &self.state,
+            window,
+            move |this, _, event: &InputEvent, window, cx| {
+                if let InputEvent::Change = event {
+                    (in_source.borrow_mut())(this, window, cx);
+                }
+            },
+        );
+        let live = cx.subscribe_in(
+            &self.views,
+            window,
+            move |this, _, event: &LivePreviewEvent, window, cx| {
+                if let LivePreviewEvent::Edited = event {
+                    (edited.borrow_mut())(this, window, cx);
+                }
+            },
+        );
         Subscription::join(source, live)
     }
 
@@ -496,7 +505,7 @@ mod tests {
         let text = text.to_string();
         let (host, cx) = cx.add_window_view(|window, cx| {
             let editor = TextEditor::new(&text, "markdown", links, window, cx);
-            let edits = editor.on_edit(cx, |host: &mut Host, _| host.edits += 1);
+            let edits = editor.on_edit(window, cx, |host: &mut Host, _, _| host.edits += 1);
             let follows = editor.on_follow_link(cx, |host: &mut Host, target, _| {
                 host.followed.push(target.to_string())
             });

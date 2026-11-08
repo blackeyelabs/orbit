@@ -331,6 +331,15 @@ impl Vault {
         String::from_utf8(bytes).map_err(|_| Error::NotUtf8(path.clone()))
     }
 
+    /// When the file at `path` last changed on disk, where that's known.
+    pub fn modified(&self, path: &VaultPath) -> Option<std::time::SystemTime> {
+        let entries = self.fs.list_dir(&path.parent()).ok()?;
+        entries
+            .into_iter()
+            .find(|e| e.name == path.name())?
+            .modified
+    }
+
     /// Opens a note for editing: its text, and an [`OpenNote`] that keeps
     /// track of other apps changing it.
     pub fn open_note(&self, path: &VaultPath) -> Result<(OpenNote, String), Error> {

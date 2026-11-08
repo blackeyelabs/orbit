@@ -271,12 +271,30 @@ fn backspace_and_delete_remove_one_character_or_the_selection() {
 }
 
 #[test]
-fn front_matter_is_shown_as_its_source_and_never_a_rule() {
-    let (d, _) = doc("---\ncreated: 2026-11-05T14:32\ntags: []\n---\nBody **b**");
-    assert_eq!(
-        shown(&d),
-        ["---\ncreated: 2026-11-05T14:32\ntags: []\n---", "Body b"]
-    );
+fn front_matter_is_hidden_and_the_caret_never_goes_into_it() {
+    // The properties panel edits it; Live Preview shows only the body.
+    let src = "---\ncreated: 2026-11-05T14:32\ntags: []\n---\nBody **b**";
+    let body = src.find("Body").unwrap();
+    let (mut d, _) = doc(src);
+    assert_eq!(shown(&d), ["Body b"]);
+    assert_eq!(d.caret(), body, "a new document's caret");
+    d.move_doc_start(false);
+    assert_eq!(d.caret(), body, "Ctrl+Home");
+    d.move_left(false);
+    d.backspace();
+    assert_eq!(d.text(), src, "nothing before the body to delete");
+    d.set_caret(5);
+    assert_eq!(d.caret(), body);
+    d.select_all();
+    assert_eq!(d.selection(), body..src.len());
+}
+
+#[test]
+fn a_note_of_only_front_matter_is_typed_into_below_it() {
+    let (mut d, _) = doc("---\na: 1\n---");
+    assert_eq!(shown(&d), [""]);
+    d.type_text("x");
+    assert_eq!(d.text(), "---\na: 1\n---\nx");
 }
 
 #[test]

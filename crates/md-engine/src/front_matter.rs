@@ -79,7 +79,7 @@ fn list(source: &str, is_key: impl Fn(&str) -> bool) -> Vec<Value> {
 }
 
 /// A flow list's items: split at commas outside quotes.
-fn flow_items(list: &str) -> impl Iterator<Item = &str> {
+pub(crate) fn flow_items(list: &str) -> impl Iterator<Item = &str> {
     let mut quote = None;
     let mut start = 0;
     let mut items = Vec::new();

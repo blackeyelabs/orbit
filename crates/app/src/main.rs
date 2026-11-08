@@ -15,6 +15,7 @@ mod instance;
 mod link_completion;
 mod logging;
 mod note_editor;
+mod properties;
 mod protection;
 mod protection_manage;
 mod right_panel;

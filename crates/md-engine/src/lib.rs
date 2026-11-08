@@ -4,6 +4,7 @@ mod callout;
 mod formatting;
 mod front_matter;
 mod links;
+mod properties;
 mod tags;
 
 pub use callout::{Callout, CalloutKind, callout};
@@ -12,6 +13,9 @@ pub use front_matter::{aliases, front_matter_tags};
 pub use links::{
     Heading, Link, LinkStyle, has_scheme, heading_offset, headings, links, percent_decode,
     split_target, typed_link,
+};
+pub use properties::{
+    Property, PropertyEdit, PropertyError, PropertyType, Value, properties, property_edit,
 };
 pub use tags::inline_tags;
 
@@ -31,14 +35,25 @@ pub fn new_note_properties(created: &str) -> String {
     format!("---\ncreated: {created}\ntags: []\n---\n")
 }
 
+/// A note's front matter: from its first `---` line through its closing
+/// one; empty if it has none.
+pub fn front_matter(source: &str) -> &str {
+    &source[..front_matter_len(source)]
+}
+
 /// A note's text after its front matter.
 pub fn without_front_matter(source: &str) -> &str {
     &source[front_matter_len(source)..]
 }
 
+/// The byte length of a byte order mark the source starts with.
+fn bom_len(source: &str) -> usize {
+    if source.starts_with('\u{feff}') { 3 } else { 0 }
+}
+
 /// The byte length of a leading YAML front matter block (with any BOM), or 0.
 fn front_matter_len(source: &str) -> usize {
-    let start = if source.starts_with('\u{feff}') { 3 } else { 0 };
+    let start = bom_len(source);
     let mut lines = source[start..].split_inclusive('\n');
     let Some(first) = lines.next().filter(|l| l.trim_end() == "---") else {
         return 0;

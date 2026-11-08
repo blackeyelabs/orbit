@@ -22,7 +22,7 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use md_engine::{Format, Heading, format_edit, headings, word_count};
+use md_engine::{Format, Heading, PropertyEdit, format_edit, headings, property_edit, word_count};
 use orbit_core::{
     DiskCheck, EntryKind, OpenNote, Scroll, Trouble, Vault, VaultPath, Zeroizing, is_large_note,
     is_plain_text_note,
@@ -31,6 +31,7 @@ use orbit_core::{
 use crate::clipboard_guard::{self, Copying};
 use crate::file_actions::editable_name;
 use crate::link_completion::LinkCompletions;
+use crate::properties::{PropertiesEvent, PropertiesPanel};
 use crate::text_editor::{Shown, TextEditor};
 
 actions!(
@@ -60,6 +61,7 @@ const DERIVED_PAUSE: Duration = Duration::from_millis(150);
 const DERIVED_AT_LEAST: Duration = Duration::from_secs(1);
 
 pub fn init(cx: &mut App) {
+    crate::properties::init(cx);
     cx.bind_keys([
         KeyBinding::new("ctrl-s", Save, Some(KEY_CONTEXT)),
         KeyBinding::new("ctrl-b", ToggleBold, Some(KEY_CONTEXT)),
@@ -212,6 +214,8 @@ pub struct NoteEditor {
     title: Entity<InputState>,
     /// The name the title was last given, to see the note renamed.
     title_name: String,
+    /// The note's properties, edited under the title in Live Preview.
+    properties: Entity<PropertiesPanel>,
     /// The source as of the last edit.
     text: SharedString,
     words: usize,
@@ -240,6 +244,7 @@ pub struct NoteEditor {
     /// Enter in the inline title, and leaving it.
     _title_events: Subscription,
     _title_blur: Subscription,
+    _properties_events: Subscription,
     _subscription: Subscription,
 }
 
@@ -259,7 +264,7 @@ impl NoteEditor {
         let source = TextEditor::new(&text, language(source_only), links.clone(), window, cx);
         source.show(mode.shown(), window, cx);
         let subscription = Subscription::join(
-            source.on_edit(cx, |this, cx| this.edited(cx)),
+            source.on_edit(window, cx, |this, window, cx| this.edited(window, cx)),
             source.on_follow_link(cx, |_, target, cx| {
                 cx.emit(NoteEditorEvent::FollowLink(target.to_string()))
             }),
@@ -279,6 +284,19 @@ impl NoteEditor {
                 this.source.focus_handle(cx).focus(window, cx);
             }
         });
+        let properties = cx.new(|cx| {
+            let mut panel = PropertiesPanel::new(vault.clone());
+            panel.set_modified(vault.modified(&path), cx);
+            panel
+        });
+        let properties_events = cx.subscribe_in(
+            &properties,
+            window,
+            |this, _, event, window, cx| match event {
+                PropertiesEvent::Edit(edit) => this.edit_property(edit, window, cx),
+                PropertiesEvent::EditInSource(offset) => this.edit_in_source(*offset, window, cx),
+            },
+        );
         let title_focus = title.read(cx).focus_handle(cx);
         let title_blur = cx.on_blur(&title_focus, window, |this, window, cx| {
             this.rename_from_title(window, cx)
@@ -289,6 +307,7 @@ impl NoteEditor {
             vault,
             title,
             title_name: editable_name(&path, EntryKind::Note),
+            properties,
             path,
             mode,
             source,
@@ -306,6 +325,7 @@ impl NoteEditor {
             _focus_out: focus_out,
             _title_events: title_events,
             _title_blur: title_blur,
+            _properties_events: properties_events,
             _subscription: subscription,
         }
     }
@@ -393,6 +413,7 @@ impl NoteEditor {
         let was_source_only = self.is_source_only();
         self.links.set_note(path.clone());
         self.path = path;
+        self.refresh_modified(cx);
         // A new extension can make it source only, or no longer.
         let mode = if was_source_only != self.is_source_only() {
             Mode::of(self.is_source_only())
@@ -542,9 +563,10 @@ impl NoteEditor {
         handle.focus(window, cx);
     }
 
-    fn edited(&mut self, cx: &mut Context<Self>) {
+    fn edited(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let _span = tracing::trace_span!("editor.edited").entered();
         self.text = self.source.text(cx);
+        self.sync_properties(window, cx);
         self.catch_up_later(cx);
         let caret = self.source.caret(cx);
         if let Some(link) = self.links.accepted_create(&self.text, caret) {
@@ -649,6 +671,7 @@ impl NoteEditor {
         self.set_text(text.into(), cx);
         self.autosave = None;
         self.saves.saved = self.saves.revision;
+        self.refresh_modified(cx);
         cx.notify();
     }
 
@@ -673,6 +696,7 @@ impl NoteEditor {
                 this.saves.writing = false;
                 if saved {
                     this.saves.saved = this.saves.saved.max(revision);
+                    this.refresh_modified(cx);
                 }
                 this.set_trouble(trouble);
                 if std::mem::take(&mut this.saves.recheck) {
@@ -943,6 +967,45 @@ impl NoteEditor {
         let edit = format_edit(&self.source.text(cx), self.source.selection(cx), kind);
         self.source.apply(edit, window, cx);
     }
+
+    /// A change made in the properties panel: only its key's lines change,
+    /// as one edit to undo. One that can't be made (a name another key
+    /// has) leaves the panel showing what the note says.
+    fn edit_property(&mut self, edit: &PropertyEdit, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.source.text(cx);
+        match property_edit(&text, edit, self.source.selection(cx)) {
+            Ok(edit) => self.source.apply(edit, window, cx),
+            Err(_) => {
+                self.properties.update(cx, |panel, _| panel.forget_shown());
+                self.sync_properties(window, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// The properties panel shows the front matter as the text has it.
+    fn sync_properties(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.text.clone();
+        self.properties
+            .update(cx, |panel, cx| panel.sync(&text, window, cx));
+    }
+
+    /// "Edit in Source" in the properties panel: Source mode, with the
+    /// caret on the key's line.
+    fn edit_in_source(&mut self, offset: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.mode != Mode::Source {
+            self.set_mode(Mode::Source, cx);
+            self.source.show(Mode::Source.shown(), window, cx);
+        }
+        self.go_to_line_of(offset, window, cx);
+    }
+
+    /// The file's modified time, as the panel shows it, read again.
+    fn refresh_modified(&mut self, cx: &mut Context<Self>) {
+        let modified = self.vault.modified(&self.path);
+        self.properties
+            .update(cx, |panel, cx| panel.set_modified(modified, cx));
+    }
 }
 
 impl Render for NoteEditor {
@@ -970,11 +1033,19 @@ impl Render for NoteEditor {
                 .text_size(rems(1.75))
                 .font_weight(FontWeight::BOLD),
         );
+        // The properties panel, in Live Preview only: Source mode shows the
+        // front matter as written.
+        let properties = (self.mode == Mode::LivePreview).then(|| {
+            // Text loaded from disk isn't an edit: it's shown from here.
+            self.sync_properties(window, cx);
+            self.properties.clone()
+        });
         let editor = v_flex()
             .flex_1()
             .min_w_0()
             .h_full()
             .child(title)
+            .children(properties)
             .child(div().flex_1().min_h_0().child(self.source.element(cx)));
         let banner = self.render_banner(cx);
         let body = h_flex()
@@ -1033,7 +1104,7 @@ mod tests {
 
     // Named, not globbed: Kit's glob brings gpui's `test` macro, which then
     // shadows `#[test]` inside `#[gpui::test]`.
-    use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext};
+    use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext, Window};
     use orbit_core::{Vault, VaultPath};
 
     use super::NoteEditor;
@@ -1224,5 +1295,229 @@ mod tests {
             "[[Brand new]]"
         );
         assert_eq!(*asked.borrow(), ["Brand new"]);
+    }
+
+    /// The note's text as the editor has it.
+    fn text_of(editor: &Entity<NoteEditor>, cx: &mut VisualTestContext) -> String {
+        cx.update(|_, cx| editor.read(cx).source.text(cx).to_string())
+    }
+
+    /// Each property row: its key, what its value field shows, whether
+    /// it's flagged.
+    fn rows(
+        editor: &Entity<NoteEditor>,
+        cx: &mut VisualTestContext,
+    ) -> Vec<(String, String, bool)> {
+        cx.update(|_, cx| editor.read(cx).properties.read(cx).shown_rows(cx))
+    }
+
+    /// Focuses `key`'s value field in the properties panel.
+    fn focus_value(editor: &Entity<NoteEditor>, key: &str, cx: &mut VisualTestContext) {
+        cx.update(|window, cx| {
+            let panel = editor.read(cx).properties.clone();
+            panel.update(cx, |panel, cx| panel.focus_value(key, window, cx));
+        });
+        cx.run_until_parked();
+    }
+
+    /// Clicks something in the properties panel.
+    fn click(
+        editor: &Entity<NoteEditor>,
+        cx: &mut VisualTestContext,
+        f: impl FnOnce(
+            &mut crate::properties::PropertiesPanel,
+            &mut Window,
+            &mut gpui::Context<crate::properties::PropertiesPanel>,
+        ),
+    ) {
+        cx.update(|window, cx| {
+            let panel = editor.read(cx).properties.clone();
+            panel.update(cx, |panel, cx| f(panel, window, cx));
+        });
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn a_property_edited_in_the_panel_changes_only_its_line_and_undo_takes_it_back(
+        cx: &mut TestAppContext,
+    ) {
+        let note = "---\n# why\nstatus: draft # for now\ncount: 1\n---\nBody";
+        let (editor, cx, _dir) = open(cx, "Note.md", note);
+        assert_eq!(
+            rows(&editor, cx),
+            [
+                ("status".into(), "draft".into(), false),
+                ("count".into(), "1".into(), false)
+            ]
+        );
+        focus_value(&editor, "status", cx);
+        cx.simulate_keystrokes("ctrl-a");
+        cx.simulate_input("done");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(text_of(&editor, cx), note.replace("draft", "done"));
+        // Undo in the note takes it back, and the panel shows it.
+        cx.update(|window, cx| NoteEditor::focus(&editor, window, cx));
+        cx.simulate_keystrokes("ctrl-z");
+        cx.run_until_parked();
+        assert_eq!(text_of(&editor, cx), note);
+        assert_eq!(rows(&editor, cx)[0].1, "draft");
+    }
+
+    #[gpui::test]
+    fn tags_are_chips_suggested_from_the_vaults_tags(cx: &mut TestAppContext) {
+        let note = "---\ntags: [Productive]\n---\nBody";
+        let (editor, cx, _dir) = open_with(
+            cx,
+            "Note.md",
+            note,
+            |_| {},
+            |vault| {
+                let other = vault.root().join("Other.md");
+                std::fs::write(other, "#project/alpha #Prowl #improve #productive #work").unwrap();
+            },
+        );
+        focus_value(&editor, "tags", cx);
+        cx.simulate_input("pro");
+        cx.run_until_parked();
+        // Those starting with it first; not one the note has (in any case).
+        let suggested = cx.update(|_, cx| editor.read(cx).properties.read(cx).suggestions("tags"));
+        assert_eq!(suggested, ["project", "project/alpha", "Prowl", "improve"]);
+        cx.simulate_keystrokes("down down enter");
+        cx.run_until_parked();
+        assert_eq!(
+            text_of(&editor, cx),
+            "---\ntags: [Productive, project/alpha]\n---\nBody"
+        );
+        // A tag of its own, typed with its `#`.
+        cx.simulate_input("#new");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(
+            text_of(&editor, cx),
+            "---\ntags: [Productive, project/alpha, new]\n---\nBody"
+        );
+    }
+
+    #[gpui::test]
+    fn yaml_the_panel_cannot_edit_offers_edit_in_source(cx: &mut TestAppContext) {
+        let note = "---\nok: yes\nnested:\n  a: 1\n---\nBody";
+        let (editor, cx, _dir) = open(cx, "Note.md", note);
+        assert_eq!(
+            rows(&editor, cx),
+            [
+                ("ok".into(), "yes".into(), false),
+                ("nested".into(), "Edit in Source".into(), false)
+            ]
+        );
+        click(&editor, cx, |panel, _, cx| {
+            panel.click_edit_in_source("nested", cx)
+        });
+        assert_eq!(mode(&editor, cx), "Source mode");
+        let line = cx.update(|_, cx| editor.read(cx).source.caret_line_column(cx));
+        assert_eq!(line, (2, 0), "on the key's line");
+    }
+
+    #[gpui::test]
+    fn a_value_that_does_not_fit_its_type_is_flagged_and_left_as_written(cx: &mut TestAppContext) {
+        let note = "---\ndue: 2026-13-40\ntags: 5\n---\nBody";
+        let (editor, cx, _dir) = open(cx, "Note.md", note);
+        assert_eq!(
+            rows(&editor, cx),
+            [
+                ("due".into(), "2026-13-40".into(), true),
+                ("tags".into(), "5".into(), true)
+            ]
+        );
+        assert_eq!(text_of(&editor, cx), note, "never rewritten");
+        // Flagged as it's typed, and set as typed.
+        focus_value(&editor, "due", cx);
+        cx.simulate_keystrokes("ctrl-a");
+        cx.simulate_input("2026-12-01");
+        cx.run_until_parked();
+        assert!(!rows(&editor, cx)[0].2, "it fits now");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(
+            text_of(&editor, cx),
+            note.replace("2026-13-40", "2026-12-01")
+        );
+    }
+
+    #[gpui::test]
+    fn properties_are_added_toggled_and_removed(cx: &mut TestAppContext) {
+        let (editor, cx, _dir) = open(cx, "Note.md", "Body");
+        click(&editor, cx, |panel, window, cx| panel.click_add(window, cx));
+        cx.simulate_input("status");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(text_of(&editor, cx), "---\nstatus:\n---\nBody");
+        // Its value field has focus.
+        cx.simulate_input("draft");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(text_of(&editor, cx), "---\nstatus: draft\n---\nBody");
+        click(&editor, cx, |panel, _, cx| panel.click_remove("status", cx));
+        assert_eq!(text_of(&editor, cx), "---\n---\nBody");
+    }
+
+    #[gpui::test]
+    fn committing_a_field_unchanged_rewrites_nothing(cx: &mut TestAppContext) {
+        // Spaces only quotes keep: what the field shows isn't what's written.
+        let note = "---\na: \"  x \"\n---\nBody";
+        let (editor, cx, _dir) = open(cx, "Note.md", note);
+        focus_value(&editor, "a", cx);
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(text_of(&editor, cx), note);
+    }
+
+    #[gpui::test]
+    fn a_checkbox_property_toggles(cx: &mut TestAppContext) {
+        let (editor, cx, _dir) = open(cx, "Note.md", "---\ndone: false\n---\n");
+        click(&editor, cx, |panel, _, cx| panel.click_checkbox("done", cx));
+        assert_eq!(text_of(&editor, cx), "---\ndone: true\n---\n");
+    }
+
+    #[gpui::test]
+    fn renaming_a_key_and_a_name_another_key_has_is_refused(cx: &mut TestAppContext) {
+        let (editor, cx, _dir) = open(cx, "Note.md", "---\na: 1\nb: 2\n---\n");
+        let rename = |key: &str, to: &str, cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                let panel = editor.read(cx).properties.clone();
+                panel.update(cx, |panel, cx| panel.focus_name(key, window, cx));
+            });
+            cx.simulate_keystrokes("ctrl-a");
+            cx.simulate_input(to);
+            cx.simulate_keystrokes("enter");
+            cx.run_until_parked();
+        };
+        rename("a", "c", cx);
+        assert_eq!(text_of(&editor, cx), "---\nc: 1\nb: 2\n---\n");
+        rename("b", "c", cx);
+        assert_eq!(text_of(&editor, cx), "---\nc: 1\nb: 2\n---\n");
+        let names: Vec<String> = rows(&editor, cx).into_iter().map(|r| r.0).collect();
+        assert_eq!(names, ["c", "b"], "the refused name isn't kept");
+    }
+
+    #[gpui::test]
+    fn the_files_modified_time_shows_read_only(cx: &mut TestAppContext) {
+        // 2026-01-15 12:00 UTC: the 15th in any time zone within 12 hours.
+        let time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_768_478_400);
+        let (editor, cx, _dir) = open_with(
+            cx,
+            "Note.md",
+            "Body",
+            |_| {},
+            |vault| {
+                let file = std::fs::File::options()
+                    .write(true)
+                    .open(vault.root().join("Note.md"))
+                    .unwrap();
+                file.set_modified(time).unwrap();
+            },
+        );
+        let shown = cx.update(|_, cx| editor.read(cx).properties.read(cx).modified());
+        assert!(shown.unwrap().starts_with("2026-01-15 "));
     }
 }

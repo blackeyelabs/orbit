@@ -50,3 +50,11 @@ fn replace_all_skips_matches_the_text_no_longer_has() {
     d.replace_all(&stale, "trip");
     assert_eq!(d.text(), "short");
 }
+
+#[test]
+fn find_skips_the_hidden_front_matter() {
+    let src = "---\nstatus: plan\n---\nThe plan";
+    let d = Document::new(src);
+    let body = src.rfind("plan").unwrap();
+    assert_eq!(d.find("plan", false), vec![body..body + 4]);
+}

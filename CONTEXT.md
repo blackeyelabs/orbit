@@ -79,7 +79,7 @@ A note's file name, shown as a heading above its text. Editing it renames the no
 _Avoid_: header, note heading (a `#` heading in the text is a different thing)
 
 **Property**:
-One key and its value in a note's front matter, such as `created` or `tags`. Each property has a type: text, list, number, checkbox, date or date-time.
+One key and its value in a note's front matter, such as `created` or `tags`. Each property has a type: text, list, number, checkbox, date or date-time; `tags` and `aliases` are lists edited as chips.
 _Avoid_: field, attribute, metadata (for a single key)
 
 **Properties panel**:

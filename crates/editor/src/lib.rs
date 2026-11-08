@@ -371,9 +371,14 @@ impl LivePreview {
         self.popup = None;
         let before: Vec<(Kind, String)> = self.block_texts();
         let text_before = self.doc.text().len();
+        // The front matter is in no block (the properties panel shows it).
+        let front_before = md_engine::front_matter(self.doc.text()).to_string();
         edit(&mut self.doc);
         let after = self.block_texts();
-        if before != after || text_before != self.doc.text().len() {
+        let changed = before != after
+            || text_before != self.doc.text().len()
+            || front_before != md_engine::front_matter(self.doc.text());
+        if changed {
             // Only the blocks between the ones that read the same before
             // and after, from either end, are remeasured.
             let prefix = before
