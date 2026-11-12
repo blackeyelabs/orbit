@@ -11,7 +11,7 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _};
 use gpui_kit::*;
-use orbit_core::{ThemeChoice, Vault, VaultPath};
+use orbit_core::{NoteView, ThemeChoice, Vault, VaultPath};
 
 use crate::appearance::AppSettings;
 use crate::clipboard_guard;
@@ -158,13 +158,38 @@ impl Render for AppearancePane {
     }
 }
 
-/// Settings › Notes: what a new note starts with.
+/// Settings › Notes: how a note opens, and what a new note starts with.
 pub struct NotesPane;
 
 impl Render for NotesPane {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let properties = AppSettings::get(cx).new_notes_get_properties;
-        v_flex().child(row(
+        let view = AppSettings::get(cx).default_view;
+        let view_button = |id: &'static str, label: &'static str, choice: NoteView| {
+            let button = Button::new(id).label(label).small();
+            let button = if view == choice {
+                button.primary()
+            } else {
+                button.outline()
+            };
+            button.on_click(cx.listener(move |_, _, window, cx| {
+                change(window, cx, |s| s.default_view = choice);
+            }))
+        };
+        let default_view = row(
+            "Default view",
+            "How a note opens in a new tab. Plain text and very large notes always open in Source mode.",
+            h_flex()
+                .gap_2()
+                .child(view_button(
+                    "view-live-preview",
+                    "Live Preview",
+                    NoteView::LivePreview,
+                ))
+                .child(view_button("view-source", "Source mode", NoteView::Source)),
+            cx,
+        );
+        v_flex().child(default_view).child(row(
             "New notes start with properties",
             "When the note was created, and an empty list of tags, as front matter.",
             Switch::new("new-note-properties")

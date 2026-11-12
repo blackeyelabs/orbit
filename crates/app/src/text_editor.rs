@@ -345,9 +345,9 @@ impl TextEditor {
 
     /// Scrolls the editor `scroll` came from: Live Preview, or the source
     /// editor from its next layout on. Live Preview's scroll is dropped
-    /// if it was never shown (the note now opens as source only), and a
-    /// source scroll doesn't carry over to Live Preview: until a note
-    /// reopens in the view it was left in (#54), it opens at the top.
+    /// if it was never shown (the note now opens as source only). The
+    /// note shows in the view `scroll` came from first (see
+    /// `NoteEditor::set_scroll`).
     pub fn set_scroll(&self, scroll: Scroll, cx: &mut App) {
         match scroll {
             Scroll::LivePreview { top, within } => {

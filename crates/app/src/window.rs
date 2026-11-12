@@ -220,7 +220,7 @@ impl OrbitWindow {
             if let Some(tab) = self.tab_of(path, cx) {
                 self.tabs[tab]
                     .editor
-                    .update(cx, |editor, cx| editor.set_scroll(*scroll, cx));
+                    .update(cx, |editor, cx| editor.restore(*scroll, window, cx));
             }
         }
         self.restoring = false;

@@ -26,10 +26,11 @@ use md_engine::{
     Format, Heading, PropertyEdit, PropertyType, format_edit, headings, property_edit, word_count,
 };
 use orbit_core::{
-    DiskCheck, EntryKind, OpenNote, Scroll, Trouble, Vault, VaultPath, Zeroizing, is_large_note,
-    is_plain_text_note,
+    DiskCheck, EntryKind, NoteView, OpenNote, Scroll, Trouble, Vault, VaultPath, Zeroizing,
+    is_large_note, is_plain_text_note,
 };
 
+use crate::appearance::AppSettings;
 use crate::clipboard_guard::{self, Copying};
 use crate::file_actions::editable_name;
 use crate::link_completion::LinkCompletions;
@@ -83,13 +84,13 @@ enum Mode {
 }
 
 impl Mode {
-    /// The mode a note opens in: Source when it's plain text or too large
-    /// for anything else.
-    fn of(source_only: bool) -> Self {
-        if source_only {
-            Mode::Source
-        } else {
-            Mode::LivePreview
+    /// The mode to show a note in, `view` asked for: Source when it's
+    /// plain text or too large for anything else.
+    fn of(source_only: bool, view: NoteView) -> Self {
+        match view {
+            _ if source_only => Mode::Source,
+            NoteView::LivePreview => Mode::LivePreview,
+            NoteView::Source => Mode::Source,
         }
     }
 
@@ -261,7 +262,7 @@ impl NoteEditor {
         let path = note.path().clone();
         let large = is_large_note(&text).then_some(text.len());
         let source_only = large.is_some() || is_plain_text_note(&path);
-        let mode = Mode::of(source_only);
+        let mode = Mode::of(source_only, AppSettings::get(cx).default_view);
         let links = Rc::new(LinkCompletions::new(vault.clone(), path.clone()));
         let source = TextEditor::new(&text, language(source_only), links.clone(), window, cx);
         source.show(mode.shown(), window, cx);
@@ -420,7 +421,7 @@ impl NoteEditor {
         self.refresh_modified(cx);
         // A new extension can make it source only, or no longer.
         let mode = if was_source_only != self.is_source_only() {
-            Mode::of(self.is_source_only())
+            Mode::of(self.is_source_only(), AppSettings::get(cx).default_view)
         } else {
             self.mode
         };
@@ -555,8 +556,19 @@ impl NoteEditor {
             .unwrap_or_default()
     }
 
-    /// Scrolls the note, from the next layout on.
-    pub fn set_scroll(&mut self, scroll: Scroll, cx: &mut Context<Self>) {
+    /// Restores a tab as it was left: in the view `scroll` was kept in
+    /// (unless it shows only as source), scrolled there from the next
+    /// layout on.
+    pub fn restore(&mut self, scroll: Scroll, window: &mut Window, cx: &mut Context<Self>) {
+        let view = match scroll {
+            Scroll::Source(_) => NoteView::Source,
+            Scroll::LivePreview { .. } => NoteView::LivePreview,
+        };
+        let mode = Mode::of(self.is_source_only(), view);
+        if mode != self.mode {
+            self.set_mode(mode, cx);
+        }
+        self.source.show(mode.shown(), window, cx);
         self.restored_scroll = Some(scroll);
         self.source.set_scroll(scroll, cx);
     }
@@ -667,7 +679,7 @@ impl NoteEditor {
     /// takes it on the next frame, which has the window it needs.
     fn show_saved_text(&mut self, text: String, cx: &mut Context<Self>) {
         // Grown very large meanwhile (in another app, say): source only.
-        if self.large.is_none() && self.mode != Mode::Source && is_large_note(&text) {
+        if self.large.is_none() && is_large_note(&text) {
             self.large = Some(text.len());
             self.set_mode(Mode::Source, cx);
         }
@@ -913,8 +925,7 @@ impl NoteEditor {
         )
     }
 
-    /// A very large note, opened as source: says so, with Live Preview a
-    /// click away.
+    /// A very large note, opened as source: says so.
     fn render_large_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let bytes = self.large?;
         let warning = cx.theme().warning;
@@ -945,21 +956,8 @@ impl NoteEditor {
                                 .child("Opened as source to keep typing fast."),
                         ),
                 )
-                .child(
-                    Button::new("use-live-preview")
-                        .outline()
-                        .small()
-                        .label("Use live preview")
-                        .on_click(cx.listener(|this, _, _, cx| this.show_live_preview_anyway(cx))),
-                )
                 .into_any_element(),
         )
-    }
-
-    /// Shows a very large note in Live Preview after all.
-    fn show_live_preview_anyway(&mut self, cx: &mut Context<Self>) {
-        self.large = None;
-        self.set_mode(Mode::of(self.is_source_only()), cx);
     }
 
     /// Bold, Italic or Link on the text's selection; nothing while the
@@ -1135,7 +1133,7 @@ mod tests {
     // Named, not globbed: Kit's glob brings gpui's `test` macro, which then
     // shadows `#[test]` inside `#[gpui::test]`.
     use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext, Window};
-    use orbit_core::{Vault, VaultPath};
+    use orbit_core::{NoteView, Scroll, Vault, VaultPath};
 
     use super::NoteEditor;
     use crate::appearance::AppSettings;
@@ -1646,5 +1644,76 @@ mod tests {
             kinds,
             (Some(PropertyType::Tags), Some(PropertyType::Aliases))
         );
+    }
+
+    #[gpui::test]
+    fn a_new_tab_opens_in_the_default_view(cx: &mut TestAppContext) {
+        let (editor, cx, _dir) = open_with(
+            cx,
+            "Note.md",
+            "# Hi",
+            |s| s.default_view = NoteView::Source,
+            |_| {},
+        );
+        assert_eq!(mode(&editor, cx), "Source mode");
+    }
+
+    /// Restores `scroll` into `editor`, as the window does from the session.
+    fn restore(editor: &Entity<NoteEditor>, scroll: Scroll, cx: &mut VisualTestContext) {
+        cx.update(|window, cx| editor.update(cx, |e, cx| e.restore(scroll, window, cx)));
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn a_restored_tab_comes_back_in_the_view_it_was_left_in(cx: &mut TestAppContext) {
+        let text = "# Hi\n\n".repeat(200);
+        let (editor, cx, _dir) = open_with(
+            cx,
+            "Note.md",
+            &text,
+            |s| s.default_view = NoteView::Source,
+            |_| {},
+        );
+        let place = Scroll::LivePreview {
+            top: 600,
+            within: 2.,
+        };
+        restore(&editor, place, cx);
+        assert_eq!(mode(&editor, cx), "Live Preview");
+        assert_eq!(cx.update(|_, cx| editor.read(cx).scroll(cx)), place);
+        restore(&editor, Scroll::Source(40.), cx);
+        assert_eq!(mode(&editor, cx), "Source mode");
+    }
+
+    #[gpui::test]
+    fn plain_text_and_very_large_notes_stay_in_source(cx: &mut TestAppContext) {
+        let live = Scroll::LivePreview { top: 0, within: 0. };
+        let (editor, cx, _dir) = open(cx, "List.txt", "milk");
+        restore(&editor, live, cx);
+        assert_eq!(mode(&editor, cx), "Source mode");
+        let large = "word ".repeat(orbit_core::LARGE_NOTE_BYTES / 5 + 1);
+        let (editor, cx, _dir) = open(cx, "Big.md", &large);
+        assert_eq!(mode(&editor, cx), "Source mode");
+        restore(&editor, live, cx);
+        cx.simulate_keystrokes("ctrl-e");
+        cx.run_until_parked();
+        assert_eq!(mode(&editor, cx), "Source mode");
+    }
+
+    #[gpui::test]
+    fn a_note_grown_very_large_on_disk_stays_in_source(cx: &mut TestAppContext) {
+        let (editor, cx, _dir) = open_with(
+            cx,
+            "Note.md",
+            "small",
+            |s| s.default_view = NoteView::Source,
+            |_| {},
+        );
+        let large = "word ".repeat(orbit_core::LARGE_NOTE_BYTES / 5 + 1);
+        cx.update(|_, cx| editor.update(cx, |e, cx| e.show_saved_text(large, cx)));
+        cx.run_until_parked();
+        cx.simulate_keystrokes("ctrl-e");
+        cx.run_until_parked();
+        assert_eq!(mode(&editor, cx), "Source mode");
     }
 }

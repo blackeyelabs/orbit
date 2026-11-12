@@ -32,7 +32,7 @@ pub use property_types::PropertyTypes;
 pub use recent::{RecentVault, RecentVaults};
 pub use search::{IndexingProgress, SearchResult, SearchResults};
 pub use session::{Scroll, Session, SessionTab};
-pub use settings::{Settings, ThemeChoice, default_config_dir, default_state_dir};
+pub use settings::{NoteView, Settings, ThemeChoice, default_config_dir, default_state_dir};
 pub use suggest::{LinkSuggestion, LinkSuggestions};
 pub use tags::{TagCount, same_tag};
 

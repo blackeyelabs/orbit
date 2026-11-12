@@ -25,6 +25,17 @@ pub enum ThemeChoice {
     MatchSystem,
 }
 
+/// How a note is shown when it opens in a new tab.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum NoteView {
+    /// Formatted, its syntax showing where the caret is.
+    #[default]
+    LivePreview,
+    /// Source mode: the markdown as typed.
+    Source,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Settings {
     pub theme: ThemeChoice,
@@ -52,6 +63,10 @@ pub struct Settings {
     /// front matter: its `created` time and an empty `tags`. A `.txt` note
     /// never does.
     pub new_notes_get_properties: bool,
+    /// How a note opens in a new tab. A tab reopened from the session
+    /// comes back as it was; `.txt` and very large notes are always
+    /// in Source mode.
+    pub default_view: NoteView,
 }
 
 impl Default for Settings {
@@ -68,6 +83,7 @@ impl Default for Settings {
             clear_clipboard_seconds: 30,
             detailed_logging: false,
             new_notes_get_properties: true,
+            default_view: NoteView::default(),
         }
     }
 }
@@ -121,6 +137,9 @@ impl Settings {
         }
         if let Some(properties) = field("new_notes_get_properties").and_then(|v| v.as_bool()) {
             settings.new_notes_get_properties = properties;
+        }
+        if let Some(view) = field("default_view").and_then(|v| serde_json::from_value(v).ok()) {
+            settings.default_view = view;
         }
         if let Some(seconds) = field("clear_clipboard_seconds")
             .and_then(|v| v.as_u64())

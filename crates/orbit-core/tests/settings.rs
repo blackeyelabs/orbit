@@ -2,7 +2,7 @@
 
 use std::fs;
 
-use orbit_core::{Settings, ThemeChoice};
+use orbit_core::{NoteView, Settings, ThemeChoice};
 
 #[test]
 fn missing_settings_mean_the_defaults() {
@@ -148,4 +148,26 @@ fn new_notes_start_with_properties_unless_turned_off() {
     s.new_notes_get_properties = false;
     s.save(dir.path()).unwrap();
     assert!(!Settings::load(dir.path()).new_notes_get_properties);
+}
+
+#[test]
+fn notes_open_in_live_preview_unless_source_is_chosen() {
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(
+        Settings::load(dir.path()).default_view,
+        NoteView::LivePreview
+    );
+    let mut s = Settings::default();
+    s.default_view = NoteView::Source;
+    s.save(dir.path()).unwrap();
+    assert!(
+        fs::read_to_string(dir.path().join("settings.json"))
+            .unwrap()
+            .contains("\"default_view\": \"source\"")
+    );
+    assert_eq!(Settings::load(dir.path()).default_view, NoteView::Source);
+    assert_eq!(
+        load_json(r#"{"default_view": "split"}"#).default_view,
+        NoteView::LivePreview
+    );
 }
