@@ -1106,6 +1106,49 @@ mod tests {
     }
 
     #[gpui::test]
+    fn scrolling_a_long_note_keeps_the_caret_and_selection(cx: &mut TestAppContext) {
+        let text: Vec<String> = (0..500)
+            .map(|i| format!("- item {i} of the list"))
+            .collect();
+        let text = text.join("\n");
+        // The same keys, in a note left where it is and one scrolled away
+        // to the top and back in between: the same selection, the same
+        // edit.
+        let mut results = Vec::new();
+        for scroll_away in [false, true] {
+            let mut app = cx.new_app();
+            let (host, cx) = open(&mut app, &text);
+            let editor = live(&host, cx);
+            cx.simulate_keystrokes("ctrl-end shift-up shift-up shift-left");
+            let selected = cx.update(|_, cx| editor.selection(cx));
+            if scroll_away {
+                for dy in [40_000., -40_000.] {
+                    cx.simulate_event(gpui::ScrollWheelEvent {
+                        position: gpui::point(gpui::px(100.), gpui::px(100.)),
+                        delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.), gpui::px(dy))),
+                        ..Default::default()
+                    });
+                    cx.run_until_parked();
+                    let at = cx.update(|_, cx| editor.scroll(cx));
+                    let top = matches!(at, Some(Scroll::LivePreview { top: 0, .. }));
+                    assert_eq!(top, dy > 0., "scrolled to the top, then back: {at:?}");
+                }
+                assert_eq!(cx.update(|_, cx| editor.selection(cx)), selected);
+            }
+            cx.simulate_keystrokes("shift-down");
+            let extended = cx.update(|_, cx| editor.selection(cx));
+            cx.simulate_input("Z");
+            results.push((selected, extended, cx.update(|_, cx| editor.text(cx))));
+        }
+        assert_eq!(results[0], results[1]);
+        assert!(
+            results[0].0.start > 0,
+            "a selection near the end: {:?}",
+            results[0].0
+        );
+    }
+
+    #[gpui::test]
     fn ctrl_f_finds_in_live_preview_and_enter_steps_through_the_matches(cx: &mut TestAppContext) {
         let (host, cx) = open(cx, "Plan the plan.\n\nA PLAN, **planned**");
         let editor = live(&host, cx);

@@ -1,11 +1,18 @@
 //! The facade: a note being edited in Live Preview.
 
-use std::{ops::Range, time::Instant};
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    hash::{Hash, Hasher},
+    ops::Range,
+    rc::Rc,
+    time::Instant,
+};
 
 use ropey::{LineType, Rope};
 
 use crate::blocks::{
-    Block, Blocks, Code, Item, Kind, Shows, next_grapheme, opening_fence, prev_grapheme,
+    Block, Blocks, Code, Item, Kind, Shows, Splice, next_grapheme, opening_fence, prev_grapheme,
 };
 use crate::conceal::{
     Layout, Link, Run, Selection, layout_code, layout_line, layout_math, layout_titled,
@@ -34,6 +41,35 @@ pub struct Document {
     selection: Selection,
     history: History,
     clock: Clock,
+    /// Goes up with every edit.
+    revision: u64,
+    /// The blocks changed since last asked ([`Self::take_changed`]).
+    changed: Option<Changed>,
+    /// Each leaf's view as last laid out, by a hash of what it depends
+    /// on: its text, how it shows, and the selection in it.
+    views: RefCell<ViewCache>,
+}
+
+/// Views by a hash of what they depend on; those with the same hash
+/// side by side.
+type ViewCache = HashMap<u64, Vec<(ViewKey, Rc<View>)>>;
+
+/// What a leaf's view depends on.
+#[derive(PartialEq, Eq)]
+struct ViewKey {
+    text: String,
+    shows: Shows,
+    selection: Selection,
+}
+
+/// The blocks changed since last asked, as the blocks that read the same
+/// at either end: of `old_len` blocks then, the first `prefix` and the
+/// last `suffix` are as they were.
+#[derive(Clone, Copy)]
+struct Changed {
+    old_len: usize,
+    prefix: usize,
+    suffix: usize,
 }
 
 impl Document {
@@ -52,6 +88,9 @@ impl Document {
             selection: Selection::caret(0),
             history: History::default(),
             clock,
+            revision: 0,
+            changed: None,
+            views: RefCell::default(),
         };
         doc.set_caret(0);
         doc
@@ -65,6 +104,44 @@ impl Document {
     /// The note split into blocks and leaves.
     pub fn blocks(&self) -> &Blocks {
         &self.blocks
+    }
+
+    /// Goes up with every edit (and load), so what shows the text can see
+    /// it changed: even where no block did, as in the front matter.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// The blocks that changed since this was last asked: of the blocks
+    /// then, those in `old` became `new_len` blocks. `None` if none did.
+    pub fn take_changed(&mut self) -> Option<Splice> {
+        let changed = self.changed.take()?;
+        let new_len = self.blocks.blocks.len();
+        let both = changed.old_len.min(new_len);
+        let prefix = changed.prefix.min(both);
+        let suffix = changed.suffix.min(both - prefix);
+        let splice = Splice {
+            old: prefix..changed.old_len - suffix,
+            new_len: new_len - prefix - suffix,
+        };
+        (!splice.old.is_empty() || splice.new_len > 0).then_some(splice)
+    }
+
+    /// Records that `splice` changed the blocks, of `len` blocks then.
+    fn blocks_changed(&mut self, len: usize, splice: &Splice) {
+        let (prefix, suffix) = (splice.old.start, len - splice.old.end);
+        self.changed = Some(match self.changed {
+            None => Changed {
+                old_len: len,
+                prefix,
+                suffix,
+            },
+            Some(c) => Changed {
+                old_len: c.old_len,
+                prefix: c.prefix.min(prefix),
+                suffix: c.suffix.min(suffix),
+            },
+        });
     }
 
     /// The caret: the selection's moving end.
@@ -440,7 +517,16 @@ impl Document {
         let caret = self.caret();
         self.rope = Rope::from_str(text);
         self.text = text.to_string();
+        let old = self.blocks.blocks.len();
+        self.blocks_changed(
+            old,
+            &Splice {
+                old: 0..old,
+                new_len: 0,
+            },
+        );
         self.blocks = Blocks::parse(text);
+        self.revision += 1;
         self.history.clear();
         self.set_caret(caret);
     }
@@ -496,12 +582,22 @@ impl Document {
             .record(change, kind, before, self.selection, now);
     }
 
-    /// Replaces `range` with `text` in the buffer and reparses.
+    /// Replaces `range` with `text` in the buffer and reparses what
+    /// that changed.
     fn apply(&mut self, range: Range<usize>, text: &str) {
         self.rope.remove(range.clone());
         self.rope.insert(range.start, text);
-        self.text.replace_range(range, text);
-        self.blocks = Blocks::parse(&self.text);
+        self.text.replace_range(range.clone(), text);
+        let len = self.blocks.blocks.len();
+        let (blocks, splice) = std::mem::take(&mut self.blocks).reparse(
+            &self.text,
+            range.start,
+            range.len(),
+            text.len(),
+        );
+        self.blocks_changed(len, &splice);
+        self.blocks = blocks;
+        self.revision += 1;
     }
 
     /// Text typed at `offset` into an empty line right after a block that
@@ -732,11 +828,15 @@ impl Document {
 
     /// What each leaf shows for the current selection. A leaf the
     /// selection doesn't reach lays out fully concealed; a source block's
-    /// leaf is verbatim.
-    pub fn views(&self) -> Vec<View> {
+    /// leaf is verbatim. A leaf whose text, kind and selection are as at
+    /// the last call isn't laid out again: its view is the same one.
+    pub fn views(&self) -> Vec<Rc<View>> {
         let selection = self.selection;
         let reveal = self.blocks.reveal_ranges();
-        self.blocks
+        let mut cache = self.views.borrow_mut();
+        let mut kept = ViewCache::new();
+        let views = self
+            .blocks
             .leaves
             .iter()
             .zip(reveal)
@@ -752,17 +852,49 @@ impl Document {
                 } else {
                     NOTHING_REVEALED
                 };
-                match &leaf.shows {
-                    Shows::Prose { marker } => View::Concealed(layout_line(text, *marker, local)),
-                    Shows::Title { marker, title } => {
-                        View::Concealed(layout_titled(text, *marker, title.as_deref(), local))
-                    }
-                    Shows::Code { fence } => View::Concealed(layout_code(text, *fence, local)),
-                    Shows::Math => View::Concealed(layout_math(text, local)),
-                    Shows::Source => View::Verbatim(text.to_string()),
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                (text, &leaf.shows, local).hash(&mut hasher);
+                let hash = hasher.finish();
+                let is_key =
+                    |k: &ViewKey| k.text == text && k.shows == leaf.shows && k.selection == local;
+                // Found in what's kept already (the same leaf twice), else
+                // moved over from the last call's, else laid out.
+                if let Some((_, view)) = kept
+                    .get(&hash)
+                    .and_then(|same| same.iter().find(|(k, _)| is_key(k)))
+                {
+                    return view.clone();
                 }
+                let cached = cache.get_mut(&hash).and_then(|same| {
+                    let at = same.iter().position(|(k, _)| is_key(k))?;
+                    Some(same.swap_remove(at))
+                });
+                let (key, view) = cached.unwrap_or_else(|| {
+                    let view = Rc::new(match &leaf.shows {
+                        Shows::Prose { marker } => {
+                            View::Concealed(layout_line(text, *marker, local))
+                        }
+                        Shows::Title { marker, title } => {
+                            View::Concealed(layout_titled(text, *marker, title.as_deref(), local))
+                        }
+                        Shows::Code { fence } => View::Concealed(layout_code(text, *fence, local)),
+                        Shows::Math => View::Concealed(layout_math(text, local)),
+                        Shows::Source => View::Verbatim(text.to_string()),
+                    });
+                    let key = ViewKey {
+                        text: text.to_string(),
+                        shows: leaf.shows.clone(),
+                        selection: local,
+                    };
+                    (key, view)
+                });
+                kept.entry(hash).or_default().push((key, view.clone()));
+                view
             })
-            .collect()
+            .collect();
+        // Only what's shown now is kept.
+        *cache = kept;
+        views
     }
 }
 

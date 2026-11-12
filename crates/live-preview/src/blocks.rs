@@ -11,7 +11,7 @@
 //! starts with its opening fence, the closing fence left out (see
 //! [`Shows`]).
 
-use std::ops::Range;
+use std::{cell::Cell, ops::Range};
 
 use unicode_segmentation::UnicodeSegmentation as _;
 
@@ -116,6 +116,7 @@ impl Table {
 
 /// A list level open while the items below are parsed: where its last
 /// item's marker and text start, in columns.
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Level {
     indent: usize,
     content: usize,
@@ -156,7 +157,7 @@ pub struct Leaf {
 }
 
 /// How a leaf shows: what of it is concealed while the caret isn't in it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Shows {
     /// Prose: its inline syntax, and its first `marker` bytes, a list
     /// item's or quote's line marker (0 for other prose).
@@ -177,14 +178,61 @@ pub enum Shows {
     Source,
 }
 
-/// A note split into blocks and leaves. Rebuilt from the source after
-/// every edit.
+/// A note split into blocks and leaves. After an edit, only the blocks
+/// around it are parsed again ([`Blocks::reparse`]): the result is always
+/// what a full parse gives.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Blocks {
     /// Top to bottom.
     pub blocks: Vec<Block>,
     /// Every block's leaves, in source order.
     pub leaves: Vec<Leaf>,
+    /// Where the parse stood as each of its steps began.
+    steps: Vec<Step>,
+    /// The front matter's length, which no step parses.
+    front: usize,
+}
+
+/// Where a parse stood as one of its steps began (each step parses a
+/// block or a few, from one line on): enough for a later parse to take
+/// over from there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Step {
+    /// Where its first line starts.
+    at: usize,
+    context: Context,
+    /// How many blocks and leaves came before it.
+    blocks: usize,
+    leaves: usize,
+    /// The end of the last line it read: what it depends on.
+    read_to: usize,
+}
+
+/// The blocks an edit changed: the blocks `old` were replaced by
+/// `new_len` blocks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Splice {
+    pub old: Range<usize>,
+    pub new_len: usize,
+}
+
+/// Where a parse is: the line it's on, and what it carries from the
+/// lines before.
+struct State {
+    i: usize,
+    context: Context,
+}
+
+/// What a parse carries from one step to the next.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Context {
+    /// A block just ended: a blank line next only separates it.
+    after_block: bool,
+    /// The list levels open.
+    levels: Vec<Level>,
+    /// The step before was a list item: a list item-like line next is
+    /// one, even if it reads as a rule (`- - -`).
+    in_list: bool,
 }
 
 /// One line of the source, without its `\n`.
@@ -200,15 +248,75 @@ impl Line<'_> {
     }
 }
 
-/// The source's lines, with their offsets.
-fn lines(source: &str) -> Vec<Line<'_>> {
-    let mut out = Vec::new();
-    let mut start = 0;
-    for text in source.split('\n') {
-        out.push(Line { start, text });
-        start += text.len() + 1;
+/// The source's lines, with their offsets, remembering the last one read
+/// since [`Lines::read_from`]: what a step depended on.
+struct Lines<'a> {
+    all: Vec<Line<'a>>,
+    last_read: Cell<usize>,
+}
+
+impl<'a> Lines<'a> {
+    fn new(source: &'a str) -> Self {
+        Self::from_line_before(source, 0).0
     }
-    out
+
+    /// The lines from the one before the line starting at `at` (from the
+    /// first, at the top) to the end, and the index of the line at `at`:
+    /// enough to parse on from there, a line before it read as context.
+    fn from_line_before(source: &'a str, at: usize) -> (Self, usize) {
+        let (mut start, i) = match at {
+            0 => (0, 0),
+            _ => (source[..at - 1].rfind('\n').map_or(0, |n| n + 1), 1),
+        };
+        let mut all = Vec::new();
+        for text in source[start..].split('\n') {
+            all.push(Line { start, text });
+            start += text.len() + 1;
+        }
+        let lines = Lines {
+            all,
+            last_read: Cell::new(0),
+        };
+        (lines, i)
+    }
+
+    fn len(&self) -> usize {
+        self.all.len()
+    }
+
+    /// Starts remembering what's read, from line `i`.
+    fn read_from(&self, i: usize) {
+        self.last_read.set(i);
+    }
+
+    fn read(&self, i: usize) {
+        if i > self.last_read.get() {
+            self.last_read.set(i);
+        }
+    }
+
+    fn get(&self, i: usize) -> Option<&Line<'a>> {
+        let line = self.all.get(i)?;
+        self.read(i);
+        Some(line)
+    }
+
+    /// Lines `range`, all of them read.
+    fn slice(&self, range: Range<usize>) -> &[Line<'a>] {
+        if range.end > range.start {
+            self.read(range.end - 1);
+        }
+        &self.all[range]
+    }
+}
+
+impl<'a> std::ops::Index<usize> for Lines<'a> {
+    type Output = Line<'a>;
+
+    fn index(&self, i: usize) -> &Line<'a> {
+        self.read(i);
+        &self.all[i]
+    }
 }
 
 /// A line with nothing but whitespace.
@@ -281,7 +389,7 @@ fn is_fence(text: &str) -> bool {
 /// line after its last. It starts with `$$` (indented 3 spaces at most) and
 /// ends on a line that ends with `$$`, its first or one before a blank
 /// line; with no such line it's prose.
-fn math_block_end(lines: &[Line], i: usize) -> Option<usize> {
+fn math_block_end(lines: &Lines, i: usize) -> Option<usize> {
     let first = lines[i].text;
     let indent = first.bytes().take_while(|&b| b == b' ').count();
     let text = first.trim();
@@ -527,114 +635,329 @@ fn starts_block(text: &str) -> bool {
 impl Blocks {
     /// Splits `source` into blocks and leaves.
     pub fn parse(source: &str) -> Blocks {
-        let lines = lines(source);
+        let lines = Lines::new(source);
         let mut doc = Blocks::default();
         let mut i = 0;
         // Front matter, from a `---` first line to the next `---`, isn't
         // shown: the properties panel edits it. With no leaf, no caret
         // stands in it.
-        let front = md_engine::front_matter(source).len();
-        if front > 0 {
+        doc.front = md_engine::front_matter(source).len();
+        if doc.front > 0 {
             i = lines
+                .all
                 .iter()
-                .position(|l| l.start >= front)
+                .position(|l| l.start >= doc.front)
                 .unwrap_or(lines.len());
         }
-        // A blank line right after a block only separates it from the next.
-        let mut after_block = i > 0;
+        let state = State {
+            i,
+            context: Context {
+                // A blank line right after the front matter only separates
+                // it from the next block.
+                after_block: i > 0,
+                ..Context::default()
+            },
+        };
+        doc.parse_steps(&lines, state, &mut |_, _| false);
+        doc.finish(source);
+        doc
+    }
+
+    /// The blocks of `source`: the text these were parsed from, with
+    /// `removed` bytes at `at` replaced by `inserted` bytes. Only the steps
+    /// that read what changed are parsed again, from the last that read
+    /// nothing at or after `at` up to where the parse meets the old one
+    /// again in the same state. Says which blocks changed.
+    pub fn reparse(
+        mut self,
+        source: &str,
+        at: usize,
+        removed: usize,
+        inserted: usize,
+    ) -> (Blocks, Splice) {
+        let old_len = self.blocks.len();
+        let full = || {
+            let blocks = Blocks::parse(source);
+            let splice = Splice {
+                old: 0..old_len,
+                new_len: blocks.blocks.len(),
+            };
+            (blocks, splice)
+        };
+        // The front matter changed, or the edit is in it: from the top.
+        let front = md_engine::front_matter(source).len();
+        if front != self.front || at < self.front {
+            return full();
+        }
+        // The last step every step before which read only lines ending
+        // before the edit.
+        let mut restart = None;
+        let mut read = 0;
+        for (k, step) in self.steps.iter().enumerate() {
+            if k > 0 && read >= at || step.at > at {
+                break;
+            }
+            restart = Some(k);
+            read = read.max(step.read_to);
+        }
+        let Some(k) = restart else {
+            return full();
+        };
+        // What came before the restart stays as it is; the rest is set
+        // aside, to take back from where the parse meets it.
+        let old_steps = self.steps.split_off(k);
+        let from = &old_steps[0];
+        let old_blocks = self.blocks.split_off(from.blocks);
+        let old_leaves = self.leaves.split_off(from.leaves);
+        let (lines, i) = Lines::from_line_before(source, from.at);
+        let delta = inserted as isize - removed as isize;
+        let shift = |o: usize| shifted(o, delta);
+        let edit_end = at + inserted;
+        // Meeting the old parse: a step past the edit (the line before it
+        // too, which it may read), where an old step was in the same state.
+        let mut met = None;
+        let mut meet = |doc: &Blocks, step: &Step| {
+            let before = source[..step.at.saturating_sub(1)]
+                .rfind('\n')
+                .map_or(0, |n| n + 1);
+            if step.at == 0 || before <= edit_end {
+                return false;
+            }
+            let old_at = shifted(step.at, -delta);
+            let Ok(m) = old_steps.binary_search_by_key(&old_at, |s| s.at) else {
+                return false;
+            };
+            let old = &old_steps[m];
+            let same = old.context == step.context;
+            if same {
+                met = Some((m, doc.blocks.len(), doc.leaves.len()));
+            }
+            same
+        };
+        let state = State {
+            i,
+            context: from.context.clone(),
+        };
+        let (first_block, first_leaf) = (from.blocks, from.leaves);
+        self.front = front;
+        self.parse_steps(&lines, state, &mut meet);
+        // The blocks parsed again, and the old ones they took the place of.
+        let new_region = first_block..self.blocks.len();
+        let old_region = match met {
+            Some((m, blocks, leaves)) => {
+                let old = &old_steps[m];
+                let (block_shift, leaf_shift) = (
+                    blocks as isize - old.blocks as isize,
+                    leaves as isize - old.leaves as isize,
+                );
+                self.steps.extend(old_steps[m..].iter().map(|s| Step {
+                    at: shift(s.at),
+                    read_to: shift(s.read_to),
+                    blocks: shifted(s.blocks, block_shift),
+                    leaves: shifted(s.leaves, leaf_shift),
+                    context: s.context.clone(),
+                }));
+                self.blocks.extend(
+                    old_blocks[old.blocks - first_block..]
+                        .iter()
+                        .map(|b| Block {
+                            kind: b.kind.clone(),
+                            leaves: shifted(b.leaves.start, leaf_shift)
+                                ..shifted(b.leaves.end, leaf_shift),
+                        }),
+                );
+                self.leaves
+                    .extend(old_leaves[old.leaves - first_leaf..].iter().map(|l| Leaf {
+                        source: shift(l.source.start)..shift(l.source.end),
+                        shows: l.shows.clone(),
+                    }));
+                first_block..old.blocks
+            }
+            None => {
+                self.finish(source);
+                first_block..old_len
+            }
+        };
+        let new_region = match met {
+            Some(_) => new_region,
+            None => first_block..self.blocks.len(),
+        };
+        // Of those, the ones at either end that read the same didn't
+        // change: one before the edit where it was, one after it moved.
+        let old_leaves_of =
+            |b: &Block| &old_leaves[b.leaves.start - first_leaf..b.leaves.end - first_leaf];
+        let old_block = |ix: usize| &old_blocks[ix - first_block];
+        let same = |old: &Block, new: &Block, leaf: &dyn Fn(&Leaf, &Leaf) -> bool| {
+            let (old_leaves, new_leaves) = (old_leaves_of(old), &self.leaves[new.leaves.clone()]);
+            old.kind == new.kind
+                && old_leaves.len() == new_leaves.len()
+                && old_leaves.iter().zip(new_leaves).all(|(o, n)| leaf(o, n))
+        };
+        let both = old_region.len().min(new_region.len());
+        let prefix = (0..both)
+            .take_while(|&k| {
+                let before_edit = |o: &Leaf, n: &Leaf| o == n && o.source.end <= at;
+                same(
+                    old_block(old_region.start + k),
+                    &self.blocks[new_region.start + k],
+                    &before_edit,
+                )
+            })
+            .count();
+        let suffix = (0..both - prefix)
+            .take_while(|&k| {
+                let after_edit = |o: &Leaf, n: &Leaf| {
+                    o.source.start >= at + removed
+                        && shift(o.source.start) == n.source.start
+                        && shift(o.source.end) == n.source.end
+                        && o.shows == n.shows
+                };
+                same(
+                    old_block(old_region.end - 1 - k),
+                    &self.blocks[new_region.end - 1 - k],
+                    &after_edit,
+                )
+            })
+            .count();
+        let splice = Splice {
+            old: old_region.start + prefix..old_region.end - suffix,
+            new_len: new_region.len() - prefix - suffix,
+        };
+        (self, splice)
+    }
+
+    /// The note's end is always somewhere to stand.
+    fn finish(&mut self, source: &str) {
+        if self.leaf_at(source.len()).is_none() {
+            self.push(Kind::Empty, source.len()..source.len());
+        }
+    }
+
+    /// Parses `lines` step by step from `state`, until `stop` says to as a
+    /// step begins (that step isn't parsed) or the lines run out.
+    fn parse_steps(
+        &mut self,
+        lines: &Lines,
+        mut state: State,
+        stop: &mut dyn FnMut(&Blocks, &Step) -> bool,
+    ) {
+        while state.i < lines.len() {
+            let mut step = Step {
+                at: lines.all[state.i].start,
+                context: state.context.clone(),
+                blocks: self.blocks.len(),
+                leaves: self.leaves.len(),
+                read_to: 0,
+            };
+            if stop(self, &step) {
+                return;
+            }
+            lines.read_from(state.i);
+            self.parse_step(lines, &mut state);
+            step.read_to = lines.all[lines.last_read.get()].end();
+            self.steps.push(step);
+        }
+    }
+
+    /// Parses one step: a run of blank lines, or a block or a few from
+    /// line `state.i`, moving it on.
+    fn parse_step(&mut self, lines: &Lines, state: &mut State) {
+        let i = state.i;
+        let line = &lines[i];
+        if is_blank(line.text) {
+            // After a block, a run of blank lines keeps its *last* one
+            // as the separator before the next block, and every other
+            // is an empty line to stand on. So Enter at a block's end
+            // puts the caret on the very next line.
+            let run = (i..lines.len())
+                .take_while(|&j| is_blank(lines[j].text))
+                .count();
+            let separators = usize::from(state.context.after_block);
+            for line in lines.slice(i..i + run - separators.min(run)) {
+                self.push(Kind::Empty, line.start..line.start);
+            }
+            state.context.after_block = false;
+            state.context.in_list = false;
+            state.i += run;
+            return;
+        }
+        let context = &mut state.context;
+        context.after_block = true;
         // The list levels open: blank lines between items keep them, any
         // other block closes them.
-        let mut levels = Vec::new();
-        while i < lines.len() {
-            let line = &lines[i];
-            if is_blank(line.text) {
-                // After a block, a run of blank lines keeps its *last* one
-                // as the separator before the next block, and every other
-                // is an empty line to stand on. So Enter at a block's end
-                // puts the caret on the very next line.
-                let run = (i..lines.len())
-                    .take_while(|&j| is_blank(lines[j].text))
-                    .count();
-                let separators = usize::from(after_block);
-                for line in &lines[i..i + run - separators.min(run)] {
-                    doc.push(Kind::Empty, line.start..line.start);
-                }
-                after_block = false;
-                i += run;
-                continue;
-            }
-            after_block = true;
-            if !is_list_item(line.text) {
-                levels.clear();
-            }
-            let next = lines.get(i + 1).map(|l| l.text);
-            // Where a block that runs while `more` holds ends.
-            let run_while = |more: &dyn Fn(&str) -> bool| {
-                (i..lines.len())
-                    .find(|&j| !more(lines[j].text))
-                    .unwrap_or(lines.len())
-            };
-            if let Some(level) = heading_level(line.text) {
-                doc.push(Kind::Heading(level), line.start..line.end());
-                i += 1;
-            } else if let Some(end) = math_block_end(&lines, i) {
-                let source = line.start..lines[end - 1].end();
-                doc.push_leaf(
-                    Kind::Math,
-                    Leaf {
-                        source,
-                        shows: Shows::Math,
-                    },
-                );
-                i = end;
-            } else if let Some(fence) = opening_fence(line.text) {
-                let close_ix = (i + 1..lines.len()).find(|&j| fence.closed_by(lines[j].text));
-                let close = close_ix.map(|c| lines[c].text.trim().to_string());
-                doc.push_code(&lines[i..close_ix.unwrap_or(lines.len())], &fence, close);
-                i = close_ix.map_or(lines.len(), |c| c + 1);
-            } else if is_rule(line.text) {
-                doc.push_source(&lines[i..i + 1]);
-                i += 1;
-            } else if starts_table(line.text, next) {
-                // Its header and delimiter rows, then the rows after.
-                let end = (i + 2..lines.len())
-                    .find(|&j| !is_table_row(lines[j].text))
-                    .unwrap_or(lines.len());
-                doc.push_table(&lines[i..end]);
-                i = end;
-            } else if is_list_item(line.text) {
-                let end = run_while(&is_list_item);
-                doc.push_list(&lines[i..end], &mut levels);
-                i = end;
-            } else if let Some(callout) =
-                callout_title(line.text).filter(|_| i == 0 || !is_quote(lines[i - 1].text))
-            {
-                let end = run_while(&is_quote);
-                doc.push_callout(&lines[i..end], callout);
-                i = end;
-            } else if let Some(quote) = quote_line(line.text) {
-                let kind = Kind::Quote(quote.depth);
-                doc.push_line(kind, line.start..line.end(), quote.marker);
-                i += 1;
-            } else {
-                let end = (i + 1..lines.len())
-                    .find(|&j| {
-                        let next = lines.get(j + 1).map(|l| l.text);
-                        is_blank(lines[j].text)
-                            || starts_block(lines[j].text)
-                            || math_block_end(&lines, j).is_some()
-                            || starts_table(lines[j].text, next)
-                    })
-                    .unwrap_or(lines.len());
-                doc.push(Kind::Paragraph, line.start..lines[end - 1].end());
-                i = end;
-            }
+        if !is_list_item(line.text) {
+            context.levels.clear();
         }
-        // The note's end is always somewhere to stand.
-        if doc.leaf_at(source.len()).is_none() {
-            doc.push(Kind::Empty, source.len()..source.len());
-        }
-        doc
+        // An item a step, so a long list is parsed again an item at a
+        // time; within a list, before anything else a line could be.
+        let list_item = |doc: &mut Self, context: &mut Context| {
+            doc.push_list(lines.slice(i..i + 1), &mut context.levels);
+            context.in_list = true;
+            i + 1
+        };
+        let in_list = std::mem::take(&mut context.in_list);
+        let next = || lines.get(i + 1).map(|l| l.text);
+        state.i = if in_list && is_list_item(line.text) {
+            list_item(self, context)
+        } else if let Some(level) = heading_level(line.text) {
+            self.push(Kind::Heading(level), line.start..line.end());
+            i + 1
+        } else if let Some(end) = math_block_end(lines, i) {
+            let source = line.start..lines[end - 1].end();
+            self.push_leaf(
+                Kind::Math,
+                Leaf {
+                    source,
+                    shows: Shows::Math,
+                },
+            );
+            end
+        } else if let Some(fence) = opening_fence(line.text) {
+            let close_ix = (i + 1..lines.len()).find(|&j| fence.closed_by(lines[j].text));
+            let close = close_ix.map(|c| lines[c].text.trim().to_string());
+            self.push_code(
+                lines.slice(i..close_ix.unwrap_or(lines.len())),
+                &fence,
+                close,
+            );
+            close_ix.map_or(lines.len(), |c| c + 1)
+        } else if is_rule(line.text) {
+            self.push_source(lines.slice(i..i + 1));
+            i + 1
+        } else if starts_table(line.text, next()) {
+            // Its header and delimiter rows, then the rows after.
+            let end = (i + 2..lines.len())
+                .find(|&j| !is_table_row(lines[j].text))
+                .unwrap_or(lines.len());
+            self.push_table(lines.slice(i..end));
+            end
+        } else if is_list_item(line.text) {
+            list_item(self, context)
+        } else if let Some(callout) =
+            callout_title(line.text).filter(|_| i == 0 || !is_quote(lines[i - 1].text))
+        {
+            let end = (i..lines.len())
+                .find(|&j| !is_quote(lines[j].text))
+                .unwrap_or(lines.len());
+            self.push_callout(lines.slice(i..end), callout);
+            end
+        } else if let Some(quote) = quote_line(line.text) {
+            let kind = Kind::Quote(quote.depth);
+            self.push_line(kind, line.start..line.end(), quote.marker);
+            i + 1
+        } else {
+            let end = (i + 1..lines.len())
+                .find(|&j| {
+                    let next = lines.get(j + 1).map(|l| l.text);
+                    is_blank(lines[j].text)
+                        || starts_block(lines[j].text)
+                        || math_block_end(lines, j).is_some()
+                        || starts_table(lines[j].text, next)
+                })
+                .unwrap_or(lines.len());
+            self.push(Kind::Paragraph, line.start..lines[end - 1].end());
+            end
+        };
     }
 
     /// Adds a block of prose with one leaf.
@@ -887,6 +1210,12 @@ impl Blocks {
         leaf.checked_sub(1)
             .map_or(offset, |prev| self.leaves[prev].source.end)
     }
+}
+
+/// `n` moved by `by`.
+fn shifted(n: usize, by: isize) -> usize {
+    n.checked_add_signed(by)
+        .expect("an offset moved within the text")
 }
 
 /// The grapheme boundary after `offset`.

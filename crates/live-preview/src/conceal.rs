@@ -21,7 +21,7 @@ use std::{
 };
 
 /// The caret or selection, as byte offsets into the source.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Selection {
     /// Where the selection started; it stays put as the selection grows.
     pub anchor: usize,

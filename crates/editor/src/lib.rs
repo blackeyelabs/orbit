@@ -25,7 +25,7 @@ use gpui_kit::component::input::{Replace, Search};
 use gpui_kit::component::{ActiveTheme as _, Icon};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use live_preview::blocks::{Align, Block, Item, Kind};
+use live_preview::blocks::{Align, Item, Kind};
 use live_preview::conceal::{Style, Target};
 use live_preview::{Document, View};
 
@@ -209,7 +209,7 @@ pub struct LivePreview {
     /// IME preedit text, as a source range.
     marked_range: Option<Range<usize>>,
     /// The leaf views the current frame renders, for the offset maps.
-    views: Vec<View>,
+    views: Vec<Rc<View>>,
     geometry: Geometry,
     /// The virtualized list, one item per block: only the blocks in view
     /// are laid out.
@@ -369,61 +369,30 @@ impl LivePreview {
     fn edited(&mut self, cx: &mut Context<Self>, edit: impl FnOnce(&mut Document)) {
         // Typing opens it again (see `update_suggestions`).
         self.popup = None;
-        let before: Vec<(Kind, String)> = self.block_texts();
-        let text_before = self.doc.text().len();
-        // The front matter is in no block (the properties panel shows it).
-        let front_before = md_engine::front_matter(self.doc.text()).to_string();
+        let revision = self.doc.revision();
         edit(&mut self.doc);
-        let after = self.block_texts();
-        let changed = before != after
-            || text_before != self.doc.text().len()
-            || front_before != md_engine::front_matter(self.doc.text());
-        if changed {
-            // Only the blocks between the ones that read the same before
-            // and after, from either end, are remeasured.
-            let prefix = before
-                .iter()
-                .zip(&after)
-                .take_while(|(a, b)| a == b)
-                .count();
-            let suffix = before[prefix..]
-                .iter()
-                .rev()
-                .zip(after[prefix..].iter().rev())
-                .take_while(|(a, b)| a == b)
-                .count();
+        // The blocks the edit changed are measured again: only those (an
+        // edit in the front matter, in no block, changes none).
+        if let Some(splice) = self.doc.take_changed() {
+            let (start, end) = (splice.old.start, splice.old.start + splice.new_len);
+            self.list.splice(splice.old, splice.new_len);
+            // A block's gaps depend on its neighbours: the one either side
+            // is measured again too.
+            let blocks = self.list.item_count();
             self.list
-                .splice(prefix..before.len() - suffix, after.len() - prefix - suffix);
+                .remeasure_items(start.saturating_sub(1)..(end + 1).min(blocks));
+        }
+        if self.doc.revision() != revision {
             cx.emit(LivePreviewEvent::Edited);
             self.refresh_find(cx);
         }
         self.after_move(cx);
     }
 
-    /// Each block's kind and source, to compare before and after an edit.
-    fn block_texts(&self) -> Vec<(Kind, String)> {
-        let blocks = self.doc.blocks();
-        blocks
-            .blocks
-            .iter()
-            .map(|b| (b.kind.clone(), self.block_source(b).to_string()))
-            .collect()
-    }
-
-    /// The source a block's leaves span.
-    fn block_source(&self, block: &Block) -> &str {
-        let leaves = &self.doc.blocks().leaves;
-        match (
-            leaves.get(block.leaves.start),
-            block.leaves.end.checked_sub(1).and_then(|l| leaves.get(l)),
-        ) {
-            (Some(first), Some(last)) => &self.doc.text()[first.source.start..last.source.end],
-            _ => "",
-        }
-    }
-
     /// Starts the list over: the blocks were all replaced.
     fn reset_list(&mut self) {
+        // Every block is measured again, so what changed is moot.
+        self.doc.take_changed();
         let blocks = self.doc.blocks().blocks.len();
         let old = self.list.item_count();
         self.list.splice(0..old, blocks);
@@ -433,11 +402,14 @@ impl LivePreview {
     /// remeasure the blocks whose text changed (syntax revealed or hidden).
     fn relayout(&mut self) {
         let views = self.doc.views();
+        // A leaf laid out again (the document keeps the rest as they were)
+        // whose text changed.
         let changed: Vec<usize> = (0..views.len())
             .filter(|&leaf| {
-                self.views
-                    .get(leaf)
-                    .is_none_or(|old| old.display_text() != views[leaf].display_text())
+                self.views.get(leaf).is_none_or(|old| {
+                    !Rc::ptr_eq(old, &views[leaf])
+                        && old.display_text() != views[leaf].display_text()
+                })
             })
             .collect();
         self.views = views;

@@ -150,6 +150,38 @@ Notes on profiling:
 - `perf` can't attach to a running Orbit: it makes itself non-dumpable. Launch Orbit under perf instead.
 - At `perf_event_paranoid = 2`, call graphs need `--user-callchains`.
 
+### Live Preview on a long note (#55) [measured, code]
+
+Live Preview replaced the split view's preview, so typing into `Long.md` (one list of 2,500 items, a block each) was measured again.
+
+What a keystroke cost before, timed in a release build at the Document facade (`live-preview`):
+- **A full parse** of the note: about 0.27 ms. Not the bottleneck.
+- **Every leaf's view laid out again**, on every key *and every caret move*: about 6 ms. The editor asked for all 2,500 views and compared each one's text.
+- **Every block's text copied twice**, to see which blocks changed.
+
+The changes:
+- **Only the blocks around an edit are parsed again** (`Blocks::reparse`). Each parse step records where it began, what it carried from the step before (the list levels open, whether a block just ended, whether it's inside a list), and the last line it read. After an edit, parsing restarts at the last step whose earlier steps read nothing at or after the edit. It stops as soon as it reaches a step past the edit (and past the line before that step) where an old step was in the same state, and the old blocks after it are reused, moved by the edit's length. A list item is one step, so typing in a long list reparses an item or two.
+- **Views are cached by content.** A leaf's view depends only on its text, how it shows, and the selection inside it, so `Document::views` keeps each under a hash of those and hands back the same `Rc` while they're unchanged. The editor compares by pointer first.
+- **The Document says which blocks changed** (`Document::take_changed`) and counts edits (`Document::revision`), so the editor no longer copies every block's text. It remeasures those blocks and the one either side, whose gaps depend on them.
+
+At the facade, a keystroke into `Long.md` went from about 0.15 to 0.09 ms, and a caret move's views from about 6 to 0.15 ms. Tests check that incremental reparsing gives exactly what a full parse does after thousands of random edits (`crates/live-preview/tests/incremental.rs`).
+
+In the app, typing into `Long.md` (`scripts/measure.sh … type:Long.md 20 30`, a fresh fixture vault each run, the two builds alternated, 2026-11-12):
+
+| Build | Run 1 CPU ms/s | Run 2 CPU ms/s | RSS MB |
+|---|---|---|---|
+| before (`e4f0f1f`) | 132.3 | 116.0 | 273–291 |
+| after | 84.7 | 74.7 | 279–287 |
+
+So about a third less CPU. Single runs vary by about 15%, so one before and one after aren't enough to compare: an earlier single pair read 98 against 105.
+
+What remains, from a perf profile of the after build (1,236 samples over the run, so only roughly):
+- GPUI's layout (taffy) and painting of the blocks in view;
+- libc copies;
+- after each save, the search index updating (`md_engine::inline_tags`, tantivy) and `realpath` in the watcher.
+
+The Live Preview document itself barely shows.
+
 ## Optimizations, ranked by impact against effort
 
 | # | Change | Where | Status |
@@ -170,6 +202,7 @@ Notes on profiling:
   - Notes over 2 MB already open as source only.
   - Measure the editor with heaptrack before changing anything.
 - **Typing into a small note** costs about 120 ms/s, mostly the editor's own redraw on each key.
+- **Typing into `Long.md` in Live Preview** costs about 80 ms/s (#55). What's left is GPUI's layout of the blocks in view, and the reindexing after each save.
 - **Caret blinks:** a note open and idle costs about 14 ms/s. Caching the sidebar and right panel too could cut that further.
 - **Outside changes:** fixes 2 and 3 would help when many notes change outside Orbit at once (a sync, a git pull).
 
