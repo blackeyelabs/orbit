@@ -17,10 +17,11 @@ use gpui_kit::component::Sizable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use md_engine::{Property, PropertyEdit, PropertyType, Value, front_matter, properties};
-use orbit_core::{Vault, same_tag};
+use orbit_core::{PropertyTypes, Vault, VaultPath, same_tag};
 
 actions!(
     properties,
@@ -53,12 +54,18 @@ pub enum PropertiesEvent {
     Edit(PropertyEdit),
     /// "Edit in Source" for the key whose lines start at this offset.
     EditInSource(usize),
+    /// A type was chosen for the key, by hand.
+    SetType { key: String, kind: PropertyType },
 }
 
 impl EventEmitter<PropertiesEvent> for PropertiesPanel {}
 
 pub struct PropertiesPanel {
     vault: Arc<Vault>,
+    /// The note the properties are of, whose types apply.
+    note: VaultPath,
+    /// The vault's property types as of the rows shown.
+    types_seen: u64,
     rows: Vec<Row>,
     /// The front matter the rows show, to see when it changed.
     shown: Option<String>,
@@ -109,9 +116,11 @@ struct Chips {
 }
 
 impl PropertiesPanel {
-    pub fn new(vault: Arc<Vault>) -> Self {
+    pub fn new(vault: Arc<Vault>, note: VaultPath) -> Self {
         PropertiesPanel {
+            types_seen: vault.property_types_revision(),
             vault,
+            note,
             rows: Vec::new(),
             shown: None,
             adding: None,
@@ -120,21 +129,26 @@ impl PropertiesPanel {
         }
     }
 
-    /// Shows the front matter of `source`, if it changed since last shown.
+    /// Shows the front matter of `source`, if it changed since last
+    /// shown, or a property type was set since (here or in another note).
     pub fn sync(&mut self, source: &str, window: &mut Window, cx: &mut Context<Self>) {
         let front = front_matter(source);
-        if self.shown.as_deref() == Some(front) {
+        let types_same = self.types_seen == self.vault.property_types_revision();
+        if self.shown.as_deref() == Some(front) && types_same {
             return;
         }
         self.shown = Some(front.to_string());
+        self.types_seen = self.vault.property_types_revision();
+        let types = self.vault.property_types(&self.note);
         let read = properties(source);
         self.rows.truncate(read.len());
         for (ix, property) in read.into_iter().enumerate() {
-            let shape = shape_of(&property);
+            let kind = kind_of(&property, &types);
+            let shape = shape_of(&property, kind);
             match self.rows.get_mut(ix) {
-                Some(row) if row.shape == shape => row.show(property, window, cx),
+                Some(row) if row.shape == shape => row.show(property, kind, window, cx),
                 _ => {
-                    let row = self.new_row(ix, property, shape, window, cx);
+                    let row = self.new_row(ix, property, kind, shape, window, cx);
                     if ix < self.rows.len() {
                         self.rows[ix] = row;
                     } else {
@@ -149,6 +163,12 @@ impl PropertiesPanel {
             row.focus_value(window, cx);
         }
         cx.notify();
+    }
+
+    /// The note the properties are of: it moved.
+    pub fn set_note(&mut self, note: VaultPath) {
+        self.note = note;
+        self.shown = None;
     }
 
     /// Shows the front matter again on the next [`Self::sync`], all of
@@ -170,6 +190,7 @@ impl PropertiesPanel {
         &mut self,
         ix: usize,
         property: Property,
+        kind: Option<PropertyType>,
         shape: Shape,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -223,7 +244,6 @@ impl PropertiesPanel {
             }
             Shape::Source => Editor::Source,
         };
-        let kind = property.guessed_type();
         let warning = kind.is_some_and(|k| !k.fits(&property.value));
         Row {
             property,
@@ -257,7 +277,7 @@ impl PropertiesPanel {
             return;
         };
         if let (Editor::Field(field), Shape::Field(shape)) = (&row.editor, row.shape) {
-            let typed = typed(shape, &field.read(cx).value());
+            let typed = typed(row.kind, shape, &field.read(cx).value());
             row.warning = row.kind.is_some_and(|k| !k.fits(&typed));
             cx.notify();
         }
@@ -274,7 +294,7 @@ impl PropertiesPanel {
         if let (Editor::Field(field), Shape::Field(shape)) = (&row.editor, row.shape) {
             let text = field.read(cx).value();
             if text != field_text(&row.property.value) {
-                let value = typed(shape, &text);
+                let value = typed(row.kind, shape, &text);
                 self.set(ix, value, cx);
             }
         }
@@ -286,8 +306,18 @@ impl PropertiesPanel {
     }
 
     fn toggle(&mut self, ix: usize, cx: &mut Context<Self>) {
-        if let Some(Value::Checkbox(on)) = self.rows.get(ix).map(|r| &r.property.value) {
-            self.set(ix, Value::Checkbox(!on), cx);
+        match self.rows.get(ix).map(|r| &r.property.value) {
+            Some(Value::Checkbox(on)) => self.set(ix, Value::Checkbox(!on), cx),
+            // An empty checkbox is unticked.
+            Some(Value::Text(s)) if s.is_empty() => self.set(ix, Value::Checkbox(true), cx),
+            _ => {}
+        }
+    }
+
+    fn set_type(&mut self, ix: usize, kind: PropertyType, cx: &mut Context<Self>) {
+        if let Some(row) = self.rows.get(ix) {
+            let key = row.property.key.clone();
+            cx.emit(PropertiesEvent::SetType { key, kind });
         }
     }
 
@@ -462,7 +492,13 @@ impl PropertiesPanel {
 
 impl Row {
     /// Shows `property`, read again, in the fields it already has.
-    fn show(&mut self, property: Property, window: &mut Window, cx: &mut App) {
+    fn show(
+        &mut self,
+        property: Property,
+        kind: Option<PropertyType>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
         let set = |input: &Entity<InputState>, text: String, window: &mut Window, cx: &mut App| {
             if input.read(cx).value() != text {
                 input.update(cx, |input, cx| input.set_value(text, window, cx));
@@ -472,7 +508,7 @@ impl Row {
         if let Editor::Field(field) = &self.editor {
             set(field, field_text(&property.value), window, cx);
         }
-        self.kind = property.guessed_type();
+        self.kind = kind;
         self.warning = self.kind.is_some_and(|k| !k.fits(&property.value));
         self.property = property;
     }
@@ -488,8 +524,8 @@ impl Row {
 
 /// How a property's value is edited: by its type when the value fits it,
 /// else as the value is written, so nothing is rewritten unasked.
-fn shape_of(property: &Property) -> Shape {
-    let Some(kind) = property.guessed_type() else {
+fn shape_of(property: &Property, kind: Option<PropertyType>) -> Shape {
+    let Some(kind) = kind else {
         return Shape::Source;
     };
     let kind = if kind.fits(&property.value) {
@@ -507,6 +543,16 @@ fn shape_of(property: &Property) -> Shape {
     }
 }
 
+/// A property's type: one set by hand, else guessed from its value.
+/// `tags` and `aliases` are always theirs.
+fn kind_of(property: &Property, types: &PropertyTypes) -> Option<PropertyType> {
+    let guessed = property.guessed_type()?;
+    if guessed.is_fixed() {
+        return Some(guessed);
+    }
+    types.get(&property.key).or(Some(guessed))
+}
+
 /// A value field's text for `value`.
 fn field_text(value: &Value) -> String {
     match value {
@@ -517,17 +563,36 @@ fn field_text(value: &Value) -> String {
     }
 }
 
-/// What's typed in a field for a value of type `kind`, as that value.
-fn typed(kind: PropertyType, text: &str) -> Value {
+/// What's typed in a field as a value: of the row's type `kind` if it
+/// fits, else of the field's own `shape` if it fits that, else text.
+fn typed(kind: Option<PropertyType>, shape: PropertyType, text: &str) -> Value {
     let text = text.trim().to_string();
     if text.is_empty() {
         return Value::Text(text);
     }
+    let as_kind = |kind: PropertyType| match kind {
+        PropertyType::Number => Value::Number(text.clone()),
+        PropertyType::Date => Value::Date(text.clone()),
+        PropertyType::DateTime => Value::DateTime(text.clone()),
+        _ => Value::Text(text.clone()),
+    };
+    kind.into_iter()
+        .chain([shape])
+        .map(|k| (k, as_kind(k)))
+        .find(|(k, value)| k.fits(value))
+        .map_or_else(|| Value::Text(text.clone()), |(_, value)| value)
+}
+
+fn type_label(kind: PropertyType) -> &'static str {
     match kind {
-        PropertyType::Number => Value::Number(text),
-        PropertyType::Date => Value::Date(text),
-        PropertyType::DateTime => Value::DateTime(text),
-        _ => Value::Text(text),
+        PropertyType::Text => "Text",
+        PropertyType::List => "List",
+        PropertyType::Number => "Number",
+        PropertyType::Checkbox => "Checkbox",
+        PropertyType::Date => "Date",
+        PropertyType::DateTime => "Date & time",
+        PropertyType::Tags => "Tags",
+        PropertyType::Aliases => "Aliases",
     }
 }
 
@@ -637,7 +702,7 @@ impl PropertiesPanel {
             .group("property")
             .gap_2()
             .min_h(rems(1.75))
-            .child(Icon::new(icon(row.kind)).small().text_color(muted))
+            .child(self.render_type(ix, cx))
             .child(name)
             .child(div().flex_1().min_w_0().child(value))
             .when(row.warning, |this| {
@@ -666,6 +731,43 @@ impl PropertiesPanel {
                         .tooltip("Remove property")
                         .on_click(cx.listener(move |this, _, _, cx| this.remove(ix, cx))),
                 )
+            })
+            .into_any_element()
+    }
+
+    /// The row's type icon: for a key whose type can be set, a menu of
+    /// the types, the current one ticked.
+    fn render_type(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+        let kind = self.rows[ix].kind;
+        if kind.is_none_or(PropertyType::is_fixed) {
+            let muted = cx.theme().muted_foreground;
+            return Icon::new(icon(kind))
+                .small()
+                .text_color(muted)
+                .into_any_element();
+        }
+        let panel = cx.entity().downgrade();
+        Button::new(("property-type", ix))
+            .ghost()
+            .xsmall()
+            .icon(icon(kind))
+            .tooltip("Property type")
+            .dropdown_menu(move |mut menu, _, _| {
+                // Every type but a key's own (`tags`, `aliases`).
+                for choice in PropertyType::ALL.into_iter().filter(|t| !t.is_fixed()) {
+                    let panel = panel.clone();
+                    menu = menu.item(
+                        PopupMenuItem::new(type_label(choice))
+                            .icon(icon(Some(choice)))
+                            .checked(kind == Some(choice))
+                            .on_click(move |_, _, cx| {
+                                panel
+                                    .update(cx, |panel, cx| panel.set_type(ix, choice, cx))
+                                    .ok();
+                            }),
+                    );
+                }
+                menu
             })
             .into_any_element()
     }
@@ -802,6 +904,17 @@ impl PropertiesPanel {
     pub(crate) fn click_checkbox(&mut self, key: &str, cx: &mut Context<Self>) {
         let ix = self.rows.iter().position(|r| r.property.key == key);
         self.toggle(ix.expect("the key has a row"), cx);
+    }
+
+    /// Chooses `kind` in `key`'s type menu.
+    pub(crate) fn click_type(&mut self, key: &str, kind: PropertyType, cx: &mut Context<Self>) {
+        let ix = self.rows.iter().position(|r| r.property.key == key);
+        self.set_type(ix.expect("the key has a row"), kind, cx);
+    }
+
+    /// The type `key`'s row has.
+    pub(crate) fn kind(&self, key: &str) -> Option<PropertyType> {
+        self.rows.iter().find(|r| r.property.key == key)?.kind
     }
 
     pub(crate) fn modified(&self) -> Option<SharedString> {

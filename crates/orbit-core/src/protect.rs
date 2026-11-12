@@ -413,8 +413,10 @@ impl Vault {
     /// Makes the unlocked protected folder at `folder` a plain folder again,
     /// everything in it in plain text, and deletes its encrypted storage.
     pub fn remove_protection(&self, folder: &VaultPath) -> Result<(), Error> {
+        // Read while it's still protected, to join the vault's after.
+        let types = self.read_types(folder).unwrap_or_default();
         match self.fs.unprotect(folder) {
-            Ok(()) => {}
+            Ok(()) => self.move_types_to_vault(folder, types),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 return Err(Error::AlreadyExists(folder.clone()));
             }

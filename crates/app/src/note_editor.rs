@@ -22,7 +22,9 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use md_engine::{Format, Heading, PropertyEdit, format_edit, headings, property_edit, word_count};
+use md_engine::{
+    Format, Heading, PropertyEdit, PropertyType, format_edit, headings, property_edit, word_count,
+};
 use orbit_core::{
     DiskCheck, EntryKind, OpenNote, Scroll, Trouble, Vault, VaultPath, Zeroizing, is_large_note,
     is_plain_text_note,
@@ -285,7 +287,7 @@ impl NoteEditor {
             }
         });
         let properties = cx.new(|cx| {
-            let mut panel = PropertiesPanel::new(vault.clone());
+            let mut panel = PropertiesPanel::new(vault.clone(), path.clone());
             panel.set_modified(vault.modified(&path), cx);
             panel
         });
@@ -295,6 +297,7 @@ impl NoteEditor {
             |this, _, event, window, cx| match event {
                 PropertiesEvent::Edit(edit) => this.edit_property(edit, window, cx),
                 PropertiesEvent::EditInSource(offset) => this.edit_in_source(*offset, window, cx),
+                PropertiesEvent::SetType { key, kind } => this.set_type(key, *kind, window, cx),
             },
         );
         let title_focus = title.read(cx).focus_handle(cx);
@@ -412,7 +415,8 @@ impl NoteEditor {
     fn follow_path(&mut self, path: VaultPath, cx: &mut Context<Self>) {
         let was_source_only = self.is_source_only();
         self.links.set_note(path.clone());
-        self.path = path;
+        self.path = path.clone();
+        self.properties.update(cx, |panel, _| panel.set_note(path));
         self.refresh_modified(cx);
         // A new extension can make it source only, or no longer.
         let mode = if was_source_only != self.is_source_only() {
@@ -990,6 +994,32 @@ impl NoteEditor {
             .update(cx, |panel, cx| panel.sync(&text, window, cx));
     }
 
+    /// A type chosen in the properties panel: saved for the vault (or
+    /// the note's protected folder), and the value converted to it if
+    /// that loses nothing.
+    fn set_type(
+        &mut self,
+        key: &str,
+        kind: PropertyType,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Err(e) = self.vault.set_property_type(&self.path, key, kind) {
+            tracing::warn!(error = e.kind_name(), "couldn't save a property type");
+            return;
+        }
+        let value = md_engine::properties(&self.text)
+            .into_iter()
+            .find(|p| p.key == key)
+            .and_then(|p| md_engine::convert(&p.value, kind));
+        if let Some(value) = value {
+            let key = key.to_string();
+            self.edit_property(&PropertyEdit::Set { key, value }, window, cx);
+        }
+        self.properties.update(cx, |panel, _| panel.forget_shown());
+        self.sync_properties(window, cx);
+    }
+
     /// "Edit in Source" in the properties panel: Source mode, with the
     /// caret on the key's line.
     fn edit_in_source(&mut self, offset: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -1519,5 +1549,102 @@ mod tests {
         );
         let shown = cx.update(|_, cx| editor.read(cx).properties.read(cx).modified());
         assert!(shown.unwrap().starts_with("2026-01-15 "));
+    }
+
+    #[gpui::test]
+    fn a_type_chosen_in_the_panel_is_saved_and_other_notes_follow(cx: &mut TestAppContext) {
+        use md_engine::PropertyType;
+        let note = "---\ncount: \"5\"\nlabel: abc\n---\nBody";
+        let (editor, cx, dir) = open_with(
+            cx,
+            "A.md",
+            note,
+            |_| {},
+            |vault| {
+                std::fs::write(vault.root().join("B.md"), "---\ncount: 7\nlabel: x\n---\n")
+                    .unwrap();
+            },
+        );
+        // Another note, open already.
+        let other = cx.update(|window, cx| {
+            let vault = editor.read(cx).vault.clone();
+            let path = VaultPath::new("B.md").unwrap();
+            let (note, text) = vault.open_note(&path).unwrap();
+            cx.new(|cx| NoteEditor::new(vault, note, text, window, cx))
+        });
+        let kind = |e: &Entity<NoteEditor>, key: &str, cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                e.update(cx, |e, cx| e.sync_properties(window, cx));
+                e.read(cx).properties.read(cx).kind(key)
+            })
+        };
+        assert_eq!(kind(&editor, "count", cx), Some(PropertyType::Text));
+        assert_eq!(kind(&other, "label", cx), Some(PropertyType::Text));
+        // Text `"5"` as a number: converted, as nothing is lost.
+        click(&editor, cx, |panel, _, cx| {
+            panel.click_type("count", PropertyType::Number, cx)
+        });
+        assert_eq!(text_of(&editor, cx), note.replace("\"5\"", "5"));
+        assert_eq!(kind(&editor, "count", cx), Some(PropertyType::Number));
+        // `abc` can't be a number: left as written, flagged.
+        click(&editor, cx, |panel, _, cx| {
+            panel.click_type("label", PropertyType::Number, cx)
+        });
+        assert_eq!(text_of(&editor, cx), note.replace("\"5\"", "5"));
+        assert_eq!(rows(&editor, cx)[1], ("label".into(), "abc".into(), true));
+        assert_eq!(
+            kind(&other, "label", cx),
+            Some(PropertyType::Number),
+            "the other note follows"
+        );
+        let saved = std::fs::read_to_string(dir.path().join(".vault/types.json")).unwrap();
+        assert!(saved.contains("\"count\": \"number\""), "{saved}");
+        // Typed into the flagged field, a number is written as one.
+        focus_value(&editor, "label", cx);
+        cx.simulate_keystrokes("ctrl-a");
+        cx.simulate_input("12");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(text_of(&editor, cx).contains("label: 12\n"));
+        assert!(!rows(&editor, cx)[1].2, "it fits now");
+    }
+
+    #[gpui::test]
+    fn an_empty_property_set_to_checkbox_is_ticked_by_a_click(cx: &mut TestAppContext) {
+        use md_engine::PropertyType;
+        let (editor, cx, _dir) = open(cx, "A.md", "---\ndone:\n---\n");
+        click(&editor, cx, |panel, _, cx| {
+            panel.click_type("done", PropertyType::Checkbox, cx)
+        });
+        click(&editor, cx, |panel, _, cx| panel.click_checkbox("done", cx));
+        assert_eq!(text_of(&editor, cx), "---\ndone: true\n---\n");
+    }
+
+    #[gpui::test]
+    fn tags_and_aliases_keep_their_types(cx: &mut TestAppContext) {
+        use md_engine::PropertyType;
+        let note = "---\ntags: [a]\naliases: [b]\n---\n";
+        let (editor, cx, _dir) = open_with(
+            cx,
+            "A.md",
+            note,
+            |_| {},
+            |vault| {
+                let a = VaultPath::new("A.md").unwrap();
+                vault
+                    .set_property_type(&a, "tags", PropertyType::Text)
+                    .unwrap();
+                vault
+                    .set_property_type(&a, "aliases", PropertyType::Number)
+                    .unwrap();
+            },
+        );
+        let panel = cx.update(|_, cx| editor.read(cx).properties.clone());
+        let kinds =
+            cx.update(|_, cx| (panel.read(cx).kind("tags"), panel.read(cx).kind("aliases")));
+        assert_eq!(
+            kinds,
+            (Some(PropertyType::Tags), Some(PropertyType::Aliases))
+        );
     }
 }

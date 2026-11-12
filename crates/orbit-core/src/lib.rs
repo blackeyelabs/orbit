@@ -9,6 +9,7 @@ mod excerpt;
 mod fuzzy;
 mod index;
 mod open_note;
+mod property_types;
 mod protect;
 mod recent;
 mod search;
@@ -27,6 +28,7 @@ pub use protect::{
 pub use excerpt::Snippet;
 pub use fuzzy::{CommandMatch, NoteMatch, command_query, match_commands};
 pub use index::{Backlink, Mention};
+pub use property_types::PropertyTypes;
 pub use recent::{RecentVault, RecentVaults};
 pub use search::{IndexingProgress, SearchResult, SearchResults};
 pub use session::{Scroll, Session, SessionTab};
@@ -220,6 +222,8 @@ pub struct Vault {
     index: Arc<Mutex<VaultIndex>>,
     /// Vault search, told of changes the same way.
     search: Arc<search::Search>,
+    /// Goes up as property types are set.
+    types_revision: std::sync::atomic::AtomicU64,
 }
 
 impl Vault {
@@ -252,6 +256,7 @@ impl Vault {
             _lock: lock,
             index: Arc::default(),
             search: Arc::default(),
+            types_revision: Default::default(),
         })
     }
 

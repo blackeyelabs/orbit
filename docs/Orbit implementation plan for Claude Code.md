@@ -168,7 +168,7 @@ A whole-vault lock uses the same container with the vault root as its scope.
 
 **Still visible to someone with the disk:** that encrypted areas exist, blob counts and approximate sizes (padding can reduce this). State this limit plainly in the app.
 
-**Leak checklist.** Protected notes must never reach: the on-disk index or cache, temp or swap files and crash dumps (disable core dumps, best-effort `mlock`), undo history after lock, recents lists, thumbnails, or the clipboard without a warning. Add auto-lock on idle, suspend and screen lock.
+**Leak checklist.** Protected notes must never reach: the on-disk index or cache, temp or swap files and crash dumps (disable core dumps, best-effort `mlock`), undo history after lock, recents lists, thumbnails, or the clipboard without a warning; nor may a property type set in a protected note reach the vault's plain `types.json` (ADR 0010). Add auto-lock on idle, suspend and screen lock.
 
 **Optional later:** a quick-unlock PIN that releases a key held in the OS keyring, valid only on that device. **Open:** whether to offer it at all.
 

@@ -68,6 +68,18 @@ impl Property {
 }
 
 impl PropertyType {
+    /// Every type.
+    pub const ALL: [PropertyType; 8] = [
+        PropertyType::Text,
+        PropertyType::List,
+        PropertyType::Number,
+        PropertyType::Checkbox,
+        PropertyType::Date,
+        PropertyType::DateTime,
+        PropertyType::Tags,
+        PropertyType::Aliases,
+    ];
+
     /// The type a value is written as, whatever its key.
     pub fn of_value(value: &Value) -> Option<Self> {
         Some(match value {
@@ -87,7 +99,8 @@ impl PropertyType {
         match (self, value) {
             (_, Value::Unsupported) => false,
             (_, Value::Text(s)) if s.is_empty() => true,
-            (PropertyType::Text, Value::Text(_))
+            // A date is a string to YAML, so text too.
+            (PropertyType::Text, Value::Text(_) | Value::Date(_) | Value::DateTime(_))
             | (PropertyType::List, Value::List(_))
             | (PropertyType::Checkbox, Value::Checkbox(_))
             | (PropertyType::Aliases, Value::Text(_) | Value::List(_)) => true,
@@ -99,6 +112,69 @@ impl PropertyType {
             _ => false,
         }
     }
+
+    /// The type's name as Obsidian's `types.json` writes it.
+    pub fn name(self) -> &'static str {
+        match self {
+            PropertyType::Text => "text",
+            PropertyType::List => "multitext",
+            PropertyType::Number => "number",
+            PropertyType::Checkbox => "checkbox",
+            PropertyType::Date => "date",
+            PropertyType::DateTime => "datetime",
+            PropertyType::Tags => "tags",
+            PropertyType::Aliases => "aliases",
+        }
+    }
+
+    /// The type a `types.json` name stands for, if it's one of these.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|t| t.name() == name)
+    }
+
+    /// Whether the type is a key's own, never set by hand: `tags`'s and
+    /// `aliases`'s.
+    pub fn is_fixed(self) -> bool {
+        matches!(self, PropertyType::Tags | PropertyType::Aliases)
+    }
+}
+
+/// `value` as a value of type `to`, when it doesn't fit `to` but can be
+/// written as one without losing anything: `5` text as a number, `a` as
+/// a list of one, a date as midnight that day. `None` when it fits
+/// already, or only a lossy change would make it.
+pub fn convert(value: &Value, to: PropertyType) -> Option<Value> {
+    if to.fits(value) {
+        return None;
+    }
+    let text = match value {
+        Value::Text(s) | Value::Number(s) | Value::Date(s) | Value::DateTime(s) => s.clone(),
+        Value::Checkbox(on) => on.to_string(),
+        Value::List(items) if items.len() == 1 => items[0].clone(),
+        Value::List(_) | Value::Unsupported => return None,
+    };
+    let converted = match to {
+        PropertyType::Text => Value::Text(text),
+        PropertyType::List | PropertyType::Tags | PropertyType::Aliases => {
+            if matches!(value, Value::List(_)) {
+                return None;
+            }
+            Value::List(vec![text])
+        }
+        // Only as written the way YAML writes it back: `05`, `1.50` or
+        // `1e3` would read as other text.
+        PropertyType::Number if is_plain_number(&text) => Value::Number(text),
+        PropertyType::Number => return None,
+        PropertyType::Checkbox => match text.as_str() {
+            "true" => Value::Checkbox(true),
+            "false" => Value::Checkbox(false),
+            _ => return None,
+        },
+        PropertyType::Date => Value::Date(text),
+        PropertyType::DateTime if is_date(&text) => Value::DateTime(format!("{text}T00:00")),
+        PropertyType::DateTime => Value::DateTime(text),
+    };
+    to.fits(&converted).then_some(converted)
 }
 
 /// A change to one key.
@@ -585,6 +661,20 @@ fn guess_string(text: String) -> Value {
 /// Text YAML reads as a number (not `inf` or `nan`, which it doesn't).
 fn is_number(text: &str) -> bool {
     text.parse::<f64>().is_ok() && !text.to_ascii_lowercase().contains(['i', 'n'])
+}
+
+/// A number written plainly: no sign but `-`, no leading zeros, no
+/// trailing zeros after the point, no exponent, and few enough digits
+/// to be read back exactly.
+fn is_plain_number(text: &str) -> bool {
+    let digits = text.strip_prefix('-').unwrap_or(text);
+    let (whole, fraction) = digits.split_once('.').unwrap_or((digits, ""));
+    let all_digits = |s: &str| !s.is_empty() && s.bytes().all(|c| c.is_ascii_digit());
+    all_digits(whole)
+        && (whole == "0" || !whole.starts_with('0'))
+        && (fraction.is_empty() || (all_digits(fraction) && !fraction.ends_with('0')))
+        && !digits.ends_with('.')
+        && whole.len() + fraction.len() <= 15
 }
 
 /// `dddd-dd-dd`.

@@ -302,3 +302,66 @@ fn a_list_with_comments_between_its_items_is_unsupported() {
     assert_eq!(props[0].value, Value::Unsupported);
     assert_eq!(props[1].value, Value::Number("1".into()));
 }
+
+#[test]
+fn types_are_named_as_obsidian_saves_them() {
+    use PropertyType::*;
+    let names: Vec<&str> = PropertyType::ALL.iter().map(|t| t.name()).collect();
+    assert_eq!(
+        names,
+        [
+            "text",
+            "multitext",
+            "number",
+            "checkbox",
+            "date",
+            "datetime",
+            "tags",
+            "aliases"
+        ]
+    );
+    assert_eq!(PropertyType::from_name("datetime"), Some(DateTime));
+    assert_eq!(PropertyType::from_name("unknown"), None);
+}
+
+#[test]
+fn a_value_is_converted_to_a_new_type_only_when_nothing_is_lost() {
+    use PropertyType::*;
+    let num = |s: &str| Value::Number(s.into());
+    for (value, to, want) in [
+        (text("5"), Number, Some(num("5"))),
+        (text("TRUE"), Checkbox, None),
+        (text("true"), Checkbox, Some(Value::Checkbox(true))),
+        (
+            text("2026-02-03"),
+            Date,
+            Some(Value::Date("2026-02-03".into())),
+        ),
+        (text("a"), List, Some(list(&["a"]))),
+        (num("7"), List, Some(list(&["7"]))),
+        (list(&["9"]), Number, Some(num("9"))),
+        (list(&["a", "b"]), Text, None),
+        (num("5"), Text, Some(text("5"))),
+        (Value::Checkbox(false), Text, Some(text("false"))),
+        (
+            Value::Date("2026-02-03".into()),
+            DateTime,
+            Some(Value::DateTime("2026-02-03T00:00".into())),
+        ),
+        (Value::DateTime("2026-02-03T10:00".into()), Date, None),
+        (text("abc"), Number, None),
+        // Text YAML would read as another number, or round: kept as text.
+        (text("05"), Number, None),
+        (text("1.50"), Number, None),
+        (text("1e3"), Number, None),
+        (text("+5"), Number, None),
+        (text("12345678901234567890"), Number, None),
+        (text("-0.25"), Number, Some(num("-0.25"))),
+        // Already fits: nothing to change.
+        (num("1"), Number, None),
+        (text(""), Number, None),
+        (Value::Date("2026-02-03".into()), Text, None),
+    ] {
+        assert_eq!(md_engine::convert(&value, to), want, "{value:?} to {to:?}");
+    }
+}

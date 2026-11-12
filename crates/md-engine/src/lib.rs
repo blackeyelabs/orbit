@@ -15,7 +15,7 @@ pub use links::{
     split_target, typed_link,
 };
 pub use properties::{
-    Property, PropertyEdit, PropertyError, PropertyType, Value, properties, property_edit,
+    Property, PropertyEdit, PropertyError, PropertyType, Value, convert, properties, property_edit,
 };
 pub use tags::inline_tags;
 
